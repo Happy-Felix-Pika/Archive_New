@@ -1,0 +1,44 @@
+{
+  "id": "duplicates",
+  "name": "Пошук дублікатів",
+  "version": "1.2.0",
+  "description": "Перцептивні хеші, перевірка схожих файлів, пошук дублікатів по всьому архіву",
+  "author": "Felix",
+  "core_api_version": 1,
+  "min_core_version": "1.0.0",
+  "dependencies": {
+    "furry": "1.0.0"
+  },
+  "permissions": [
+    "database",
+    "storage",
+    "files"
+  ],
+  "backend": "backend",
+  "table_prefix": "duplicate",
+  "menu": [
+    {
+      "id": "pending",
+      "label": {
+        "uk": "На перевірку",
+        "ru": "На проверку",
+        "en": "Review"
+      },
+      "icon": "⏳",
+      "order": 25,
+      "page_id": "pending",
+      "admin_only": true
+    }
+  ],
+  "pages": [],
+  "legacy_tables": [
+    "duplicate_ignore_pairs",
+    "duplicate_scan_results",
+    "file_phash",
+    "pending_duplicates",
+    "rejected_duplicates"
+  ],
+  "scripts": [
+    "static/contrib.js"
+  ]
+}

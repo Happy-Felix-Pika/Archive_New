@@ -1,0 +1,15 @@
+{
+  "id": "inkbunny",
+  "name": "Inkbunny",
+  "version": "1.0.0",
+  "description": "Джерело Inkbunny для вкладки «Онлайн»: пошук, серії, чуже улюблене",
+  "author": "Felix",
+  "core_api_version": 1,
+  "min_core_version": "1.0.0",
+  "dependencies": {"online": "1.0.0"},
+  "permissions": [],
+  "backend": "backend",
+  "table_prefix": "inkbunny_",
+  "menu": [],
+  "pages": []
+}
