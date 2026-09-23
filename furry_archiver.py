@@ -1750,7 +1750,11 @@ class FurryArchiver:
                     matched_folder_actual = dup[4] if len(dup) > 4 else ''
                     os.makedirs(PENDING_DIR, exist_ok=True)
                     pending_path = os.path.join(PENDING_DIR, fname)
-                    os.replace(fpath, pending_path)
+                    # shutil.move, а не os.replace: у контейнері тимчасова
+                    # тека і /data — РІЗНІ файлові системи, і os.replace
+                    # падає з "Invalid cross-device link". shutil.move у
+                    # такому разі копіює й видаляє оригінал.
+                    shutil.move(fpath, pending_path)
                     self.tracker.add_pending(
                         artist_id=artist_id, post_id=post_id, source=source,
                         post_url=post_url, md5_hash=md5, phash_val=phash,
