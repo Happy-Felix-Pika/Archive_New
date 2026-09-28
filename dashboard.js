@@ -1041,27 +1041,16 @@ async function dupTabResolve(resultId, action) {
   }
 }
 
-async function loadPending() {
-  const list = document.getElementById('pending-list');
-  const counter = document.getElementById('pending-count');
-  list.innerHTML = `<div style="color:var(--muted);font-family:var(--mono);font-size:13px;padding:20px 0">${t('common.loading')}</div>`;
+// ── Черга на перевірку ────────────────────────────────────────────────
+// Вантажиться сторінками. Раніше бралась уся черга одним запитом і
+// малювалась цілком; на великій черзі це вішало браузер ще до того,
+// як користувач встигав щось натиснути.
+const PENDING_PAGE = 20;
+let _pendingOffset = 0;
+let _pendingTotal  = 0;
+let _pendingBusy   = false;
 
-  const data = await fetch(`${API}/api/pending`).then(r=>r.json()).catch(()=>[]);
-  updatePendingBadge(data.length);
-  counter.textContent = `${data.length} ${t('pending.countlabel')}`;
-  document.getElementById('btn-reject-all').style.display = data.length ? '' : 'none';
-  { const b = document.getElementById('btn-reject-near'); if (b) b.style.display = data.length ? '' : 'none'; }
-
-  if (!data.length) {
-    list.innerHTML = `<div class="pending-empty">
-      <div class="pending-empty-icon">✓</div>
-      <div class="pending-empty-title">${t('pending.allclean')}</div>
-      <div class="pending-empty-sub">${t('pending.nodupes')}</div>
-    </div>`;
-    return;
-  }
-
-  list.innerHTML = data.map(item => {
+function pendingCardHtml(item) {
     const d   = item.hamming_distance ?? '?';
     const cls = d === 0 ? 'h0' : d <= 4 ? 'hlo' : 'hhi';
     const lbl = d === 0 ? t('pending.match100') : d <= 4 ? t('pending.verysimilar') : t('pending.similar');
@@ -1106,13 +1095,88 @@ async function loadPending() {
         </div>
       </div>
     </div>`;
-  }).join('');
+}
 
-  // Автозавантаження превью для всіх карточок
-  data.forEach(item => {
+function pendingRenderInto(list, items, append) {
+  const html = items.map(pendingCardHtml).join('');
+  if (append) list.insertAdjacentHTML('beforeend', html);
+  else        list.innerHTML = html;
+  // Прев'ю тягнемо тільки для щойно доданих карток.
+  items.forEach(item => {
     loadPreview(item.id, 'new',     document.getElementById(`pbox-new-${item.id}`));
     loadPreview(item.id, 'matched', document.getElementById(`pbox-match-${item.id}`));
   });
+}
+
+function pendingUpdateMoreBtn(list) {
+  const old = document.getElementById('pending-more');
+  if (old) old.remove();
+  const left = _pendingTotal - _pendingOffset;
+  if (left <= 0) return;
+  const wrap = document.createElement('div');
+  wrap.id = 'pending-more';
+  wrap.style.cssText = 'padding:16px 0;text-align:center';
+  wrap.innerHTML = `<button class="btn" onclick="pendingLoadMore()">
+      ↓ Показати ще ${Math.min(PENDING_PAGE, left)} (лишилось ${left})
+    </button>`;
+  list.appendChild(wrap);
+}
+
+async function pendingFetchPage(offset) {
+  const r = await fetch(`${API}/api/pending?limit=${PENDING_PAGE}&offset=${offset}`,
+                        {credentials: 'include'}).then(x => x.json()).catch(() => null);
+  if (!r) return {items: [], total: 0};
+  // Старий сервер віддає плаский масив — не ламаємось на ньому.
+  if (Array.isArray(r)) return {items: r.slice(0, PENDING_PAGE), total: r.length};
+  if (r.error) { toast('✗ ' + r.error, 'err'); return {items: [], total: 0}; }
+  return {items: r.items || [], total: r.total || 0};
+}
+
+async function loadPending() {
+  const list    = document.getElementById('pending-list');
+  const counter = document.getElementById('pending-count');
+  list.innerHTML = `<div style="color:var(--muted);font-family:var(--mono);font-size:13px;padding:20px 0">${t('common.loading')}</div>`;
+
+  _pendingOffset = 0;
+  const {items, total} = await pendingFetchPage(0);
+  _pendingTotal  = total;
+  _pendingOffset = items.length;
+
+  updatePendingBadge(total);
+  counter.textContent = `${total} ${t('pending.countlabel')}`;
+  document.getElementById('btn-reject-all').style.display = total ? '' : 'none';
+  { const b = document.getElementById('btn-reject-near'); if (b) b.style.display = total ? '' : 'none'; }
+
+  if (!total) {
+    list.innerHTML = `<div class="pending-empty">
+      <div class="pending-empty-icon">✓</div>
+      <div class="pending-empty-title">${t('pending.allclean')}</div>
+      <div class="pending-empty-sub">${t('pending.nodupes')}</div>
+    </div>`;
+    return;
+  }
+
+  pendingRenderInto(list, items, false);
+  pendingUpdateMoreBtn(list);
+}
+
+async function pendingLoadMore() {
+  if (_pendingBusy) return;
+  _pendingBusy = true;
+  const btn = document.querySelector('#pending-more button');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Вантажу…'; }
+  try {
+    const list = document.getElementById('pending-list');
+    const {items, total} = await pendingFetchPage(_pendingOffset);
+    if (total) _pendingTotal = total;
+    _pendingOffset += items.length;
+    if (!items.length) { _pendingTotal = _pendingOffset; }
+    document.getElementById('pending-more')?.remove();
+    pendingRenderInto(list, items, true);
+    pendingUpdateMoreBtn(list);
+  } finally {
+    _pendingBusy = false;
+  }
 }
 
 async function loadPreview(id, which, box) {
@@ -1372,6 +1436,11 @@ function fadeRemove(el) {
 }
 
 function adjustCounter(delta) {
+  // Картку розібрали — вона зникла і зі сторінки, і з черги на сервері.
+  // Тримаємо лічильники сторінкування в тому ж стані, інакше кнопка
+  // «показати ще» починає брехати про залишок.
+  if (typeof _pendingTotal === 'number')  _pendingTotal  = Math.max(0, _pendingTotal + delta);
+  if (typeof _pendingOffset === 'number') _pendingOffset = Math.max(0, _pendingOffset + delta);
   const el = document.getElementById('pending-count');
   const m  = el.textContent.match(/\d+/);
   if (m) {

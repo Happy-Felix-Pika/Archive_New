@@ -25,9 +25,28 @@ bp = Blueprint("duplicates", __name__)
 @bp.route("/api/pending")
 @admin_required
 def api_pending():
+    """
+    Черга на перевірку, сторінками.
+
+    Раніше віддавалось усе одним шматком. Поки в черзі були десятки
+    записів, це ніхто не помічав; на одинадцяти тисячах браузер
+    отримував їх усі, малював стільки ж карток і по дві прев'юшки
+    на кожну — і вмирав. Тепер limit/offset, а фронт добирає далі.
+
+    Без параметрів поводиться як раніше (плаский список) — щоб нічого
+    стороннього, що ходить на цей ендпоінт, не зламалось.
+    """
+    try:
+        limit  = flask_request.args.get("limit", type=int)
+        offset = flask_request.args.get("offset", type=int) or 0
+    except Exception:
+        limit, offset = None, 0
+    if limit is not None:
+        limit = max(1, min(limit, 200))
+
     try:
         db = get_db()
-        rows = qq(db, """
+        sql = """
             SELECT p.id, p.post_id, p.source, p.post_url, p.filename, p.file_ext,
                    p.page_num, p.local_path, p.nc_target_path,
                    p.matched_post_id, p.matched_filename, p.matched_folder_name,
@@ -36,11 +55,23 @@ def api_pending():
             FROM pending_duplicates p
             JOIN artists a ON a.id = p.artist_id
             ORDER BY p.hamming_distance ASC, p.created_at DESC
-        """)
+        """
+        if limit is None:
+            rows  = qq(db, sql)
+            total = len(rows)
+        else:
+            rows = qq(db, sql + " LIMIT %s OFFSET %s", (limit, offset))
+            with db.cursor() as cur:
+                cur.execute("SELECT COUNT(*) AS n FROM pending_duplicates")
+                total = int(cur.fetchone()["n"])
         db.close()
         for r in rows:
-            if r["created_at"]: r["created_at"] = r["created_at"].isoformat()
-        return jsonify(rows)
+            if r["created_at"]:
+                r["created_at"] = r["created_at"].isoformat()
+        if limit is None:
+            return jsonify(rows)
+        return jsonify({"items": rows, "total": total,
+                        "offset": offset, "limit": limit})
     except Exception as e:
         return jsonify({"error": str(e)}), 503
 
