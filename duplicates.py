@@ -344,6 +344,72 @@ def api_pending_reject_all():
         return jsonify({"error": str(e)}), 500
 
 
+@bp.route("/api/pending/distances")
+@admin_required
+def api_pending_distances():
+    """
+    Розподіл черги за відстанню pHash. Потрібен, щоб перед масовим
+    відхиленням було видно, що саме в черзі: 11 тисяч точних копій —
+    це одне, 11 тисяч файлів на відстані 7 — зовсім інше.
+    """
+    try:
+        db = get_db()
+        rows = qq(db, """SELECT hamming_distance AS d, COUNT(*) AS n
+                         FROM pending_duplicates
+                         GROUP BY hamming_distance ORDER BY hamming_distance""")
+        db.close()
+        return jsonify([{"distance": int(r["d"] or 0), "count": int(r["n"])} for r in rows])
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/api/pending/reject-below", methods=["POST"])
+@admin_required
+def api_pending_reject_below():
+    """
+    Відхиляє з черги все, що ближче або дорівнює заданій відстані,
+    лишаючи спірне на ручний розбір. На відміну від «Відхилити всі»
+    це не рубає чергу наосліп.
+
+    Архів при цьому не чіпається: ці файли в нього ще не потрапили,
+    вони лежать у папці pending_review. Відхилення стирає саме їх
+    і запам'ятовує пост, щоб його не качали знову.
+    """
+    body = flask_request.get_json(silent=True) or {}
+    try:
+        max_distance = int(body.get("max_distance", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "max_distance має бути числом"}), 400
+    dry_run = bool(body.get("dry_run", False))
+
+    try:
+        db   = get_db()
+        rows = qq(db, """SELECT id, local_path, artist_id, post_id, page_num, md5_hash
+                         FROM pending_duplicates
+                         WHERE hamming_distance <= %s""", (max_distance,))
+        if dry_run:
+            db.close()
+            return jsonify({"ok": True, "dry_run": True, "count": len(rows)})
+
+        for r in rows:
+            try:
+                if r["local_path"] and os.path.exists(r["local_path"]):
+                    os.remove(r["local_path"])
+            except Exception:
+                pass
+        with db.cursor() as cur:
+            for r in rows:
+                cur.execute("""INSERT IGNORE INTO rejected_duplicates
+                                   (artist_id, post_id, page_num, md5_hash)
+                               VALUES (%s,%s,%s,%s)""",
+                            (r["artist_id"], r["post_id"], r["page_num"], r["md5_hash"]))
+                cur.execute("DELETE FROM pending_duplicates WHERE id=%s", (r["id"],))
+        db.commit(); db.close()
+        return jsonify({"ok": True, "deleted": len(rows)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @bp.route("/api/duplicate-scan/clear-all", methods=["POST"])
 @admin_required
 def api_duplicate_scan_clear_all():

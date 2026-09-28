@@ -881,6 +881,8 @@ function pendingSetTab(tab) {
   document.getElementById('pending-list').style.display      = tab === 'files' ? '' : 'none';
   document.getElementById('duplicates-list').style.display   = tab === 'duplicates' ? '' : 'none';
   document.getElementById('btn-reject-all').style.display    = tab === 'files' ? '' : 'none';
+  const nearBtn = document.getElementById('btn-reject-near');
+  if (nearBtn) nearBtn.style.display = (tab === 'files') ? '' : 'none';
   const scanBtn = document.getElementById('btn-scan-all');
   if (scanBtn) scanBtn.style.display = (tab === 'duplicates') ? '' : 'none';
   const autoBtn = document.getElementById('btn-auto-resolve');
@@ -1048,6 +1050,7 @@ async function loadPending() {
   updatePendingBadge(data.length);
   counter.textContent = `${data.length} ${t('pending.countlabel')}`;
   document.getElementById('btn-reject-all').style.display = data.length ? '' : 'none';
+  { const b = document.getElementById('btn-reject-near'); if (b) b.style.display = data.length ? '' : 'none'; }
 
   if (!data.length) {
     list.innerHTML = `<div class="pending-empty">
@@ -1303,6 +1306,55 @@ async function rejectItem(id) {
   }
 }
 
+// ── Масове відхилення черги за відстанню ──────────────────────────────
+// «Відхилити всі» рубає чергу наосліп. Тут спершу показуємо, з чого
+// вона складається, і відхиляємо тільки однозначну частину.
+async function rejectNearDuplicates() {
+  let dist;
+  try {
+    dist = await fetch(`${API}/api/pending/distances`, {credentials:'include'}).then(r => r.json());
+  } catch (e) { toast('✗ ' + e, 'err'); return; }
+  if (dist.error) { toast('✗ ' + dist.error, 'err'); return; }
+  if (!dist.length) { toast('Черга порожня', 'ok'); return; }
+
+  let running = 0;
+  const lines = dist.map(d => {
+    running += d.count;
+    const what = d.distance === 0 ? 'точна копія'
+               : d.distance <= 2  ? 'те саме, інший сайт'
+               : d.distance <= 4  ? 'майже те саме'
+               : 'просто схоже';
+    return `  ${d.distance}  —  ${String(d.count).padStart(6)}  (${what}), разом до цієї межі: ${running}`;
+  }).join('\n');
+
+  const ans = prompt(
+    'Що зараз у черзі, за відстанню pHash:\n\n' + lines +
+    '\n\nВідхилити все до якої відстані включно?\n' +
+    'Файли ще не в архіві — вони лежать у pending_review, тож архів не постраждає.',
+    '0');
+  if (ans === null) return;
+  const maxDistance = parseInt(ans);
+  if (isNaN(maxDistance) || maxDistance < 0 || maxDistance > 20) { toast('Потрібне число 0–20', 'err'); return; }
+
+  const pre = await fetch(`${API}/api/pending/reject-below`, {
+    method:'POST', credentials:'include',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({max_distance: maxDistance, dry_run: true})
+  }).then(r => r.json());
+  if (pre.error) { toast('✗ ' + pre.error, 'err'); return; }
+  if (!pre.count) { toast('Під цю межу нічого не підпадає', 'ok'); return; }
+  if (!confirm(`Відхилити ${pre.count} з черги (відстань ≤ ${maxDistance})?`)) return;
+
+  const r = await fetch(`${API}/api/pending/reject-below`, {
+    method:'POST', credentials:'include',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({max_distance: maxDistance})
+  }).then(x => x.json());
+  if (r.error) { toast('✗ ' + r.error, 'err'); return; }
+  toast(`Відхилено ${r.deleted}`, 'ok');
+  loadPending();
+}
+
 async function rejectAll() {
   if (!confirm(t('confirm.rejectall'))) return;
   const r = await fetch(`${API}/api/pending/reject-all`, {method:'POST'});
@@ -1327,6 +1379,7 @@ function adjustCounter(delta) {
     el.textContent = `${n} файлів на перевірку`;
     updatePendingBadge(n);
     document.getElementById('btn-reject-all').style.display = n > 0 ? '' : 'none';
+    { const b = document.getElementById('btn-reject-near'); if (b) b.style.display = n > 0 ? '' : 'none'; }
   }
 }
 
