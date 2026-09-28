@@ -47,18 +47,17 @@ E621_RATE_LIMIT = 0.5
 
 # Inkbunny API
 INKBUNNY_API_BASE = "https://inkbunny.net/api"
-
-# Сховище Inkbunny (nl1.ib.metapix.net) відкидає запити, які не схожі на
-# браузерні: без User-Agent (тобто "python-requests/...") і без Referer
-# воно віддає 403 навіть на публічні файли. Тому представляємось як
-# браузер і вказуємо, звідки прийшли.
-INKBUNNY_USER_AGENT = ("Mozilla/5.0 (X11; Linux x86_64; rv:128.0) "
-                       "Gecko/20100101 Firefox/128.0")
-INKBUNNY_REFERER    = "https://inkbunny.net/"
 INKBUNNY_RATE_LIMIT = 0.5
 
 # pHash порог схожести (0 = точные копии, 10 = очень похожие)
 PHASH_THRESHOLD = 8
+
+# Поріг для другого джерела. Коли ту саму роботу качають з e621 і з
+# Inkbunny, файли не збігаються байт-у-байт (сайти перепаковують
+# зображення по-своєму), але pHash у них розходиться щонайбільше на
+# 2-4 біти. Вісім — це вже інший малюнок, тож для автоматичного
+# відкидання беремо суворіший поріг, ніж для черги на ручний розбір.
+CROSS_SOURCE_THRESHOLD = 4
 
 # Форматы для которых считаем pHash
 IMAGE_FORMATS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
@@ -121,6 +120,7 @@ class Config:
             "inkbunny":  {"enabled": True, "username": "", "password": "", "max_submissions_per_artist": None},
             "download":  {"local_temp_dir": "./temp_downloads", "check_duplicates": True,
                           "phash_threshold": PHASH_THRESHOLD,
+                          "cross_source_threshold": CROSS_SOURCE_THRESHOLD,
                           "file_formats": ["png", "jpg", "jpeg", "gif", "webp", "webm", "mp4", "swf"]},
         }
         for section, default_values in defaults.items():
@@ -559,6 +559,29 @@ class DatabaseTracker:
                 if cur.fetchone():
                     return True
         return False
+
+    def add_rejected(self, artist_id: int, post_id: str, md5: str | None = None,
+                     page_num: int = 1):
+        """
+        Запам'ятовує, що цей пост свідомо не беремо — він уже є в архіві
+        з іншого джерела. Без цього запису наступний запуск качав би його
+        знову, рахував pHash і знову відкидав, і так щоразу.
+
+        Таблиця історична: на старих базах вона є, на чистій установці її
+        створює міграція застосунку. Якщо колонки раптом не ті — мовчки
+        пропускаємо: не записати причину не так страшно, як зупинити
+        всю синхронізацію.
+        """
+        try:
+            with self.db.cursor() as cur:
+                cur.execute(
+                    """INSERT IGNORE INTO rejected_duplicates
+                       (artist_id, post_id, page_num, md5_hash)
+                       VALUES (%s,%s,%s,%s)""",
+                    (artist_id, post_id, page_num, md5)
+                )
+        except Exception as e:
+            print(f"    ! не вдалось записати відмову {post_id}: {e}")
 
     def add_pending(self, artist_id: int, post_id: str, source: str,
                     post_url: str, md5_hash, phash_val, filename: str,
@@ -1233,10 +1256,6 @@ class InkbunnyDownloader:
     def __init__(self, config: Config, username_override: str | None = None, password_override: str | None = None):
         self.config = config
         self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": INKBUNNY_USER_AGENT,
-            "Referer":    INKBUNNY_REFERER,
-        })
         self.last_request = 0
         self.sid = None
         self._username_override = username_override
@@ -1660,6 +1679,9 @@ class FurryArchiver:
         self.config      = Config(user_id=user_id)
         self.db          = Database(self.config)
         self.tracker     = DatabaseTracker(self.db, self.config)
+        self.cross_source_threshold = (
+            self.config.get('download', 'cross_source_threshold') or CROSS_SOURCE_THRESHOLD
+        )
 
         nc_cfg     = self.config.config.get('nextcloud', {}) or {}
         nc_enabled = nc_cfg.get('enabled', bool(nc_cfg.get('webdav_url')))
@@ -1719,10 +1741,16 @@ class FurryArchiver:
                            result_file: dict, post_id: str, source: str,
                            post_url: str, dry_run: bool,
                            check_duplicates: bool,
-                           tags: list | None = None) -> str:
+                           tags: list | None = None,
+                           secondary: bool = False) -> str:
         """
         Проверяет дубликаты (MD5 + pHash) и загружает файл в Nextcloud.
-        Возвращает: 'uploaded' | 'md5_dup' | 'phash_dup' | 'upload_error'
+        Возвращает: 'uploaded' | 'md5_dup' | 'cross_dup' | 'phash_dup' | 'upload_error'
+
+        secondary=True означає, що це друге джерело для цього автора —
+        основне вже відпрацювало. Тоді близький pHash трактуємо жорстко:
+        це та сама робота, просто з іншого сайту, і в чергу на ручний
+        розбір її класти нема сенсу.
         """
         md5    = result_file['md5_hash']
         phash  = result_file.get('phash')
@@ -1760,13 +1788,17 @@ class FurryArchiver:
                     matched_post_id, matched_filename, hamming_dist = dup[0], dup[1], dup[2]
                     matched_artist_id     = dup[3] if len(dup) > 3 else artist_id
                     matched_folder_actual = dup[4] if len(dup) > 4 else ''
+
+                    # Друге джерело і збіг впритул — це дзеркало тієї самої
+                    # роботи. Відкидаємо одразу й запам'ятовуємо відмову.
+                    if secondary and hamming_dist <= self.cross_source_threshold:
+                        os.remove(fpath)
+                        self.tracker.add_rejected(artist_id, post_id, md5, pnum)
+                        return f'cross_dup:{matched_filename}:{hamming_dist}'
+
                     os.makedirs(PENDING_DIR, exist_ok=True)
                     pending_path = os.path.join(PENDING_DIR, fname)
-                    # shutil.move, а не os.replace: у контейнері тимчасова
-                    # тека і /data — РІЗНІ файлові системи, і os.replace
-                    # падає з "Invalid cross-device link". shutil.move у
-                    # такому разі копіює й видаляє оригінал.
-                    shutil.move(fpath, pending_path)
+                    os.replace(fpath, pending_path)
                     self.tracker.add_pending(
                         artist_id=artist_id, post_id=post_id, source=source,
                         post_url=post_url, md5_hash=md5, phash_val=phash,
@@ -1890,12 +1922,27 @@ class FurryArchiver:
             pending   = 0
             autosave_counter = 0
 
-            # ── E621 ──────────────────────────────────────────────────────────
+            # ── Хто з джерел основний ─────────────────────────────────────────
+            #
+            # У автора зазвичай один сайт основний, а другий — неповне
+            # дзеркало тих самих робіт. Тому спершу питаємо обидва, скільки
+            # в них взагалі є, і починаємо з більшого. Друге джерело потім
+            # іде як `secondary`: якщо картинка візуально збігається з тим,
+            # що вже лежить, вона мовчки відкидається, а не потрапляє в
+            # чергу на ручний розбір.
+            e621_posts, ib_subs = [], []
             if self.e621_dl:
-                posts = self.e621_dl.search_artist_posts(
+                e621_posts = self.e621_dl.search_artist_posts(
                     artist_name, limit=self.config.get('e621', 'max_posts_per_artist')
-                )
-                for post in posts:
+                ) or []
+            if self.ib_dl and self.ib_dl.sid:
+                ib_subs = self.ib_dl.search_artist_submissions(
+                    artist_name, limit=self.config.get('inkbunny', 'max_submissions_per_artist')
+                ) or []
+
+            def do_e621(secondary: bool):
+                nonlocal new_files, skipped, pending, autosave_counter
+                for post in e621_posts:
                     post_id = f"e621_{post['id']}"
                     if self.tracker.is_post_downloaded(artist_id, post_id):
                         skipped += 1
@@ -1921,6 +1968,7 @@ class FurryArchiver:
                         post_url=result['post_url'],
                         dry_run=dry_run, check_duplicates=check_dup,
                         tags=result.get('tags'),
+                        secondary=secondary,
                     )
 
                     if status == 'uploaded':
@@ -1929,6 +1977,10 @@ class FurryArchiver:
                         autosave_counter += 1
                     elif status == 'md5_dup':
                         print(f"    ⊘ MD5 дубликат e621 {post['id']}")
+                        skipped += 1
+                    elif status.startswith('cross_dup'):
+                        _, mfile, dist = status.split(':', 2)
+                        print(f"    ⊘ вже є з іншого джерела: e621 {post['id']} ≈ {mfile} (d={dist})")
                         skipped += 1
                     elif status.startswith('phash_pending'):
                         _, mfile, dist = status.split(':', 2)
@@ -1943,12 +1995,9 @@ class FurryArchiver:
                         self.tracker.save()
                         print(f"    💾 Автосохранение: {new_files} файлов")
 
-            # ── Inkbunny ──────────────────────────────────────────────────────
-            if self.ib_dl and self.ib_dl.sid:
-                submissions = self.ib_dl.search_artist_submissions(
-                    artist_name, limit=self.config.get('inkbunny', 'max_submissions_per_artist')
-                )
-                for sub in submissions:
+            def do_inkbunny(secondary: bool):
+                nonlocal new_files, skipped, pending, autosave_counter
+                for sub in ib_subs:
                     post_id = f"ib_{sub['submission_id']}"
                     if self.tracker.is_post_downloaded(artist_id, post_id):
                         skipped += 1
@@ -1977,12 +2026,18 @@ class FurryArchiver:
                             post_url=result['post_url'],
                             dry_run=dry_run, check_duplicates=check_dup,
                             tags=result.get('tags'),
+                            secondary=secondary,
                         )
                         if status == 'uploaded':
                             uploaded_pages += 1
                             autosave_counter += 1
                         elif status == 'md5_dup':
                             print(f"    ⊘ MD5 дубл. ib {sub['submission_id']}-p{file_data['page_num']}")
+                            skipped += 1
+                        elif status.startswith('cross_dup'):
+                            _, mfile, dist = status.split(':', 2)
+                            print(f"    ⊘ вже є з іншого джерела: ib {sub['submission_id']}"
+                                  f"-p{file_data['page_num']} ≈ {mfile} (d={dist})")
                             skipped += 1
                         elif status.startswith('phash_pending'):
                             _, mfile, dist = status.split(':', 2)
@@ -1997,6 +2052,21 @@ class FurryArchiver:
                     if autosave_counter and autosave_counter % 100 == 0:
                         self.tracker.save()
                         print(f"    💾 Автосохранение: {new_files} файлов")
+
+            # Більше робіт — значить основне. За рівної кількості лишаємо
+            # e621: там оригінали частіше в кращій якості.
+            if len(ib_subs) > len(e621_posts):
+                order = [('inkbunny', do_inkbunny), ('e621', do_e621)]
+            else:
+                order = [('e621', do_e621), ('inkbunny', do_inkbunny)]
+
+            both = bool(e621_posts) and bool(ib_subs)
+            if both:
+                print(f"    джерела: e621 {len(e621_posts)}, inkbunny {len(ib_subs)}"
+                      f"  →  основне {order[0][0]}")
+
+            for idx, (_label, run_source) in enumerate(order):
+                run_source(secondary=(both and idx > 0))
 
             if new_files > 0 or pending > 0:
                 self.tracker.save()
