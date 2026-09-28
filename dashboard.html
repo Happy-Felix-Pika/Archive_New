@@ -622,6 +622,7 @@
         <button class="btn btn-danger btn-sm" id="btn-reject-all" onclick="rejectAll()" style="display:none" data-i18n="pending.rejectall">✕ Відхилити всі</button>
         <button class="btn btn-danger btn-sm" id="btn-clear-dup" onclick="dupTabClearAll()" style="display:none" data-i18n="pending.clearalldup">🗑 Очистити список</button>
         <button class="btn btn-sm" id="btn-scan-all" onclick="dupScanWholeArchive()" style="display:none">🔎 Шукати по всьому архіву</button>
+        <button class="btn btn-sm" id="btn-auto-resolve" onclick="dupAutoResolve()" style="display:none">⚡ Розібрати оптом</button>
         <span class="pending-counter" id="pending-count"></span>
       </div>
       <div id="pending-list"></div>
@@ -931,7 +932,7 @@
 
 </div><!-- /#app-shell -->
 
-<script src="/static/dashboard.js?v=50"></script>
+<script src="/static/dashboard.js?v=51"></script>
 <script src="/static/apps.js?v=4"></script>
 
 </body>

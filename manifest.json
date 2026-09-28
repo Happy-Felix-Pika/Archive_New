@@ -1,57 +1,44 @@
 {
-  "id": "furry",
-  "name": "Furry Archive",
-  "version": "1.1.0",
-  "description": "Автори, серії (pools), автоматична архівація з e621 та Inkbunny",
+  "id": "duplicates",
+  "name": "Пошук дублікатів",
+  "version": "1.3.0",
+  "description": "Перцептивні хеші, перевірка схожих файлів, пошук дублікатів по всьому архіву",
   "author": "Felix",
   "core_api_version": 1,
   "min_core_version": "1.0.0",
-  "dependencies": {},
+  "dependencies": {
+    "furry": "1.0.0"
+  },
   "permissions": [
     "database",
     "storage",
-    "files",
-    "users",
-    "jobs"
+    "files"
   ],
   "backend": "backend",
-  "table_prefix": "furry_",
+  "table_prefix": "duplicate",
   "menu": [
     {
-      "id": "artists",
+      "id": "pending",
       "label": {
-        "uk": "Автори",
-        "ru": "Авторы",
-        "en": "Artists"
+        "uk": "На перевірку",
+        "ru": "На проверку",
+        "en": "Review"
       },
-      "icon": "◉",
-      "order": 20,
-      "page_id": "artists",
-      "admin_only": true
-    },
-    {
-      "id": "runner",
-      "label": {
-        "uk": "Запуск",
-        "ru": "Запуск",
-        "en": "Run"
-      },
-      "icon": "▶",
-      "order": 21,
-      "page_id": "runner",
+      "icon": "⏳",
+      "order": 25,
+      "page_id": "pending",
       "admin_only": true
     }
   ],
   "pages": [],
   "legacy_tables": [
-    "artist_aliases",
-    "artists",
-    "furry_posts",
-    "merge_duplicate_log",
+    "duplicate_ignore_pairs",
+    "duplicate_scan_results",
+    "file_phash",
     "pending_duplicates",
     "rejected_duplicates"
   ],
-  "config": {
-    "js": "static/furry-config.js"
-  }
+  "scripts": [
+    "static/contrib.js"
+  ]
 }
