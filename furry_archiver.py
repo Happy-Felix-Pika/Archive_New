@@ -47,6 +47,13 @@ E621_RATE_LIMIT = 0.5
 
 # Inkbunny API
 INKBUNNY_API_BASE = "https://inkbunny.net/api"
+
+# Сховище Inkbunny (nl1.ib.metapix.net) відкидає запити, які не схожі на
+# браузерні: без User-Agent (тобто "python-requests/...") і без Referer
+# воно віддає 403 навіть на публічні файли.
+INKBUNNY_USER_AGENT = ("Mozilla/5.0 (X11; Linux x86_64; rv:128.0) "
+                       "Gecko/20100101 Firefox/128.0")
+INKBUNNY_REFERER    = "https://inkbunny.net/"
 INKBUNNY_RATE_LIMIT = 0.5
 
 # pHash порог схожести (0 = точные копии, 10 = очень похожие)
@@ -1256,6 +1263,10 @@ class InkbunnyDownloader:
     def __init__(self, config: Config, username_override: str | None = None, password_override: str | None = None):
         self.config = config
         self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": INKBUNNY_USER_AGENT,
+            "Referer":    INKBUNNY_REFERER,
+        })
         self.last_request = 0
         self.sid = None
         self._username_override = username_override
@@ -1798,7 +1809,7 @@ class FurryArchiver:
 
                     os.makedirs(PENDING_DIR, exist_ok=True)
                     pending_path = os.path.join(PENDING_DIR, fname)
-                    os.replace(fpath, pending_path)
+                    shutil.move(fpath, pending_path)
                     self.tracker.add_pending(
                         artist_id=artist_id, post_id=post_id, source=source,
                         post_url=post_url, md5_hash=md5, phash_val=phash,
