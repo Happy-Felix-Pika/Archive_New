@@ -170,6 +170,161 @@ def api_catalog_list(hidden_folders_override=None):
     return jsonify({"path": rel_path, "folders": folders, "files": files})
 
 
+# ─────────────────────────────────────────────────────────────────────
+#  Мініатюри каталогу
+#
+#  Раніше плитка показувала прев'ю тільки для картинок, і то підставляла
+#  в <img> ПОВНОРОЗМІРНИЙ файл — тека з двома сотнями PNG тягнула сотні
+#  мегабайт заради сітки 150×150. Відео не мало прев'ю взагалі, лише
+#  іконку 🎬.
+#
+#  Тут обидва випадки зводяться до одного: маленький JPEG, який робиться
+#  один раз і лягає в той самий дисковий кеш, що й решта зображень.
+#  Для відео кадр дістає ffmpeg (він уже є в образі), для картинок —
+#  Pillow. Якщо щось не вийшло, віддаємо 404, а фронт малює іконку.
+# ─────────────────────────────────────────────────────────────────────
+
+THUMB_SIZE       = 320      # по довшій стороні, з запасом під ретіну
+THUMB_VIDEO_SEEK = 3        # секунда кадру: нульова часто чорна
+THUMB_TIMEOUT    = 25
+
+_THUMB_IMAGE_EXT = {"png", "jpg", "jpeg", "gif", "webp", "bmp"}
+_THUMB_VIDEO_EXT = {"webm", "mp4", "mov", "mkv", "avi", "m4v", "ogv"}
+
+
+def _thumb_cache_path(rel_path: str, tag: str = "") -> str:
+    key = hashlib.md5(f"thumb:{THUMB_SIZE}:{rel_path}:{tag}".encode()).hexdigest()
+    return os.path.join(_IMG_CACHE_DIR, f"t_{key}.jpg")
+
+
+def _make_image_thumb(src_path: str, out_path: str) -> bool:
+    try:
+        from PIL import Image
+        with Image.open(src_path) as im:
+            im.seek(0) if getattr(im, "is_animated", False) else None
+            im = im.convert("RGB")
+            im.thumbnail((THUMB_SIZE, THUMB_SIZE), Image.LANCZOS)
+            im.save(out_path, "JPEG", quality=82, optimize=True)
+        return True
+    except Exception as e:
+        print(f"  ! мініатюра зображення не вийшла ({src_path}): {e}")
+        return False
+
+
+def _make_video_thumb(src: str, out_path: str, headers: str | None = None) -> bool:
+    """
+    Кадр з відео через ffmpeg. src — шлях на диску або http(s)-URL.
+
+    Спершу пробуємо кадр на THUMB_VIDEO_SEEK секунді: перший кадр у
+    багатьох роликів чорний або це заставка. Якщо відео коротше —
+    повторюємо з нуля.
+    """
+    import subprocess
+    for seek in (THUMB_VIDEO_SEEK, 0):
+        cmd = ["ffmpeg", "-nostdin", "-y", "-loglevel", "error"]
+        if headers:
+            cmd += ["-headers", headers]
+        cmd += ["-ss", str(seek), "-i", src,
+                "-frames:v", "1",
+                "-vf", f"scale='min({THUMB_SIZE},iw)':-2",
+                "-q:v", "5", out_path]
+        try:
+            r = subprocess.run(cmd, capture_output=True, timeout=THUMB_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            print(f"  ! мініатюра відео: ffmpeg завис на {src}")
+            return False
+        except FileNotFoundError:
+            print("  ! ffmpeg не знайдено — мініатюр для відео не буде")
+            return False
+        if r.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            return True
+    return False
+
+
+@bp.route("/api/catalog/thumb")
+def api_catalog_thumb():
+    """Мініатюра файлу каталогу: зображення або кадр з відео."""
+    rel_path = _safe_rel_path(flask_request.args.get("path"))
+    if not rel_path:
+        return jsonify({"error": "bad path"}), 400
+
+    if not is_current_user_admin():
+        top_segment = rel_path.split("/", 1)[0]
+        if top_segment in get_hidden_catalog_folders(current_user_id()):
+            return jsonify({"error": "Немає доступу до цієї папки"}), 403
+
+    filename = rel_path.rsplit("/", 1)[-1]
+    ext      = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    is_image = ext in _THUMB_IMAGE_EXT
+    is_video = ext in _THUMB_VIDEO_EXT
+    if not (is_image or is_video):
+        return jsonify({"error": "no preview"}), 404
+
+    mode = get_storage_mode()
+
+    if mode == "local":
+        src = os.path.join(get_local_root(), rel_path)
+        if not os.path.isfile(src):
+            return jsonify({"error": "not found"}), 404
+        # mtime у ключі: файл підмінили — мініатюра перероблюється сама
+        try:
+            tag = str(int(os.path.getmtime(src)))
+        except OSError:
+            tag = ""
+        out = _thumb_cache_path(rel_path, tag)
+        if not os.path.exists(out):
+            ok = _make_image_thumb(src, out) if is_image else _make_video_thumb(src, out)
+            if not ok:
+                return jsonify({"error": "thumb failed"}), 404
+        return send_file(out, mimetype="image/jpeg", conditional=True,
+                         max_age=86400)
+
+    # ── Nextcloud ────────────────────────────────────────────────────
+    nc_cfg     = get_user_nc_config()
+    webdav_url = nc_cfg.get("webdav_url", "").rstrip("/")
+    base       = nc_cfg.get("base_folder", "").strip("/")
+    full_path  = f"{base}/{rel_path}".strip("/")
+    file_url   = f"{webdav_url}/{full_path}"
+    user, pwd  = nc_cfg.get("username", ""), nc_cfg.get("password", "")
+
+    out = _thumb_cache_path(full_path)
+    if os.path.exists(out):
+        return send_file(out, mimetype="image/jpeg", conditional=True, max_age=86400)
+
+    if is_video:
+        # ffmpeg читає WebDAV по HTTP сам і забирає лише потрібні шматки —
+        # качати ролик цілком заради одного кадру не треба.
+        import base64 as _b64
+        auth = _b64.b64encode(f"{user}:{pwd}".encode()).decode()
+        ok = _make_video_thumb(file_url, out, headers=f"Authorization: Basic {auth}\r\n")
+        if not ok:
+            return jsonify({"error": "thumb failed"}), 404
+        return send_file(out, mimetype="image/jpeg", conditional=True, max_age=86400)
+
+    import tempfile
+    import requests as req
+    tmp = None
+    try:
+        r = req.get(file_url, auth=(user, pwd), stream=True, timeout=30)
+        r.raise_for_status()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as fh:
+            tmp = fh.name
+            for chunk in r.iter_content(65536):
+                if chunk:
+                    fh.write(chunk)
+        if not _make_image_thumb(tmp, out):
+            return jsonify({"error": "thumb failed"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 404
+    finally:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    return send_file(out, mimetype="image/jpeg", conditional=True, max_age=86400)
+
+
 @bp.route("/api/catalog/file")
 def api_catalog_file():
     """Віддає конкретний файл за відносним шляхом у сховищі — для перегляду."""

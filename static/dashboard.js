@@ -4285,6 +4285,24 @@ function _catalogFileUrl(path) {
     : `${API}/api/external-archives/${_catalogSource}/catalog/file?path=${encodeURIComponent(path)}`;
 }
 
+function _catalogThumbUrl(path) {
+  return _catalogSource === 'local'
+    ? `${API}/api/catalog/thumb?path=${encodeURIComponent(path)}`
+    : `${API}/api/external-archives/${_catalogSource}/catalog/thumb?path=${encodeURIComponent(path)}`;
+}
+
+// Мініатюра не вийшла — або сервер старий і ендпоінта не знає, або кадр
+// не дістався. Для картинки відкочуємось на сам файл (як було раніше),
+// для відео показуємо іконку.
+function catalogThumbFailed(img) {
+  const full = img.dataset.full;
+  if (full && img.src !== full) { img.src = full; img.removeAttribute('data-full'); return; }
+  // Кадру немає — лишаємо саму іконку, без ▶ поверх неї: позначка
+  // «це відео» на іконці 🎬 нічого не додає, тільки заважає.
+  img.parentElement?.querySelector('.catalog-play')?.remove();
+  img.outerHTML = `<div class="catalog-icon">${img.dataset.icon || '📄'}</div>`;
+}
+
 async function catalogLoad(path = '') {
   _catalogPath = path || '';
   const grid = document.getElementById('catalog-grid');
@@ -4401,11 +4419,20 @@ function catalogRender() {
     const isVideo  = CATALOG_VIDEO_EXT.includes(ext);
     const isAudio  = CATALOG_AUDIO_EXT.includes(ext);
     const icon = isVideo ? '🎬' : isAudio ? '🎵' : ext === 'pdf' ? '📕' : ['txt','md'].includes(ext) ? '📝' : '📄';
-    const thumb = isImage
-      ? `<img class="catalog-thumb" src="${fileUrl}" loading="lazy">`
+    // Прев'ю тепер і для відео: сервер віддає кадр. Для картинок це теж
+    // мініатюра, а не повний файл — тека з сотнями PNG більше не тягне
+    // сотні мегабайт заради сітки.
+    const thumbUrl = _catalogThumbUrl(itemPath);
+    const thumb = (isImage || isVideo)
+      ? `<img class="catalog-thumb" src="${thumbUrl}" loading="lazy"
+              data-icon="${icon}" ${isImage ? `data-full="${fileUrl}"` : ''}
+              onerror="catalogThumbFailed(this)">`
       : `<div class="catalog-icon">${icon}</div>`;
-    return `<div class="catalog-item" data-idx="${idx}">
-      ${thumb}
+    const playBadge = isVideo
+      ? `<span class="catalog-play">▶</span>`
+      : '';
+    return `<div class="catalog-item" data-idx="${idx}" style="position:relative">
+      ${thumb}${playBadge}
       <div class="catalog-name">${esc(item.name)}</div>
       ${metaHtml}
     </div>`;
