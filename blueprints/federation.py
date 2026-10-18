@@ -166,7 +166,8 @@ def api_external_access_catalog_file():
     path = flask_request.args.get("path", "")
     hidden = get_hidden_folders_for_key(key_id)
     if hidden and path.split("/", 1)[0] in hidden:
-        return jsonify({"error": "Немає доступу до цієї папки"}), 403
+        return jsonify({"error": f"Папка «{path.split('/', 1)[0]}» закрита для цього ключа",
+                        "origin": "ключ доступу"}), 403
     return api_catalog_file(external=True)
 
 
@@ -185,7 +186,8 @@ def api_external_access_catalog_thumb():
     path = flask_request.args.get("path", "")
     hidden = get_hidden_folders_for_key(key_id)
     if hidden and path.split("/", 1)[0] in hidden:
-        return jsonify({"error": "Немає доступу до цієї папки"}), 403
+        return jsonify({"error": f"Папка «{path.split('/', 1)[0]}» закрита для цього ключа",
+                        "origin": "ключ доступу"}), 403
     return api_catalog_thumb(external=True)
 
 
@@ -680,7 +682,14 @@ def api_external_catalog_thumb(archive_id):
         r = req.get(f"{base}/api/external-access/catalog/thumb",
                     params=params, stream=True, timeout=40)
         if r.status_code == 403:
-            return jsonify({"error": "Ключ доступу недійсний або деактивований"}), 403
+            # Пояснення беремо з того боку, а не вигадуємо своє: причин
+            # рівно дві — недійсний ключ або папка, закрита для цього
+            # ключа, — і плутати їх при розборі дорого.
+            try:
+                why = (r.json() or {}).get("error") or "доступ закрито"
+            except Exception:
+                why = "доступ закрито"
+            return jsonify({"error": why, "origin": "віддалений архів"}), 403
         if r.status_code == 200:
             def gen():
                 for chunk in r.iter_content(chunk_size=65536):

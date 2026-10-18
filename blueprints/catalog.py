@@ -282,7 +282,8 @@ def api_catalog_thumb(external: bool = False):
     if not external and not is_current_user_admin():
         top_segment = rel_path.split("/", 1)[0]
         if top_segment in get_hidden_catalog_folders(current_user_id()):
-            return jsonify({"error": "Немає доступу до цієї папки"}), 403
+            return jsonify({"error": f"Папка «{top_segment}» прихована від цього користувача",
+                            "origin": "сесія"}), 403
 
     filename = rel_path.rsplit("/", 1)[-1]
     ext      = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
@@ -400,7 +401,8 @@ def api_catalog_file(external: bool = False):
     if not external and not is_current_user_admin():
         top_segment = rel_path.split("/", 1)[0]
         if top_segment in get_hidden_catalog_folders(current_user_id()):
-            return jsonify({"error": "Немає доступу до цієї папки"}), 403
+            return jsonify({"error": f"Папка «{top_segment}» прихована від цього користувача",
+                            "origin": "сесія"}), 403
 
     filename = rel_path.rsplit("/", 1)[-1]
     mime     = mimetypes.guess_type(filename)[0] or "application/octet-stream"
