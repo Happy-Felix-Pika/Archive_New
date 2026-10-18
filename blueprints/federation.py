@@ -1,6 +1,6 @@
 """Зовнішні архіви та доступ по ключу"""
 
-import random, secrets
+import random, secrets, time
 
 import os
 
@@ -21,27 +21,61 @@ def _hash_access_key(raw_key: str) -> str:
     return _keyhash.sha256(raw_key.encode()).hexdigest()
 
 
+# Коли востаннє писали "ключем користувались". Запис у БД на КОЖЕН запит
+# був дорогим не сам по собі, а тим, що всі запити правлять ОДИН І ТОЙ
+# САМИЙ рядок: відкриття галереї чи каталогу шле два десятки запитів
+# одночасно, вони шикуються в чергу за блокуванням цього рядка, і при
+# повільній відповіді частина впирається в таймаут. Пишемо не частіше
+# ніж раз на хвилину — для позначки "останній раз використано" цього
+# з головою.
+_KEY_TOUCH_INTERVAL = 60
+_key_touched: dict = {}
+
+# Технічний збій бази — це НЕ "ключ недійсний". Раніше будь-яка помилка
+# перетворювалась на 403, і виглядало це як відкликаний доступ.
+KEY_DB_ERROR = "db-error"
+
+
 def _validate_external_key(raw_key: str, identity: str = ""):
     """Перевіряє ключ доступу ПРОТИ НАШОЇ ВЛАСНОЇ бази (ми тут — хост, хтось
-    інший стукається до НАС). Оновлює 'останній раз використано' відразу.
-    Повертає (True, key_id) якщо дійсний, інакше (False, None) — key_id
-    потрібен, щоб знати, які папки приховані САМЕ для цього ключа."""
+    інший стукається до НАС).
+    Повертає (True, key_id) якщо дійсний; (False, None) якщо ключа немає
+    або він вимкнений; (False, KEY_DB_ERROR) якщо база не відповіла."""
     if not raw_key:
         return False, None
     key_hash = _hash_access_key(raw_key)
     try:
         db  = get_db()
         row = q(db, "SELECT id, is_active FROM external_access_keys WHERE key_hash=%s", (key_hash,))
-        if not row or not row["is_active"]:
-            db.close()
-            return False, None
-        with db.cursor() as cur:
-            cur.execute("UPDATE external_access_keys SET last_used_at=NOW(), last_used_from=%s WHERE id=%s",
-                        (identity or "невідомо", row["id"]))
-        db.commit(); db.close()
-        return True, row["id"]
-    except Exception:
+    except Exception as e:
+        print(f"  ! перевірка ключа доступу не вдалась: {e}")
+        return False, KEY_DB_ERROR
+    if not row or not row["is_active"]:
         return False, None
+
+    key_id = row["id"]
+    now    = time.time()
+    if now - _key_touched.get(key_id, 0) > _KEY_TOUCH_INTERVAL:
+        _key_touched[key_id] = now
+        try:
+            with db.cursor() as cur:
+                cur.execute("UPDATE external_access_keys SET last_used_at=NOW(), last_used_from=%s WHERE id=%s",
+                            (identity or "невідомо", key_id))
+            db.commit()
+        except Exception as e:
+            # Не змогли записати позначку — це не привід відмовляти в доступі.
+            print(f"  ! не вдалось оновити last_used_at для ключа {key_id}: {e}")
+
+    return True, key_id
+
+
+def _key_error_response(key_id):
+    """Одна відповідь на всі місця, де ключ не пройшов перевірку."""
+    if key_id == KEY_DB_ERROR:
+        return jsonify({"error": "База архіву зараз не відповідає, спробуй ще раз",
+                        "origin": "база даних"}), 503
+    return jsonify({"error": "Ключ доступу недійсний або деактивований",
+                    "origin": "ключ доступу"}), 403
 
 
 def get_hidden_folders_for_key(key_id: int) -> set:
@@ -65,7 +99,7 @@ def api_external_access_gallery_ids():
     key = flask_request.headers.get("X-Access-Key", "")
     valid, key_id = _validate_external_key(key, flask_request.headers.get("X-Identity", ""))
     if not valid:
-        return jsonify({"error": "Ключ доступу недійсний або деактивований"}), 403
+        return _key_error_response(key_id)
 
     f         = flask_request.args.get("filter", "all")
     artist_id = flask_request.args.get("artist_id", None)
@@ -126,7 +160,7 @@ def api_external_access_gallery_meta(download_id):
     key = flask_request.headers.get("X-Access-Key", "")
     valid, key_id = _validate_external_key(key, flask_request.headers.get("X-Identity", ""))
     if not valid:
-        return jsonify({"error": "Ключ доступу недійсний або деактивований"}), 403
+        return _key_error_response(key_id)
     if not key_can_see_file(key_id, download_id):
         return jsonify({"error": "Немає доступу до цієї папки"}), 403
     return api_gallery_meta(download_id)
@@ -139,7 +173,7 @@ def api_external_access_gallery_stream(download_id):
     key = flask_request.args.get("key", "")
     valid, key_id = _validate_external_key(key, flask_request.args.get("identity", ""))
     if not valid:
-        return jsonify({"error": "Ключ доступу недійсний або деактивований"}), 403
+        return _key_error_response(key_id)
     if not key_can_see_file(key_id, download_id):
         return jsonify({"error": "Немає доступу до цієї папки"}), 403
     return api_gallery_stream(download_id)
@@ -153,7 +187,7 @@ def api_external_access_catalog_list():
     key = flask_request.headers.get("X-Access-Key", "")
     valid, key_id = _validate_external_key(key, flask_request.headers.get("X-Identity", ""))
     if not valid:
-        return jsonify({"error": "Ключ доступу недійсний або деактивований"}), 403
+        return _key_error_response(key_id)
     return api_catalog_list(hidden_folders_override=get_hidden_folders_for_key(key_id))
 
 
@@ -162,7 +196,7 @@ def api_external_access_catalog_file():
     key = flask_request.args.get("key", "")
     valid, key_id = _validate_external_key(key, flask_request.args.get("identity", ""))
     if not valid:
-        return jsonify({"error": "Ключ доступу недійсний або деактивований"}), 403
+        return _key_error_response(key_id)
     path = flask_request.args.get("path", "")
     hidden = get_hidden_folders_for_key(key_id)
     if hidden and path.split("/", 1)[0] in hidden:
@@ -182,7 +216,7 @@ def api_external_access_catalog_thumb():
     key = flask_request.args.get("key", "")
     valid, key_id = _validate_external_key(key, flask_request.args.get("identity", ""))
     if not valid:
-        return jsonify({"error": "Ключ доступу недійсний або деактивований"}), 403
+        return _key_error_response(key_id)
     path = flask_request.args.get("path", "")
     hidden = get_hidden_folders_for_key(key_id)
     if hidden and path.split("/", 1)[0] in hidden:
@@ -591,7 +625,13 @@ def api_external_gallery_stream(archive_id, remote_id):
                     params={"key": cfg.get("access_key", ""), "identity": cfg.get("my_identity", "")},
                     headers=upstream_headers, stream=True, timeout=30)
         if r.status_code == 403:
-            return jsonify({"error": "Ключ доступу недійсний або деактивований"}), 403
+            # Це відповідь ЧУЖОГО архіву — пояснення беремо з неї,
+            # свого key_id тут немає й бути не може.
+            try:
+                why = (r.json() or {}).get("error") or "доступ закрито"
+            except Exception:
+                why = "доступ закрито"
+            return jsonify({"error": why, "origin": "віддалений архів"}), 403
         r.raise_for_status()
         mime = r.headers.get("Content-Type", "application/octet-stream")
 
@@ -639,7 +679,13 @@ def api_external_catalog_file(archive_id):
                     params={"path": path, "key": cfg.get("access_key", ""), "identity": cfg.get("my_identity", "")},
                     headers=upstream_headers, stream=True, timeout=30)
         if r.status_code == 403:
-            return jsonify({"error": "Ключ доступу недійсний або деактивований"}), 403
+            # Це відповідь ЧУЖОГО архіву — пояснення беремо з неї,
+            # свого key_id тут немає й бути не може.
+            try:
+                why = (r.json() or {}).get("error") or "доступ закрито"
+            except Exception:
+                why = "доступ закрито"
+            return jsonify({"error": why, "origin": "віддалений архів"}), 403
         r.raise_for_status()
         mime = r.headers.get("Content-Type", "application/octet-stream")
 
