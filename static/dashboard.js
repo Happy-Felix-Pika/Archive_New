@@ -4245,7 +4245,8 @@ let _catalogView  = localStorage.getItem('catalog_view') || 'grid';
 const _catalogViewBtn = document.getElementById('catalog-view-toggle');
 if (_catalogViewBtn) _catalogViewBtn.textContent = t(_catalogView === 'grid' ? 'view.grid' : 'view.list');
 const CATALOG_IMAGE_EXT = ['png','jpg','jpeg','gif','webp','bmp','svg','ico'];
-const CATALOG_VIDEO_EXT = ['webm','mp4','mov','mkv','avi','m4v','ogv'];
+const CATALOG_VIDEO_EXT = ['webm','mp4','mov','mkv','avi','m4v','ogv',
+                           'flv','wmv','mpg','mpeg','ts','m2ts','mts','3gp','asf','divx'];
 const CATALOG_AUDIO_EXT = ['mp3','wav','ogg','flac','m4a','aac'];
 
 let _catalogSource = 'local';

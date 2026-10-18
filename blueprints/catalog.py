@@ -188,8 +188,9 @@ THUMB_SIZE       = 320      # по довшій стороні, з запасо�
 THUMB_VIDEO_SEEK = 3        # секунда кадру: нульова часто чорна
 THUMB_TIMEOUT    = 25
 
-_THUMB_IMAGE_EXT = {"png", "jpg", "jpeg", "gif", "webp", "bmp"}
-_THUMB_VIDEO_EXT = {"webm", "mp4", "mov", "mkv", "avi", "m4v", "ogv"}
+_THUMB_IMAGE_EXT = {"png", "jpg", "jpeg", "gif", "webp", "bmp", "avif", "jfif", "tif", "tiff"}
+_THUMB_VIDEO_EXT = {"webm", "mp4", "mov", "mkv", "avi", "m4v", "ogv",
+                    "flv", "wmv", "mpg", "mpeg", "ts", "m2ts", "mts", "3gp", "asf", "divx"}
 
 
 def _thumb_cache_path(rel_path: str, tag: str = "") -> str:
@@ -215,29 +216,53 @@ def _make_video_thumb(src: str, out_path: str, headers: str | None = None) -> bo
     """
     Кадр з відео через ffmpeg. src — шлях на диску або http(s)-URL.
 
-    Спершу пробуємо кадр на THUMB_VIDEO_SEEK секунді: перший кадр у
-    багатьох роликів чорний або це заставка. Якщо відео коротше —
-    повторюємо з нуля.
+    Пробуємо по черзі три способи, від найшвидшого до найнадійнішого:
+
+      1. -ss ПЕРЕД -i  — швидке позиціонування: ffmpeg стрибає одразу
+         в потрібне місце, не декодуючи початок. Працює миттєво, але
+         для частини контейнерів (avi, flv, mpeg-ps, пошкоджені mp4
+         без індексу) просто нічого не віддає.
+      2. -ss ПІСЛЯ -i  — точне позиціонування: декодує від початку й
+         відкидає кадри. Повільніше, зате бере там, де спосіб 1 мовчки
+         провалювався. Саме через брак цього кроку частина відео
+         лишалась без прев'ю.
+      3. без позиціонування — найперший кадр. Остання спроба: коротке
+         відео, одна картинка в контейнері тощо.
+
+    Перший кадр у багатьох роликів чорний, тому способи 1 і 2 беруть
+    кадр на THUMB_VIDEO_SEEK секунді, і лише спосіб 3 — з нуля.
     """
     import subprocess
-    for seek in (THUMB_VIDEO_SEEK, 0):
+
+    attempts = [
+        ("швидке позиціонування", ["-ss", str(THUMB_VIDEO_SEEK)], []),
+        ("точне позиціонування",  [], ["-ss", str(THUMB_VIDEO_SEEK)]),
+        ("перший кадр",           [], []),
+    ]
+    last_err = ""
+    for label, pre, post in attempts:
         cmd = ["ffmpeg", "-nostdin", "-y", "-loglevel", "error"]
         if headers:
             cmd += ["-headers", headers]
-        cmd += ["-ss", str(seek), "-i", src,
-                "-frames:v", "1",
-                "-vf", f"scale='min({THUMB_SIZE},iw)':-2",
-                "-q:v", "5", out_path]
+        cmd += pre + ["-i", src] + post + [
+            "-frames:v", "1", "-an", "-sn", "-dn",
+            "-vf", f"scale='min({THUMB_SIZE},iw)':-1",
+            "-q:v", "5", out_path]
         try:
             r = subprocess.run(cmd, capture_output=True, timeout=THUMB_TIMEOUT)
         except subprocess.TimeoutExpired:
-            print(f"  ! мініатюра відео: ffmpeg завис на {src}")
-            return False
+            print(f"  ! мініатюра відео: ffmpeg завис ({label}) на {src}")
+            continue
         except FileNotFoundError:
             print("  ! ffmpeg не знайдено — мініатюр для відео не буде")
             return False
         if r.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
             return True
+        last_err = (r.stderr or b"").decode("utf-8", "replace").strip()[-300:]
+
+    # Жоден спосіб не спрацював — пишемо причину в лог, інакше
+    # «у частини відео немає прев'ю» неможливо діагностувати.
+    print(f"  ! мініатюра відео не вийшла: {src}\n    ffmpeg: {last_err or 'без повідомлення'}")
     return False
 
 
@@ -257,6 +282,34 @@ def api_catalog_thumb():
     ext      = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     is_image = ext in _THUMB_IMAGE_EXT
     is_video = ext in _THUMB_VIDEO_EXT
+
+    # ?debug=1 — чому саме для цього файлу немає прев'ю. Інакше
+    # «у частини відео його немає» доводиться ловити по логах.
+    debug = flask_request.args.get("debug") == "1"
+    if debug:
+        info = {"path": rel_path, "ext": ext, "kind":
+                "зображення" if is_image else "відео" if is_video else "не підтримується",
+                "storage": get_storage_mode()}
+        if is_video and get_storage_mode() == "local":
+            src = os.path.join(get_local_root(), rel_path)
+            info["файл на диску"] = os.path.isfile(src)
+            if os.path.isfile(src):
+                info["розмір"] = os.path.getsize(src)
+                import subprocess
+                try:
+                    pr = subprocess.run(
+                        ["ffprobe", "-v", "error", "-show_entries",
+                         "stream=codec_type,codec_name,width,height:format=duration",
+                         "-of", "default=nw=1", src],
+                        capture_output=True, timeout=20)
+                    info["ffprobe"] = (pr.stdout or b"").decode("utf-8", "replace").split("\n")
+                    err = (pr.stderr or b"").decode("utf-8", "replace").strip()
+                    if err:
+                        info["ffprobe_помилка"] = err[-300:]
+                except Exception as e:
+                    info["ffprobe"] = f"не вдалось запустити: {e}"
+        return jsonify(info)
+
     if not (is_image or is_video):
         return jsonify({"error": "no preview"}), 404
 
