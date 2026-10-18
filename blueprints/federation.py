@@ -167,7 +167,7 @@ def api_external_access_catalog_file():
     hidden = get_hidden_folders_for_key(key_id)
     if hidden and path.split("/", 1)[0] in hidden:
         return jsonify({"error": "Немає доступу до цієї папки"}), 403
-    return api_catalog_file()
+    return api_catalog_file(external=True)
 
 
 @bp.route("/api/external-access/catalog/thumb")
@@ -186,7 +186,7 @@ def api_external_access_catalog_thumb():
     hidden = get_hidden_folders_for_key(key_id)
     if hidden and path.split("/", 1)[0] in hidden:
         return jsonify({"error": "Немає доступу до цієї папки"}), 403
-    return api_catalog_thumb()
+    return api_catalog_thumb(external=True)
 
 
 @bp.route("/api/external-access/keys")

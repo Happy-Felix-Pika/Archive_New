@@ -267,13 +267,19 @@ def _make_video_thumb(src: str, out_path: str, headers: str | None = None) -> bo
 
 
 @bp.route("/api/catalog/thumb")
-def api_catalog_thumb():
+def api_catalog_thumb(external: bool = False):
     """Мініатюра файлу каталогу: зображення або кадр з відео."""
     rel_path = _safe_rel_path(flask_request.args.get("path"))
     if not rel_path:
         return jsonify({"error": "bad path"}), 400
 
-    if not is_current_user_admin():
+    # external=True — запит прийшов через ключ доступу, а не від залогіненого
+    # юзера. Папки для такого запиту вже перевірив виклик у federation.py, за
+    # списком САМЕ ЦЬОГО ключа. Перевіряти тут ще й сесію не можна: сесії
+    # немає, current_user_id() у такому разі повертає 1, і зовнішній архів
+    # мовчки впирався в папки, які власник сховав від себе — 403 на файл,
+    # до якого ключ має повне право.
+    if not external and not is_current_user_admin():
         top_segment = rel_path.split("/", 1)[0]
         if top_segment in get_hidden_catalog_folders(current_user_id()):
             return jsonify({"error": "Немає доступу до цієї папки"}), 403
@@ -379,13 +385,19 @@ def api_catalog_thumb():
 
 
 @bp.route("/api/catalog/file")
-def api_catalog_file():
+def api_catalog_file(external: bool = False):
     """Віддає конкретний файл за відносним шляхом у сховищі — для перегляду."""
     rel_path = _safe_rel_path(flask_request.args.get("path"))
     if not rel_path:
         return jsonify({"error": "bad path"}), 400
 
-    if not is_current_user_admin():
+    # external=True — запит прийшов через ключ доступу, а не від залогіненого
+    # юзера. Папки для такого запиту вже перевірив виклик у federation.py, за
+    # списком САМЕ ЦЬОГО ключа. Перевіряти тут ще й сесію не можна: сесії
+    # немає, current_user_id() у такому разі повертає 1, і зовнішній архів
+    # мовчки впирався в папки, які власник сховав від себе — 403 на файл,
+    # до якого ключ має повне право.
+    if not external and not is_current_user_admin():
         top_segment = rel_path.split("/", 1)[0]
         if top_segment in get_hidden_catalog_folders(current_user_id()):
             return jsonify({"error": "Немає доступу до цієї папки"}), 403
