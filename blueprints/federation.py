@@ -5,7 +5,7 @@ import random, secrets
 from flask import Blueprint, Response, jsonify, request as flask_request
 
 
-from blueprints.catalog import api_catalog_file, api_catalog_list
+from blueprints.catalog import api_catalog_file, api_catalog_list, api_catalog_thumb
 from blueprints.gallery import _gallery_ids_query, _resolve_tag_names, api_gallery_meta, api_gallery_stream
 from core.auth import admin_required, current_user_id
 from core.db import get_db, q, qq
@@ -166,6 +166,25 @@ def api_external_access_catalog_file():
     if hidden and path.split("/", 1)[0] in hidden:
         return jsonify({"error": "Немає доступу до цієї папки"}), 403
     return api_catalog_file()
+
+
+@bp.route("/api/external-access/catalog/thumb")
+def api_external_access_catalog_thumb():
+    """
+    Мініатюра файлу Каталогу для чужого архіву, який підключив нас.
+    Перевірки ті самі, що й у catalog/file: ключ плюс папки, сховані
+    саме для цього ключа. Без цього прев'ю було б каналом обходу —
+    кадр з відео теж показує вміст.
+    """
+    key = flask_request.args.get("key", "")
+    valid, key_id = _validate_external_key(key, flask_request.args.get("identity", ""))
+    if not valid:
+        return jsonify({"error": "Ключ доступу недійсний або деактивований"}), 403
+    path = flask_request.args.get("path", "")
+    hidden = get_hidden_folders_for_key(key_id)
+    if hidden and path.split("/", 1)[0] in hidden:
+        return jsonify({"error": "Немає доступу до цієї папки"}), 403
+    return api_catalog_thumb()
 
 
 @bp.route("/api/external-access/keys")
@@ -631,6 +650,44 @@ def api_external_catalog_file(archive_id):
         return Response(gen(), status=r.status_code, headers=resp_headers)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/api/external-archives/<archive_id>/catalog/thumb")
+def api_external_catalog_thumb(archive_id):
+    """
+    Мініатюра з Каталогу підключеного архіву.
+
+    Віддається як є, без Range: це маленький JPEG, а не потік. Якщо на
+    тому боці стоїть стара версія без цього ендпоінта, повертається 404
+    і фронт сам відкочується на повний файл (для картинок) або іконку
+    (для відео) — саме для цього там обробник onerror.
+    """
+    cfg = _get_external_cfg_or_404(archive_id)
+    if not cfg:
+        return jsonify({"error": "Архів не знайдено"}), 404
+    path = flask_request.args.get("path", "")
+    import requests as req
+    base = cfg.get("base_url", "").rstrip("/")
+    try:
+        r = req.get(f"{base}/api/external-access/catalog/thumb",
+                    params={"path": path, "key": cfg.get("access_key", ""),
+                            "identity": cfg.get("my_identity", "")},
+                    stream=True, timeout=40)
+        if r.status_code == 403:
+            return jsonify({"error": "Ключ доступу недійсний або деактивований"}), 403
+        if r.status_code != 200:
+            return jsonify({"error": "Мініатюра недоступна"}), 404
+
+        def gen():
+            for chunk in r.iter_content(chunk_size=65536):
+                if chunk: yield chunk
+
+        return Response(gen(), status=200, headers={
+            "Content-Type":  r.headers.get("Content-Type", "image/jpeg"),
+            "Cache-Control": "public, max-age=86400",
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 404
 
 
 @bp.route("/api/external-archives/<archive_id>/favorite", methods=["POST"])
