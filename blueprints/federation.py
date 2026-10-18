@@ -2,7 +2,9 @@
 
 import random, secrets
 
-from flask import Blueprint, Response, jsonify, request as flask_request
+import os
+
+from flask import Blueprint, Response, jsonify, request as flask_request, send_file
 
 
 from blueprints.catalog import api_catalog_file, api_catalog_list, api_catalog_thumb
@@ -669,25 +671,90 @@ def api_external_catalog_thumb(archive_id):
     import requests as req
     base = cfg.get("base_url", "").rstrip("/")
     try:
+        params = {"path": path, "key": cfg.get("access_key", ""),
+                  "identity": cfg.get("my_identity", "")}
+        # ?debug=1 проходить наскрізь: інакше причину, чому прев'ю немає
+        # саме на ЧУЖОМУ файлі, довелось би з'ясовувати з його ключем у руках.
+        if flask_request.args.get("debug") == "1":
+            params["debug"] = "1"
         r = req.get(f"{base}/api/external-access/catalog/thumb",
-                    params={"path": path, "key": cfg.get("access_key", ""),
-                            "identity": cfg.get("my_identity", "")},
-                    stream=True, timeout=40)
+                    params=params, stream=True, timeout=40)
         if r.status_code == 403:
             return jsonify({"error": "Ключ доступу недійсний або деактивований"}), 403
-        if r.status_code != 200:
+        if r.status_code == 200:
+            def gen():
+                for chunk in r.iter_content(chunk_size=65536):
+                    if chunk: yield chunk
+            return Response(gen(), status=200, headers={
+                "Content-Type":  r.headers.get("Content-Type", "image/jpeg"),
+                "Cache-Control": "public, max-age=86400",
+            })
+    except Exception as e:
+        if flask_request.args.get("debug") == "1":
+            return jsonify({"error": f"архів недоступний: {e}"}), 404
+        pass   # той бік недоступний або не вміє — пробуємо зробити самі
+
+    if flask_request.args.get("debug") == "1":
+        return jsonify({"error": "той бік не віддав мініатюру і не пояснив причину"}), 404
+    return _thumb_from_remote_original(cfg, path)
+
+
+def _thumb_from_remote_original(cfg, path):
+    """
+    Запасний шлях: підключений архів мініатюру не віддав (стара версія,
+    формат якого він не знає, або в нього не вийшов кадр). Робимо її
+    самі з оригіналу, який той архів віддати вміє — ендпоінт
+    catalog/file є навіть у найстарших збірках.
+
+    Відео НЕ качаємо: ffmpeg читає той самий URL по HTTP і забирає лише
+    потрібні шматки. Картинку качаємо, вона маленька.
+
+    Результат кешуємо на нашому боці, тож платимо за це один раз.
+    """
+    from blueprints.catalog import (_THUMB_IMAGE_EXT, _THUMB_VIDEO_EXT,
+                                    _make_image_thumb, _make_video_thumb,
+                                    _thumb_cache_path)
+    name = path.rsplit("/", 1)[-1]
+    ext  = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    if ext not in _THUMB_IMAGE_EXT and ext not in _THUMB_VIDEO_EXT:
+        return jsonify({"error": "Мініатюра недоступна"}), 404
+
+    base = cfg.get("base_url", "").rstrip("/")
+    from urllib.parse import urlencode
+    qs  = urlencode({"path": path, "key": cfg.get("access_key", ""),
+                     "identity": cfg.get("my_identity", "")})
+    url = f"{base}/api/external-access/catalog/file?{qs}"
+
+    out = _thumb_cache_path(f"{base}|{path}", "remote")
+    if os.path.exists(out):
+        return send_file(out, mimetype="image/jpeg", conditional=True, max_age=86400)
+
+    if ext in _THUMB_VIDEO_EXT:
+        if not _make_video_thumb(url, out):
             return jsonify({"error": "Мініатюра недоступна"}), 404
+        return send_file(out, mimetype="image/jpeg", conditional=True, max_age=86400)
 
-        def gen():
-            for chunk in r.iter_content(chunk_size=65536):
-                if chunk: yield chunk
-
-        return Response(gen(), status=200, headers={
-            "Content-Type":  r.headers.get("Content-Type", "image/jpeg"),
-            "Cache-Control": "public, max-age=86400",
-        })
+    import requests as req, tempfile
+    tmp = None
+    try:
+        rr = req.get(url, stream=True, timeout=40)
+        rr.raise_for_status()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as fh:
+            tmp = fh.name
+            for chunk in rr.iter_content(65536):
+                if chunk:
+                    fh.write(chunk)
+        if not _make_image_thumb(tmp, out):
+            return jsonify({"error": "Мініатюра недоступна"}), 404
     except Exception as e:
         return jsonify({"error": str(e)}), 404
+    finally:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    return send_file(out, mimetype="image/jpeg", conditional=True, max_age=86400)
 
 
 @bp.route("/api/external-archives/<archive_id>/favorite", methods=["POST"])
