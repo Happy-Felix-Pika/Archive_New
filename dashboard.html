@@ -437,9 +437,9 @@
           <button class="btn btn-ghost btn-sm" onclick="document.getElementById('bookmarks-list-modal').style.display='none'">✕</button>
         </div>
         <div class="filter-toggle" id="bookmarks-source-toggle" style="margin-bottom:12px">
+          <!-- Кнопки джерел будуються з /api/live/sources: імен застосунків
+               у ядрі бути не повинно. -->
           <button class="filter-btn active" data-bsource="" onclick="liveRenderBookmarksList('')">Усі</button>
-          <button class="filter-btn" data-bsource="e621" onclick="liveRenderBookmarksList('e621')">e621</button>
-          <button class="filter-btn" data-bsource="inkbunny" onclick="liveRenderBookmarksList('inkbunny')">Inkbunny</button>
         </div>
         <div id="bookmarks-list-body" style="display:flex;flex-direction:column;gap:6px"></div>
       </div>
@@ -573,33 +573,15 @@
         <div class="filter-toggle" id="live-source-toggle"></div>
         <button class="btn btn-ghost btn-sm" onclick="liveShowCredentialsModal()" title="Мої ключі">⚙</button>
         <button class="btn btn-ghost btn-sm" onclick="liveShowSourcesModal()" title="Додати своє джерело">➕ Джерело</button>
-        <input id="live-artist" data-i18n-ph="live.artist.ph" placeholder="Юзернейм Inkbunny…"
-               style="display:none;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:13px;color:var(--text);outline:none;min-width:180px">
-        <div style="position:relative">
-          <input id="live-tags" data-i18n-ph="live.tags.ph" placeholder="Теги e621 (rating:safe order:score …)" autocomplete="off"
-                 style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:13px;color:var(--text);outline:none;min-width:220px">
-          <div id="live-tags-suggest" class="tag-suggest-box" style="display:none"></div>
-        </div>
-        <div style="position:relative">
-          <input id="live-tags-exclude" data-i18n-ph="live.tagsexclude.ph" placeholder="Виключити теги…" autocomplete="off"
-                 style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:13px;color:var(--text);outline:none;min-width:180px">
-          <div id="live-tags-exclude-suggest" class="tag-suggest-box" style="display:none"></div>
-        </div>
-        <select id="live-sort"
-                style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-family:var(--mono);font-size:12px;color:var(--text);outline:none">
-          <option value="" data-i18n="live.sort.default">За замовчуванням</option>
-          <option value="score" data-i18n="live.sort.scoredesc">Найбільше лайків</option>
-          <option value="score_asc" data-i18n="live.sort.scoreasc">Найменше лайків</option>
-          <option value="id" data-i18n="live.sort.oldest">Від найстаріших</option>
-          <option value="id_desc" data-i18n="live.sort.newest">Від найновіших</option>
-        </select>
+        <!-- Поля пошуку малюються з опису джерела (/api/live/sources →
+             search_fields). Ядро не знає ні про теги, ні про авторів:
+             який набір полів потрібен — вирішує застосунок джерела. -->
+        <div id="live-fields" style="display:contents"></div>
         <button class="btn btn-ghost" id="live-back-btn" onclick="liveGoBack()" style="display:none" data-i18n="live.back">← Назад</button>
         <button class="btn btn-primary" onclick="liveSearchFresh()" data-i18n="live.search">🔍 Шукати</button>
         <button class="btn btn-ghost" id="live-download-btn" onclick="liveDownloadArtist()" style="display:none" data-i18n="live.downloadall">⬇ Завантажити всю бібліотеку автора</button>
         <button class="btn btn-ghost" onclick="liveShowFavorites()">★ Моє улюблене</button>
-        <input id="live-favs-username" placeholder="чиєсь улюблене (юзернейм)…" autocomplete="off"
-               style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:13px;color:var(--text);outline:none;width:170px">
-        <button class="btn btn-ghost btn-sm" onclick="liveShowFavoritesOfUser()">👁 Переглянути</button>
+        <button class="btn btn-ghost btn-sm" id="live-view-favs-btn" onclick="liveShowFavoritesOfUser()">👁 Переглянути</button>
         <div id="live-status" style="flex:1 1 100%;font-family:var(--mono);font-size:11px;color:var(--muted)"></div>
       </div>
       <div id="live-grid" class="catalog-grid-view" style="margin-top:12px"></div>
@@ -933,7 +915,7 @@
 
 </div><!-- /#app-shell -->
 
-<script src="/static/dashboard.js?v=55"></script>
+<script src="/static/dashboard.js?v=58"></script>
 <script src="/static/apps.js?v=4"></script>
 
 </body>

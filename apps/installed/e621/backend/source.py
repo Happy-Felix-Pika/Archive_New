@@ -23,6 +23,29 @@ def build(LiveSourceBase):
         supports_real_favorites = True
         supports_favs_of_others = True
 
+        # Поля пошуку цього джерела. Ядро малює рівно цей список і
+        # нічого більше — щоб змінити набір, правиться ТІЛЬКИ цей файл.
+        #
+        # Поля «автор» тут свідомо немає: на e621 автор — це звичайний
+        # тег, пишеться прямо в теги як artist:ім'я. Окреме поле лише
+        # збивало з пантелику, бо насправді нічого не давало.
+        search_fields = [
+            {"id": "tags", "type": "text", "width": 240,
+             "placeholder": "Теги e621 (rating:safe order:score …)",
+             "autocomplete": "tags"},
+            {"id": "exclude", "type": "text", "width": 180,
+             "placeholder": "Виключити теги…", "autocomplete": "tags"},
+            {"id": "sort", "type": "select", "options": [
+                {"value": "",          "label": "За замовчуванням"},
+                {"value": "score",     "label": "Найбільше лайків"},
+                {"value": "score_asc", "label": "Найменше лайків"},
+                {"value": "id",        "label": "Від найстаріших"},
+                {"value": "id_desc",   "label": "Від найновіших"},
+            ]},
+            {"id": "favs_username", "type": "text", "width": 170,
+             "placeholder": "чиєсь улюблене (юзернейм)…"},
+        ]
+
         def __init__(self, credentials):
             super().__init__(credentials)
             self._dl = None

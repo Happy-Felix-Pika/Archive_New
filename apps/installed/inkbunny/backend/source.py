@@ -24,6 +24,54 @@ def build(LiveSourceBase):
         supports_real_favorites = False
         supports_favs_of_others = True   # ПЕРЕГЛЯД чужого улюбленого (read-only)
 
+        # Свій набір полів. Тут, на відміну від e621, автор — окрема
+        # сутність (юзернейм), а пошук по словах наближений, не за
+        # структурованими тегами; placeholder це й пояснює.
+        # Поля повторюють форму пошуку на самому Inkbunny. Ключові слова
+        # там і є теги, тож «шукати тільки в ключових словах» — це і є
+        # пошук по тегах. Ядро малює рівно цей список; змінити набір —
+        # правка тільки тут.
+        search_fields = [
+            {"id": "artist", "type": "text", "width": 160,
+             "placeholder": "Автор (юзернейм)…"},
+            {"id": "tags", "type": "text", "width": 220,
+             "placeholder": "Ключові слова через пробіл…"},
+            {"id": "exclude", "type": "text", "width": 160,
+             "placeholder": "Виключити слова…"},
+            {"id": "match", "type": "select", "options": [
+                {"value": "and",   "label": "Усі слова"},
+                {"value": "or",    "label": "Будь-яке слово"},
+                {"value": "exact", "label": "Точна фраза"},
+            ]},
+            {"id": "search_in", "type": "select", "options": [
+                {"value": "kw",     "label": "Тільки теги"},
+                {"value": "kw_t",   "label": "Теги + назва"},
+                {"value": "kw_t_d", "label": "Теги + назва + опис"},
+            ]},
+            {"id": "orderby", "type": "select", "options": [
+                {"value": "create_datetime",           "label": "Спершу нові"},
+                {"value": "favs",                      "label": "Найбільше в улюблених"},
+                {"value": "views",                     "label": "Найбільше переглядів"},
+                {"value": "last_file_update_datetime", "label": "Нещодавно оновлені"},
+            ]},
+            {"id": "days", "type": "select", "options": [
+                {"value": "",    "label": "За весь час"},
+                {"value": "1",   "label": "За добу"},
+                {"value": "7",   "label": "За тиждень"},
+                {"value": "30",  "label": "За місяць"},
+                {"value": "365", "label": "За рік"},
+            ]},
+            {"id": "type", "type": "select", "options": [
+                {"value": "",      "label": "Будь-який тип"},
+                {"value": "1,2,3", "label": "Малюнки"},
+                {"value": "4",     "label": "Комікси"},
+                {"value": "6,8,9", "label": "Анімація й відео"},
+                {"value": "14",    "label": "Фото"},
+            ]},
+            {"id": "favs_username", "type": "text", "width": 160,
+             "placeholder": "чиєсь улюблене (юзернейм)…"},
+        ]
+
         def __init__(self, credentials):
             super().__init__(credentials)
             self._dl = None
@@ -78,7 +126,8 @@ def build(LiveSourceBase):
             return file_url, thumb_url, ext
 
         def search(self, *, tags="", artist="", exclude="", sort="", pool_id=None,
-                   page=1, limit=60):
+                   page=1, limit=60, match="and", search_in="kw", orderby="",
+                   days="", type=""):
             dl = self._downloader()
 
             if pool_id:
@@ -94,11 +143,26 @@ def build(LiveSourceBase):
                     query_parts.extend(f"-{w}" for w in exclude.split() if w)
                 query = " ".join(query_parts)
 
-                if artist:
+                where = {"kw":     (True, False, False),
+                         "kw_t":   (True, True,  False),
+                         "kw_t_d": (True, True,  True)}.get(search_in, (True, False, False))
+                filters_used = bool(query or days or type or
+                                    (orderby and orderby != "create_datetime"))
+                if artist and not filters_used:
+                    # Лише автор — перевірений шлях: уся бібліотека автора.
                     subs = dl.search_artist_submissions(artist, limit=limit)
                 else:
-                    # сортування за лайками пошук напряму не дає — рахуємо самі нижче
-                    subs = dl.search_by_keywords(query, limit=limit, page=page, orderby='create_datetime')
+                    # Автор разом із тегами чи фільтрами — один запит до API
+                    # з username. Раніше гілка «автор» ігнорувала теги,
+                    # виключення й сторінку, і поєднати їх було неможливо.
+                    subs = dl.search_by_keywords(
+                        query, limit=limit, page=page,
+                        orderby=orderby or "create_datetime",
+                        stringtype=match if match in ("and", "or", "exact") else "and",
+                        in_keywords=where[0], in_title=where[1], in_description=where[2],
+                        username=artist or None,
+                        dayslimit=int(days) if str(days).isdigit() else None,
+                        types=type or None)
 
                 sub_ids    = [str(s.get("submission_id")) for s in subs if s.get("submission_id")]
                 full_by_id = self._refetch_full_details(dl, sub_ids)

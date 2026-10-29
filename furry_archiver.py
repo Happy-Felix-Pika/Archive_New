@@ -50,7 +50,8 @@ INKBUNNY_API_BASE = "https://inkbunny.net/api"
 
 # Сховище Inkbunny (nl1.ib.metapix.net) відкидає запити, які не схожі на
 # браузерні: без User-Agent (тобто "python-requests/...") і без Referer
-# воно віддає 403 навіть на публічні файли.
+# воно віддає 403 навіть на публічні файли. Тому представляємось як
+# браузер і вказуємо, звідки прийшли.
 INKBUNNY_USER_AGENT = ("Mozilla/5.0 (X11; Linux x86_64; rv:128.0) "
                        "Gecko/20100101 Firefox/128.0")
 INKBUNNY_REFERER    = "https://inkbunny.net/"
@@ -573,11 +574,6 @@ class DatabaseTracker:
         Запам'ятовує, що цей пост свідомо не беремо — він уже є в архіві
         з іншого джерела. Без цього запису наступний запуск качав би його
         знову, рахував pHash і знову відкидав, і так щоразу.
-
-        Таблиця історична: на старих базах вона є, на чистій установці її
-        створює міграція застосунку. Якщо колонки раптом не ті — мовчки
-        пропускаємо: не записати причину не так страшно, як зупинити
-        всю синхронізацію.
         """
         try:
             with self.db.cursor() as cur:
@@ -1300,7 +1296,10 @@ class InkbunnyDownloader:
         except Exception as e:
             print(f"  ✗ Inkbunny: {e}")
 
-    def search_by_keywords(self, query: str, limit: int = 60, page: int = 1, orderby: str = 'create_datetime') -> list:
+    def search_by_keywords(self, query: str, limit: int = 60, page: int = 1, orderby: str = 'create_datetime',
+                           stringtype: str = 'and', in_keywords: bool = True, in_title: bool = True,
+                           in_description: bool = False, username: str | None = None,
+                           dayslimit: int | None = None, types: str | None = None) -> list:
         """
         Inkbunny не має структурованого тег-пошуку як e621 (де можна
         'artist:x species:y rating:safe'). Це найближчий робочий аналог —
@@ -1319,12 +1318,21 @@ class InkbunnyDownloader:
             return []
         self._rate_limit()
         try:
+            # Значення за замовчуванням — рівно ті, що були зашиті раніше,
+            # тож старі виклики поводяться як і до цього. Нові параметри
+            # відповідають полям форми пошуку на самому Inkbunny.
+            yn = lambda v: 'yes' if v else 'no'
+            if not (in_keywords or in_title or in_description):
+                in_keywords = True   # API відмовляє, якщо не вибрано, де шукати
             data_params = {
                 'sid':          self.sid,
-                'stringtype':   'and',
-                'keywords':     'yes',
-                'title':        'yes',
-                'description':  'no',
+                # на сайті поле зветься stringtype, в документації API —
+                # string_join_type; шлемо обидва, значення однакові
+                'stringtype':        stringtype,
+                'string_join_type':  stringtype,
+                'keywords':     yn(in_keywords),
+                'title':        yn(in_title),
+                'description':  yn(in_description),
                 'submissions_per_page': limit,
                 'page':         str(page),
                 'get_rid':      'yes',
@@ -1333,6 +1341,12 @@ class InkbunnyDownloader:
             }
             if query:
                 data_params['text'] = query
+            if username:
+                data_params['username'] = username
+            if dayslimit:
+                data_params['dayslimit'] = str(int(dayslimit))
+            if types:
+                data_params['type'] = types
             r = self.session.post(f"{INKBUNNY_API_BASE}_search.php", data=data_params)
             r.raise_for_status()
             data = r.json()
@@ -1756,12 +1770,7 @@ class FurryArchiver:
                            secondary: bool = False) -> str:
         """
         Проверяет дубликаты (MD5 + pHash) и загружает файл в Nextcloud.
-        Возвращает: 'uploaded' | 'md5_dup' | 'cross_dup' | 'phash_dup' | 'upload_error'
-
-        secondary=True означає, що це друге джерело для цього автора —
-        основне вже відпрацювало. Тоді близький pHash трактуємо жорстко:
-        це та сама робота, просто з іншого сайту, і в чергу на ручний
-        розбір її класти нема сенсу.
+        Возвращает: 'uploaded' | 'md5_dup' | 'phash_dup' | 'upload_error'
         """
         md5    = result_file['md5_hash']
         phash  = result_file.get('phash')
@@ -1809,6 +1818,10 @@ class FurryArchiver:
 
                     os.makedirs(PENDING_DIR, exist_ok=True)
                     pending_path = os.path.join(PENDING_DIR, fname)
+                    # shutil.move, а не os.replace: у контейнері тимчасова
+                    # тека і /data — РІЗНІ файлові системи, і os.replace
+                    # падає з "Invalid cross-device link". shutil.move у
+                    # такому разі копіює й видаляє оригінал.
                     shutil.move(fpath, pending_path)
                     self.tracker.add_pending(
                         artist_id=artist_id, post_id=post_id, source=source,

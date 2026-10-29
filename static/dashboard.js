@@ -1816,8 +1816,13 @@ function galGoBack() {
 let _galTagsBeforePool = null;  // резервна копія тегів на момент входу в pool
 
 function galSelectPool(name, refresh = true, artistId = null, artistName = '') {
-  const enteringPool = !!name && !_galSelectedPool;
-  const exitingPool  = !name && !!_galSelectedPool;
+  // Скидати теги треба на БУДЬ-ЯКІЙ зміні пулу, а не лише на першому
+  // вході. Раніше умова була `!_galSelectedPool`, тож перехід з одного
+  // пулу в інший лишав старі теги активними — і новий pool показувався
+  // наполовину порожнім, бо частина його робіт тегам не відповідає.
+  const prevPool     = _galSelectedPool;
+  const changingPool = !!name && name !== prevPool;
+  const exitingPool  = !name && !!prevPool;
 
   _galSelectedPool = name;
   // Якщо обираємо конкретний pool зі списку "всі автори" (без фільтра автора) —
@@ -1833,11 +1838,17 @@ function galSelectPool(name, refresh = true, artistId = null, artistName = '') {
   // теги інакше лишались би активними і ховали частину робіт pool, які їм
   // не відповідають, хоча вони там реально є. Спрацьовує незалежно від
   // того, звідки обрано pool (бейдж, клавіша P, чи список пулів).
-  if (enteringPool) {
-    _galTagsBeforePool = { tagIds: new Set(_galTagIds), hideTagIds: new Set(_galHideTagIds) };
+  if (changingPool) {
+    // Резервну копію робимо лише при ПЕРШОМУ вході з загального перегляду:
+    // інакше перехід між пулами затер би її порожнім набором, і вийти
+    // назад з відновленими тегами вже не вийшло б.
+    if (!prevPool) {
+      _galTagsBeforePool = { tagIds: new Set(_galTagIds), hideTagIds: new Set(_galHideTagIds) };
+    }
     _galTagIds = new Set();
     _galHideTagIds = new Set();
     galRenderSelectedTagChips();
+    galRenderTagPicker();   // знімаємо й галочки у списку, не лише чипи
   } else if (exitingPool && _galTagsBeforePool) {
     // Повертаємось із pool назад у загальний перегляд — відновлюємо ті
     // теги, які були активні ДО входу (незалежно від того, вийшов ти через
@@ -1846,6 +1857,7 @@ function galSelectPool(name, refresh = true, artistId = null, artistName = '') {
     _galHideTagIds = _galTagsBeforePool.hideTagIds;
     _galTagsBeforePool = null;
     galRenderSelectedTagChips();
+    galRenderTagPicker();
   }
   document.getElementById('gal-pool-label').textContent = name ? `📦 ${name}` : t('gal.allpools');
   document.getElementById('gal-pool-picker').style.display = 'none';
@@ -2547,7 +2559,14 @@ document.addEventListener('keydown', e => {
     e.preventDefault();
     const curId = _galIds[_galIdx];
     const meta  = _galMeta[curId];
-    if (meta?.subfolder) galEnterPool(meta.subfolder, meta.artist_id, meta.artist);
+    if (meta?.subfolder) { galEnterPool(meta.subfolder, meta.artist_id, meta.artist); return; }
+    // Раніше тут була мовчанка: ні пулу, ні пояснення. Якщо в картці
+    // немає subfolder — файл не прив'язаний до поста (нема рядка в
+    // furry_posts), і галерея просто не знає, до якого pool він
+    // належить. Кажемо це прямо, бо ззовні виглядає як зламана клавіша.
+    if (!meta)              toast('Картка ще вантажиться — спробуй за мить', 'err');
+    else if (!meta.artist)  toast('Цей файл не прив\'язаний до автора — пулу в нього немає', 'err');
+    else                    toast('Цей файл не входить у жоден pool', 'err');
     return;
   }
   if (e.key==='Backspace' && _galHistory.length) { e.preventDefault(); galGoBack(); return; }
@@ -3492,21 +3511,11 @@ let _liveFavsUsername = '';
 let _liveResults = [];
 
 function liveSetSource(src) {
-  // після зміни джерела ховаємо те, чого воно не вміє
-  setTimeout(() => { try { liveApplyCapabilities(); } catch {} }, 0);
   _liveSource = src;
   document.querySelectorAll('#live-source-toggle .filter-btn').forEach(b =>
     b.classList.toggle('active', b.dataset.source === src));
-  // Поле тегів лишається видимим для ОБОХ джерел — для Inkbunny це не
-  // структурований пошук як на e621, а наближений (повнотекстовий) пошук
-  // по ключових словах, але поле для цього все одно потрібне
-  const tagsInput = document.getElementById('live-tags');
-  tagsInput.placeholder = src === 'e621'
-    ? 'Теги e621 (rating:safe order:score …)'
-    : 'Ключові слова (наближений пошук, не структуровані теги)…';
-  // Автор-поле — для e621 достатньо тегів (пиши artist:ім'я в полі тегів),
-  // тому там воно сховане; для Inkbunny — окремий пошук по юзернейму
-  document.getElementById('live-artist').style.display = src === 'inkbunny' ? '' : 'none';
+  // Набір полів і підписи до них — справа джерела, не ядра.
+  liveRenderFields();
 }
 
 let _liveSources = [];
@@ -3539,28 +3548,77 @@ async function liveLoadStatus() {
     }).join('   |   ');
     document.getElementById('live-setup-notice').style.display =
       _liveSources.some(s => s.credential_fields.length && !s.configured) ? 'block' : 'none';
-    liveApplyCapabilities();
+    liveRenderFields();
   } catch {
     el.textContent = t('toast.error');
   }
 }
 
-// Показуємо лише ті елементи керування, які джерело справді підтримує
-function liveApplyCapabilities() {
+// ── Поля пошуку ─────────────────────────────────────────────────────
+// Ядро не знає, які поля потрібні конкретному джерелу. Воно бере опис
+// із /api/live/sources (search_fields) і малює рівно його. Прибрати
+// «автора» в e621 чи додати своє поле — правка в застосунку джерела,
+// сюди лізти не треба.
+const LIVE_INPUT_CSS = 'background:var(--surface2);border:1px solid var(--border);' +
+  'border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:13px;' +
+  'color:var(--text);outline:none';
+
+function liveCurrentFields() {
   const s = _liveSources.find(x => x.id === _liveSource);
-  if (!s) return;
-  const show = (id, on) => {
-    const e = document.getElementById(id);
-    if (!e) return;
-    // ховаємо разом з обгорткою, якщо поле в контейнері (підказки тегів)
-    const target = (e.parentElement && e.parentElement.children.length <= 2 &&
-                    e.parentElement.style.position === 'relative') ? e.parentElement : e;
-    target.style.display = on ? '' : 'none';
-  };
-  show('live-tags',         s.supports.tags);
-  show('live-tags-exclude', s.supports.tags);
-  show('live-artist',       !s.supports.tags || s.supports.favs_of_others);
-  show('live-favs-username', s.supports.favs_of_others);
+  return (s && s.search_fields) || [];
+}
+
+function liveField(id)    { return document.getElementById(`live-f-${id}`); }
+function liveFieldVal(id) { const e = liveField(id); return e ? e.value.trim() : ''; }
+function liveSetField(id, v) { const e = liveField(id); if (e) e.value = v ?? ''; }
+
+// Усі заповнені поля одним об'єктом — саме це й їде в запит пошуку.
+function liveCollectFields() {
+  const out = {};
+  for (const f of liveCurrentFields()) {
+    const v = liveFieldVal(f.id);
+    if (v) out[f.id] = v;
+  }
+  return out;
+}
+
+function liveRenderFields() {
+  const box = document.getElementById('live-fields');
+  if (!box) return;
+  // Значення, які юзер уже ввів, переносимо в нову розмітку: при зміні
+  // джерела однойменні поля (теги) не повинні очищатись.
+  const keep = {};
+  for (const f of liveCurrentFields()) keep[f.id] = liveFieldVal(f.id);
+
+  box.innerHTML = liveCurrentFields().map(f => {
+    if (f.type === 'select') {
+      const opts = (f.options || []).map(o =>
+        `<option value="${esc(o.value)}">${esc(o.label)}</option>`).join('');
+      return `<select id="live-f-${esc(f.id)}" style="${LIVE_INPUT_CSS};padding:8px 10px;font-size:12px">${opts}</select>`;
+    }
+    const w = f.width ? `min-width:${parseInt(f.width) || 180}px` : 'min-width:180px';
+    const inp = `<input id="live-f-${esc(f.id)}" autocomplete="off" placeholder="${esc(f.placeholder || '')}" style="${LIVE_INPUT_CSS};${w}">`;
+    // Поле з автодоповненням потребує обгортки під випадний список
+    return f.autocomplete
+      ? `<div style="position:relative">${inp}<div id="live-f-${esc(f.id)}-suggest" class="tag-suggest-box" style="display:none"></div></div>`
+      : inp;
+  }).join('');
+
+  for (const f of liveCurrentFields()) {
+    if (keep[f.id]) liveSetField(f.id, keep[f.id]);
+    if (f.autocomplete === 'tags') {
+      liveSetupTagAutocomplete(`live-f-${f.id}`, `live-f-${f.id}-suggest`);
+    }
+    // Enter у будь-якому текстовому полі = натиснути «Шукати»
+    const el = liveField(f.id);
+    if (el && f.type !== 'select') {
+      el.addEventListener('keydown', e => { if (e.key === 'Enter') liveSearchFresh(); });
+    }
+  }
+
+  // Кнопка «Переглянути чиєсь улюблене» має сенс лише з відповідним полем
+  const viewBtn = document.getElementById('live-view-favs-btn');
+  if (viewBtn) viewBtn.style.display = liveField('favs_username') ? '' : 'none';
 }
 
 
@@ -3635,19 +3693,13 @@ async function liveSearch(page = 1) {
   liveBackToResults();
   const grid = document.getElementById('live-grid');
   grid.innerHTML = `<div style="opacity:.6">${t('common.loading')}</div>`;
-  const artist  = document.getElementById('live-artist').value.trim();
-  const tags    = document.getElementById('live-tags').value.trim();
-  const exclude = document.getElementById('live-tags-exclude').value.trim();
-  const sort    = document.getElementById('live-sort').value;
-
   document.getElementById('live-download-btn').style.display =
     (_currentUser?.is_admin && liveGetCurrentArtist()) ? '' : 'none';
 
+  // id поля = ім'я параметра. Ядро не перелічує поля поіменно —
+  // бере те, що оголосило джерело.
   const params = new URLSearchParams({ source: _liveSource, page });
-  if (artist)  params.set('artist', artist);
-  if (tags)    params.set('tags', tags);
-  if (exclude) params.set('exclude', exclude);
-  if (sort)    params.set('sort', sort);
+  for (const [k, v] of Object.entries(liveCollectFields())) params.set(k, v);
 
   try {
     const d = await fetch(`${API}/api/live/search?${params}`).then(r => r.json());
@@ -3714,8 +3766,8 @@ function liveSetupTagAutocomplete(inputId, boxId) {
     if (!box.contains(e.target) && e.target !== input) box.style.display = 'none';
   });
 }
-liveSetupTagAutocomplete('live-tags', 'live-tags-suggest');
-liveSetupTagAutocomplete('live-tags-exclude', 'live-tags-exclude-suggest');
+// Автодоповнення навішується в liveRenderFields() на ті поля, які
+// самі про це попросили (autocomplete: "tags") — фіксованих id більше немає.
 
 function liveRenderResults() {
   const grid = document.getElementById('live-grid');
@@ -3767,9 +3819,10 @@ async function liveConfirmSaveBookmark() {
     name,
     source:   _liveSource,
     mode:     _liveInPool ? 'pool' : (_liveShowingFavorites ? 'favorites' : (_liveCurrentArtistName ? 'artist' : 'search')),
-    tags:     document.getElementById('live-tags').value.trim(),
-    exclude:  document.getElementById('live-tags-exclude').value.trim(),
-    sort:     document.getElementById('live-sort').value,
+    fields:   liveCollectFields(),   // усі поля джерела, якими б вони не були
+    tags:     liveFieldVal('tags'),     // ці три — для сумісності зі старими
+    exclude:  liveFieldVal('exclude'),  // закладками, збереженими до переходу
+    sort:     liveFieldVal('sort'),     // на описані джерелом поля
     artist:   _liveCurrentArtistName,
     favsUsername: _liveFavsUsername,
     poolId:   r.pool_id || null,
@@ -3810,9 +3863,28 @@ let _bookmarksCache = [];
 
 async function liveShowBookmarksModal() {
   document.getElementById('bookmarks-list-modal').style.display = 'flex';
+  liveRenderBookmarkSourceButtons();
   document.querySelectorAll('#bookmarks-source-toggle .filter-btn').forEach(b =>
     b.classList.toggle('active', b.dataset.bsource === ''));
   await liveRenderBookmarksList('');
+}
+
+// Кнопки фільтра — з переліку джерел, а не вписані в розмітку.
+// Додався новий застосунок-джерело — кнопка з'явилась сама.
+function liveRenderBookmarkSourceButtons() {
+  const box = document.getElementById('bookmarks-source-toggle');
+  if (!box) return;
+  const all = box.querySelector('[data-bsource=""]');
+  box.innerHTML = '';
+  if (all) box.appendChild(all);
+  for (const s of _liveSources) {
+    const b = document.createElement('button');
+    b.className = 'filter-btn';
+    b.dataset.bsource = s.id;
+    b.textContent = s.label || s.id;
+    b.onclick = () => liveRenderBookmarksList(s.id);
+    box.appendChild(b);
+  }
 }
 
 async function liveRenderBookmarksList(sourceFilter) {
@@ -3849,9 +3921,9 @@ async function liveResumeBookmark(bookmarkId) {
   if (!bm) return;
   document.getElementById('bookmarks-list-modal').style.display = 'none';
   if (bm.source && bm.source !== _liveSource) liveSetSource(bm.source);
-  document.getElementById('live-tags').value = bm.tags || '';
-  document.getElementById('live-tags-exclude').value = bm.exclude || '';
-  document.getElementById('live-sort').value = bm.sort || '';
+  // Нові закладки несуть усі поля; старі — лише ці три.
+  const saved = bm.fields || { tags: bm.tags, exclude: bm.exclude, sort: bm.sort };
+  Object.entries(saved).forEach(([k, v]) => liveSetField(k, v || ''));
 
   const jumpToItem = () => {
     const foundIdx = _liveResults.findIndex(r => String(r.id) === String(bm.item_id) && r.source === bm.item_source);
@@ -3869,7 +3941,7 @@ async function liveResumeBookmark(bookmarkId) {
     await liveShowFavorites(bm.page || 1, bm.favsUsername || '');
     jumpToItem();
   } else if (bm.mode === 'artist' && bm.artist) {
-    document.getElementById('live-artist').value = bm.artist;
+    liveSetField('artist', bm.artist);
     await liveSearchArtist(bm.artist, bm.source);
     jumpToItem();
   } else {
@@ -3995,13 +4067,10 @@ async function liveShowFavorites(page = 1, username = '') {
   _liveFavsUsername = username;
   _liveInPool = false;
   _livePage = page;
-  const tags    = document.getElementById('live-tags').value.trim();
-  const exclude = document.getElementById('live-tags-exclude').value.trim();
-  const sort    = document.getElementById('live-sort').value;
-  const params  = new URLSearchParams({ source: _liveSource, page });
-  if (tags)     params.set('tags', tags);
-  if (exclude)  params.set('exclude', exclude);
-  if (sort)     params.set('sort', sort);
+  const params = new URLSearchParams({ source: _liveSource, page });
+  for (const [k, v] of Object.entries(liveCollectFields())) {
+    if (k !== 'favs_username') params.set(k, v);
+  }
   if (username) params.set('username', username);
   try {
     const d = await fetch(`${API}/api/live/favorites?${params}`).then(r => r.json());
@@ -4021,7 +4090,7 @@ async function liveShowFavorites(page = 1, username = '') {
 }
 
 function liveShowFavoritesOfUser() {
-  const username = document.getElementById('live-favs-username').value.trim();
+  const username = liveFieldVal('favs_username');
   if (!username) { toast('Впиши юзернейм', 'err'); return; }
   liveShowFavorites(1, username);
 }
@@ -4075,10 +4144,7 @@ let _liveHistory = [];
 function liveSnapshotState() {
   return {
     results: _liveResults, idx: _liveIdx, page: _livePage, source: _liveSource,
-    artist:  document.getElementById('live-artist').value,
-    tags:    document.getElementById('live-tags').value,
-    exclude: document.getElementById('live-tags-exclude').value,
-    sort:    document.getElementById('live-sort').value,
+    fields:  liveCollectFields(),
   };
 }
 
@@ -4090,10 +4156,7 @@ function liveUpdateBackBtn() {
 function liveGoBack() {
   const prev = _liveHistory.pop();
   if (!prev) return;
-  document.getElementById('live-artist').value       = prev.artist;
-  document.getElementById('live-tags').value         = prev.tags;
-  document.getElementById('live-tags-exclude').value  = prev.exclude;
-  document.getElementById('live-sort').value          = prev.sort;
+  liveCurrentFields().forEach(f => liveSetField(f.id, (prev.fields || {})[f.id] || ''));
   _liveResults = prev.results;
   _livePage    = prev.page;
   liveRenderResults();
@@ -4117,11 +4180,11 @@ function liveSearchArtist(name, source) {
   _liveCurrentArtistName = name;
   if (source && source !== _liveSource) liveSetSource(source);
   if ((source || _liveSource) === 'inkbunny') {
-    document.getElementById('live-artist').value = name;
-    document.getElementById('live-tags').value = '';
+    liveSetField('artist', name);
+    liveSetField('tags', '');
   } else {
-    document.getElementById('live-artist').value = '';
-    document.getElementById('live-tags').value = name;
+    liveSetField('artist', '');
+    liveSetField('tags', name);
   }
   return liveSearch();
 }
@@ -4132,11 +4195,11 @@ async function liveSearchPool(poolId, poolName) {
   liveBackToResults();
   _liveShowingFavorites = false;
   _liveInPool = true;
-  document.getElementById('live-artist').value = '';
+  liveSetField('artist', '');
   // НЕ пишемо назву pool у поле тегів — воно призначене для реального
   // пошукового запиту і читається в інших місцях (завантаження автора,
   // закладки), тому напис пула там ставав би "фантомним" тегом.
-  document.getElementById('live-tags').value = '';
+  liveSetField('tags', '');
   const grid = document.getElementById('live-grid');
   grid.innerHTML = `<div style="opacity:.6">${t('common.loading')}</div>`;
   try {
@@ -4166,9 +4229,9 @@ function liveDownloadArtistFromViewer() {
 
 function liveDownloadArtistByName(name, source) {
   if (source === 'inkbunny') {
-    document.getElementById('live-artist').value = name;
+    liveSetField('artist', name);
   } else {
-    document.getElementById('live-tags').value = name;
+    liveSetField('tags', name);
   }
   _liveCurrentArtistName = name;
   liveDownloadArtist();
@@ -4192,9 +4255,9 @@ document.getElementById('artist-picker-list')?.addEventListener('click', e => {
 let _liveCurrentArtistName = '';
 function liveGetCurrentArtist() {
   if (_liveSource === 'inkbunny') {
-    return document.getElementById('live-artist').value.trim();
+    return liveFieldVal('artist');
   }
-  const tagsVal = document.getElementById('live-tags').value.trim();
+  const tagsVal = liveFieldVal('tags');
   // Якщо це один простий тег без операторів e621 (rating:, order:, пробіли,
   // -виняток) — вважаємо це кандидатом на ім'я автора для кнопки завантаження
   if (tagsVal && !tagsVal.includes(' ') && !tagsVal.includes(':') && !tagsVal.startsWith('-')) {

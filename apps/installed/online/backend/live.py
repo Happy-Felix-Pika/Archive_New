@@ -236,9 +236,66 @@ def api_live_sources():
                 "real_favorites":  bool(getattr(cls, "supports_real_favorites", False)),
                 "favs_of_others":  bool(getattr(cls, "supports_favs_of_others", False)),
             },
+            "search_fields": search_fields_of(cls),
             "custom": bool(getattr(cls, "is_custom", False)),
         })
     return jsonify(out)
+
+
+# ─────────────────────────────────────────────────────────────────────
+#  Поля пошуку оголошує САМЕ ДЖЕРЕЛО
+#
+#  Раніше набір полів (автор, теги, виключення, сортування) був намертво
+#  вписаний у dashboard.html і dashboard.js. Щоб прибрати в e621 непотрібне
+#  поле «автор», доводилось правити ЯДРО — хоча це властивість джерела,
+#  а не архіву.
+#
+#  Тепер клас джерела оголошує `search_fields`, а ядро малює рівно те,
+#  що там написано. Додати, прибрати чи перейменувати поле — правка в
+#  застосунку джерела, ядро не чіпається.
+#
+#  Формат одного поля:
+#    {"id": "tags", "type": "text", "placeholder": "...",
+#     "width": 220, "autocomplete": "tags"}
+#    {"id": "sort", "type": "select", "options": [{"value": ..., "label": ...}]}
+#
+#  id поля = ім'я параметра, з яким значення піде в /api/live/search.
+# ─────────────────────────────────────────────────────────────────────
+
+SORT_OPTIONS = [
+    {"value": "",          "label": "За замовчуванням"},
+    {"value": "score",     "label": "Найбільше лайків"},
+    {"value": "score_asc", "label": "Найменше лайків"},
+    {"value": "id",        "label": "Від найстаріших"},
+    {"value": "id_desc",   "label": "Від найновіших"},
+]
+
+
+def _default_search_fields(cls):
+    """
+    Для джерел, які нічого не оголосили, збираємо набір зі старих
+    supports_* — щоб власні джерела користувача й будь-який сторонній
+    застосунок працювали далі без змін.
+    """
+    fields = []
+    if getattr(cls, "supports_tags", True):
+        fields.append({"id": "tags", "type": "text", "width": 220,
+                       "placeholder": "Теги…", "autocomplete": "tags"})
+        fields.append({"id": "exclude", "type": "text", "width": 180,
+                       "placeholder": "Виключити теги…", "autocomplete": "tags"})
+    else:
+        fields.append({"id": "artist", "type": "text", "width": 180,
+                       "placeholder": "Юзернейм…"})
+    fields.append({"id": "sort", "type": "select", "options": SORT_OPTIONS})
+    if getattr(cls, "supports_favs_of_others", False):
+        fields.append({"id": "favs_username", "type": "text", "width": 170,
+                       "placeholder": "чиєсь улюблене (юзернейм)…"})
+    return fields
+
+
+def search_fields_of(cls):
+    declared = getattr(cls, "search_fields", None)
+    return list(declared) if declared is not None else _default_search_fields(cls)
 
 
 @bp.route("/api/live/status")
@@ -546,6 +603,32 @@ def _resolve_in_library(post_ids: list) -> dict:
     return existing_map
 
 
+# Поля, які джерело оголосило саме (search_fields), але яких немає серед
+# базових. Раніше ендпоінт брав лише tags/artist/exclude/sort і решту
+# мовчки викидав — тож нове поле в застосунку не доходило до джерела, і
+# для нього довелось би правити ще й цей файл.
+_BASE_SEARCH_ARGS = {"tags", "artist", "exclude", "sort", "pool_id",
+                     "page", "limit", "source", "favs_username"}
+
+
+def _extra_search_args(src, args):
+    import inspect
+    declared = {f.get("id") for f in search_fields_of(type(src))}
+    wanted = {k: (args.get(k) or "").strip()
+              for k in declared - _BASE_SEARCH_ARGS if args.get(k)}
+    if not wanted:
+        return {}
+    # Передаємо лише те, що метод search() справді приймає: старе джерело
+    # з фіксованою сигнатурою не впаде від незнайомого аргументу.
+    try:
+        params = inspect.signature(src.search).parameters
+    except (TypeError, ValueError):
+        return {}
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return wanted
+    return {k: v for k, v in wanted.items() if k in params}
+
+
 @bp.route("/api/live/search")
 def api_live_search():
     """
@@ -574,6 +657,7 @@ def api_live_search():
         results, pool_name = src.search(
             tags=tags, artist=artist, exclude=exclude, sort=sort,
             pool_id=pool_id, page=page, limit=limit,
+            **_extra_search_args(src, flask_request.args),
         )
     except Exception as e:
         return jsonify({"error": str(e)}), 500
