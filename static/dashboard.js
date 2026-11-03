@@ -5176,39 +5176,129 @@ function fmtBytes(n) {
   return (i ? n.toFixed(1) : n) + ' ' + u[i];
 }
 
+// ── Кошик ─────────────────────────────────────────────────────────────
+// Сітка з прев'ю: видно, що саме видаляєш. Клік по картинці відкриває
+// файл повністю. Показуємо порціями — після «Розібрати оптом» у кошику
+// можуть бути тисячі файлів.
+const TRASH_PAGE = 60;
+let _trashItems = [], _trashShown = 0, _trashOrphans = [];
+
+function _trashThumb(src, fullUrl, ext, missing) {
+  const vid = /^(webm|mp4|mov|mkv|avi|m4v|ogv|flv|wmv|mpg|mpeg|ts|m2ts|mts|3gp|asf|divx)$/i.test(ext || '');
+  if (missing) return `<div class="trash-thumb trash-thumb-empty" title="Файлу на диску вже немає">⚠<span>файлу немає</span></div>`;
+  return `<a class="trash-thumb" href="${fullUrl}" target="_blank" rel="noopener" title="Відкрити повністю">
+      <img src="${src}" loading="lazy" alt=""
+           onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'trash-ext',textContent:'${String(ext||'файл').replace(/[^\wа-яіїєґ]/gi,'').toUpperCase()}'}))">
+      ${vid ? '<span class="trash-play">▶</span>' : ''}
+    </a>`;
+}
+
+function _trashCard(x) {
+  return `
+    <div class="trash-card${x.missing ? ' is-missing' : ''}" id="trash-card-${x.id}">
+      ${_trashThumb(`${API}/api/trash/${x.id}/thumb`, `${API}/api/trash/${x.id}/file`, x.ext, x.missing)}
+      <div class="trash-info">
+        <div class="trash-name" title="${esc(x.name || '')}">${esc(x.name || '')}</div>
+        <div class="trash-from" title="${esc(x.original_rel_path || '')}">${esc(x.original_rel_path || '')}</div>
+        <div class="trash-meta">${fmtBytes(x.size_bytes)} · ${x.deleted_at ? new Date(x.deleted_at).toLocaleString('uk-UA') : '—'}</div>
+      </div>
+      <div class="trash-actions">
+        ${x.missing ? '' : `<button class="btn btn-sm" onclick="trashRestore(${x.id})">↩ Відновити</button>`}
+        <button class="btn btn-sm btn-danger" onclick="trashPurge(${x.id})">${x.missing ? 'Прибрати запис' : 'Видалити назавжди'}</button>
+      </div>
+    </div>`;
+}
+
+function _trashRenderMore() {
+  const grid = document.getElementById('trash-grid');
+  if (!grid) return;
+  const next = _trashItems.slice(_trashShown, _trashShown + TRASH_PAGE);
+  grid.insertAdjacentHTML('beforeend', next.map(_trashCard).join(''));
+  _trashShown += next.length;
+  const more = document.getElementById('trash-more');
+  if (more) {
+    const left = _trashItems.length - _trashShown;
+    more.style.display = left > 0 ? '' : 'none';
+    more.textContent = `Показати ще ${Math.min(left, TRASH_PAGE)} (залишилось ${left})`;
+  }
+}
+
 async function loadTrashPage() {
   const box = document.getElementById('trash-list');
   if (!box) return;
   box.innerHTML = `<div class="muted">${t('common.loading')}</div>`;
-  let items = [];
   try {
-    items = await fetch(`${API}/api/trash`, {credentials:'include'}).then(r => r.json());
+    const [items, orphans] = await Promise.all([
+      fetch(`${API}/api/trash`, {credentials:'include'}).then(r => r.json()),
+      fetch(`${API}/api/trash/orphans`, {credentials:'include'}).then(r => r.ok ? r.json() : []).catch(() => []),
+    ]);
+    _trashItems = Array.isArray(items) ? items : [];
+    _trashOrphans = Array.isArray(orphans) ? orphans : [];
   } catch { box.innerHTML = '<div class="muted">Не вдалося завантажити кошик</div>'; return; }
 
+  const items = _trashItems;
   document.getElementById('btn-trash-empty').style.display = items.length ? '' : 'none';
   const total = items.reduce((s, x) => s + (Number(x.size_bytes) || 0), 0);
+  const missing = items.filter(x => x.missing).length;
   document.getElementById('trash-summary').textContent =
-    items.length ? `${items.length} файлів · ${fmtBytes(total)}` : '';
+    items.length ? `${items.length} файлів · ${fmtBytes(total)}${missing ? ` · без файлу на диску: ${missing}` : ''}` : '';
 
-  if (!items.length) { box.innerHTML = '<div class="muted">Кошик порожній</div>'; return; }
+  let html = '';
+  if (_trashOrphans.length) {
+    const osize = _trashOrphans.reduce((s, x) => s + (Number(x.size_bytes) || 0), 0);
+    const canBack = _trashOrphans.filter(o => o.restore_to).length;
+    html += `
+      <div class="trash-orphans">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <div style="font-weight:600">⚠ Загублені файли в .trash: ${_trashOrphans.length} · ${fmtBytes(osize)}</div>
+          ${canBack ? `<button class="btn btn-sm" onclick="trashOrphansRestoreAll()">↩ Повернути на місце всі, що можна (${canBack})</button>` : ''}
+        </div>
+        <div class="muted" style="font-size:12px;margin:4px 0 10px">
+          Лежать у теці кошика без запису — у списку нижче їх не видно, але місце вони займають.
+          Здебільшого це файли, які «зникли» з архіву, коли скінчилось місце на диску:
+          такі можна повернути на старе місце.
+        </div>
+        <div class="trash-grid">${_trashOrphans.map((o, i) => `
+          <div class="trash-card">
+            ${_trashThumb(`${API}/api/trash/orphans/thumb?name=${encodeURIComponent(o.name)}`,
+                          `${API}/api/trash/orphans/file?name=${encodeURIComponent(o.name)}`, o.ext, false)}
+            <div class="trash-info">
+              <div class="trash-name" title="${esc(o.real_name)}">${esc(o.real_name)}</div>
+              <div class="trash-from" title="${esc(o.restore_to || '')}">${o.restore_to ? '→ ' + esc(o.restore_to) : 'куди повертати — невідомо'}</div>
+              <div class="trash-meta">${fmtBytes(o.size_bytes)}</div>
+            </div>
+            <div class="trash-actions">
+              ${o.restore_to ? `<button class="btn btn-sm" onclick="trashOrphanRestore(_trashOrphans[${i}].name)">↩ На місце</button>` : ''}
+              <button class="btn btn-sm btn-danger" onclick="trashOrphanPurge(_trashOrphans[${i}].name)">Видалити назавжди</button>
+            </div>
+          </div>`).join('')}
+        </div>
+      </div>`;
+  }
 
-  box.innerHTML = `
-    <div style="overflow-x:auto">
-    <table class="data-table" style="width:100%">
-      <thead><tr><th>Файл</th><th>Звідки</th><th>Розмір</th><th>Видалено</th><th></th></tr></thead>
-      <tbody>${items.map(x => `
-        <tr>
-          <td>${esc(x.name || '')}</td>
-          <td class="muted" style="font-family:var(--mono);font-size:11px">${esc(x.original_rel_path || '')}</td>
-          <td class="muted">${fmtBytes(x.size_bytes)}</td>
-          <td class="muted">${x.deleted_at ? new Date(x.deleted_at).toLocaleString('uk-UA') : '—'}</td>
-          <td style="white-space:nowrap;text-align:right">
-            <button class="btn btn-sm" onclick="trashRestore(${x.id})">↩ Відновити</button>
-            <button class="btn btn-sm btn-danger" onclick="trashPurge(${x.id})">Видалити назавжди</button>
-          </td>
-        </tr>`).join('')}
-      </tbody>
-    </table></div>`;
+  if (!items.length) {
+    box.innerHTML = html + '<div class="muted">Кошик порожній</div>';
+    return;
+  }
+  box.innerHTML = html + `
+    <div class="trash-grid" id="trash-grid"></div>
+    <div style="text-align:center;margin-top:12px">
+      <button class="btn btn-sm" id="trash-more" onclick="_trashRenderMore()" style="display:none"></button>
+    </div>`;
+  _trashShown = 0;
+  _trashRenderMore();
+}
+
+// Після дії прибираємо одну картку, а не перемальовуємо весь кошик:
+// інакше на тисячах файлів сторінка стрибала б угору після кожного кліку.
+function _trashDrop(id) {
+  _trashItems = _trashItems.filter(x => x.id !== id);
+  _trashShown = Math.max(0, _trashShown - 1);
+  document.getElementById(`trash-card-${id}`)?.remove();
+  const total = _trashItems.reduce((s, x) => s + (Number(x.size_bytes) || 0), 0);
+  const sum = document.getElementById('trash-summary');
+  if (sum) sum.textContent = _trashItems.length ? `${_trashItems.length} файлів · ${fmtBytes(total)}` : '';
+  if (!_trashItems.length) loadTrashPage();
 }
 
 async function trashRestore(id) {
@@ -5216,22 +5306,51 @@ async function trashRestore(id) {
   const j = await r.json().catch(() => ({}));
   if (!r.ok || !j.ok) { toast(j.error || 'Не вдалося відновити', 'err'); return; }
   toast('Відновлено', 'ok');
-  loadTrashPage();
+  _trashDrop(id);
 }
 
 async function trashPurge(id) {
-  if (!confirm('Видалити файл назавжди? Відновити його вже не вийде.')) return;
+  const x = _trashItems.find(i => i.id === id);
+  if (!confirm(`Видалити назавжди «${x?.name || 'файл'}»? Відновити його вже не вийде.`)) return;
   const r = await fetch(`${API}/api/trash/${id}`, {method:'DELETE', credentials:'include'});
-  if (!r.ok) { toast('Не вдалося видалити', 'err'); return; }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) { toast(j.error || 'Не вдалося видалити', 'err'); return; }
   toast('Видалено назавжди', 'ok');
-  loadTrashPage();
+  _trashDrop(id);
 }
 
 async function trashEmpty() {
-  if (!confirm('Очистити кошик? Усі файли в ньому буде видалено назавжди.')) return;
+  if (!confirm(`Очистити кошик? Усі ${_trashItems.length} файлів буде видалено назавжди.`)) return;
   const r = await fetch(`${API}/api/trash/empty`, {method:'POST', credentials:'include'});
   const j = await r.json().catch(() => ({}));
-  toast(`Видалено назавжди: ${j.removed ?? 0}`, 'ok');
+  if (j.failed) toast(`Видалено: ${j.removed ?? 0}, не вдалося: ${j.failed} (див. лог)`, 'err');
+  else toast(`Видалено назавжди: ${j.removed ?? 0}`, 'ok');
+  loadTrashPage();
+}
+
+async function trashOrphanRestore(name, quiet) {
+  const r = await fetch(`${API}/api/trash/orphans/restore?name=${encodeURIComponent(name)}`, {method:'POST', credentials:'include'});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) { if (!quiet) toast(j.error || 'Не вдалося повернути', 'err'); return false; }
+  if (!quiet) { toast('Повернуто на місце', 'ok'); loadTrashPage(); }
+  return true;
+}
+
+async function trashOrphansRestoreAll() {
+  const list = _trashOrphans.filter(o => o.restore_to);
+  if (!confirm(`Повернути ${list.length} файлів на їхні старі місця?`)) return;
+  let ok = 0, bad = 0;
+  for (const o of list) (await trashOrphanRestore(o.name, true)) ? ok++ : bad++;
+  toast(`Повернуто: ${ok}${bad ? `, не вдалося: ${bad}` : ''}`, bad ? 'err' : 'ok');
+  loadTrashPage();
+}
+
+async function trashOrphanPurge(name) {
+  if (!confirm('Видалити цей файл з диска назавжди?')) return;
+  const r = await fetch(`${API}/api/trash/orphans?name=${encodeURIComponent(name)}`, {method:'DELETE', credentials:'include'});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) { toast(j.error || 'Не вдалося видалити', 'err'); return; }
+  toast('Видалено назавжди', 'ok');
   loadTrashPage();
 }
 

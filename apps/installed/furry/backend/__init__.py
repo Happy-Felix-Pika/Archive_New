@@ -70,6 +70,27 @@ def _snapshot_for_trash(snap, file_id, db, **_):
     return snap
 
 
+def _restore_check(problems, snapshot, file_id, db, **_):
+    """
+    Поки файл лежав у кошику, архіватор не бачив посту в furry_posts і міг
+    скачати його знову. Тоді відновлення дало б дубль, а прив'язка до
+    автора мовчки загубилась би (унікальний ключ автор+пост+сторінка).
+    """
+    data = (snapshot or {}).get("apps", {}).get("furry")
+    if not data:
+        return problems
+    with db.cursor() as cur:
+        cur.execute("""SELECT file_id FROM furry_posts
+                       WHERE artist_id=%s AND post_id=%s AND page_num=%s AND file_id<>%s""",
+                    (data["artist_id"], data["post_id"], data.get("page_num") or 1, file_id))
+        row = cur.fetchone()
+    if row:
+        problems.append(f"Цей пост уже є в архіві іншим файлом (id {row['file_id']}) — "
+                        f"схоже, архіватор скачав його знову. Відновлення дасть дубль; "
+                        f"якщо він не потрібен — «Видалити назавжди».")
+    return problems
+
+
 def _restore_from_trash(payload):
     """Файл повернули з кошика — повертаємо і прив'язку до автора."""
     data = (payload.get("snapshot") or {}).get("apps", {}).get("furry")
@@ -177,6 +198,7 @@ def register(core):
     # кошик ядра: зберегти й повернути свої дані про файл
     core.events.add_filter("file.trash", _snapshot_for_trash)
     core.events.on("file.restored", _restore_from_trash)
+    core.events.add_filter("file.restore_check", _restore_check)
 
     # Кеш серій і нічний планувальник — турбота застосунку, не ядра.
     try:

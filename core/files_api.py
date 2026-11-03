@@ -115,16 +115,30 @@ def trash_file(file_id, user_id=None):
         # Спершу файл, потім база: якщо перенести не вдалось — нічого не
         # видаляємо, файл лишається на місці.
         storage = get_storage()
+        moved = False
         if storage.exists(f["rel_path"]):
             if not storage.move(f["rel_path"], trash_rel):
                 db.rollback()
                 raise TrashError("Не вдалося перемістити файл у кошик")
+            moved = True
         # файлу на диску могло вже не бути — тоді кошик тримає лише запис
 
-        with db.cursor() as cur:
-            cur.execute("UPDATE trash_items SET trash_rel_path=%s WHERE id=%s", (trash_rel, trash_id))
-            cur.execute("DELETE FROM files WHERE id=%s", (file_id,))
-        db.commit()
+        try:
+            with db.cursor() as cur:
+                cur.execute("UPDATE trash_items SET trash_rel_path=%s WHERE id=%s", (trash_rel, trash_id))
+                cur.execute("DELETE FROM files WHERE id=%s", (file_id,))
+            db.commit()
+        except Exception as e:
+            # База впала ПІСЛЯ того, як файл уже переїхав (наприклад, скінчилось
+            # місце на диску — 1114). Без цього файл лишався в .trash без
+            # жодного запису, а в базі вказував на порожнє місце: зникав звідусіль.
+            db.rollback()
+            if moved:
+                try:
+                    storage.move(trash_rel, f["rel_path"])
+                except Exception as e2:
+                    print(f"  ⚠ Кошик: не вдалося повернути {trash_rel} → {f['rel_path']}: {e2}")
+            raise TrashError(f"Не вдалося перемістити у кошик: помилка бази ({e}). Файл лишився на місці.")
     finally:
         db.close()
 
@@ -132,15 +146,36 @@ def trash_file(file_id, user_id=None):
     return trash_id
 
 
+def _storage_is_local():
+    from core.storage import get_storage_mode
+    return get_storage_mode() == "local"
+
+
 def list_trash():
+    """
+    Записи кошика. missing=True — файлу в .trash на диску вже немає
+    (перевіряється лише для локального сховища: для Nextcloud це був би
+    окремий мережевий запит на кожен рядок).
+    """
     db = get_db()
     try:
         rows = qq(db, """SELECT id, file_id, name, ext, size_bytes, original_rel_path,
-                                deleted_by, deleted_at
+                                trash_rel_path, deleted_by, deleted_at
                          FROM trash_items ORDER BY deleted_at DESC, id DESC""")
-        for r in rows:
-            r["deleted_at"] = _dt(r["deleted_at"])
-        return rows
+    finally:
+        db.close()
+    check = _storage_is_local()
+    for r in rows:
+        r["deleted_at"] = _dt(r["deleted_at"])
+        if check:
+            r["missing"] = not (r["trash_rel_path"] and os.path.isfile(local_path(r["trash_rel_path"])))
+    return rows
+
+
+def trash_item(trash_id) -> dict | None:
+    db = get_db()
+    try:
+        return q(db, "SELECT * FROM trash_items WHERE id=%s", (trash_id,))
     finally:
         db.close()
 
@@ -166,32 +201,55 @@ def restore_trash(trash_id):
             raise TrashError("Цей файл уже відновлено")
 
         storage = get_storage()
+        trash_rel = item["trash_rel_path"]
+        # Без самого файлу відновлювати нічого: інакше в архіві з'являвся
+        # «файл-привид» — рядок у базі є, а відкрити його не можна.
+        if not trash_rel or not storage.exists(trash_rel):
+            raise TrashError("Самого файлу в кошику вже немає на диску — відновити нічого. "
+                             "Запис можна прибрати кнопкою «Видалити назавжди».")
         if storage.exists(orig):
             raise TrashError(f"У сховищі на місці «{orig}» уже лежить файл. Прибери його і спробуй знову.")
-        if item["trash_rel_path"] and storage.exists(item["trash_rel_path"]):
-            if not storage.move(item["trash_rel_path"], orig):
-                raise TrashError("Не вдалося повернути файл з кошика")
 
-        with db.cursor() as cur:
-            cur.execute("""INSERT INTO files (id, storage_id, rel_path, name, ext, size_bytes,
-                                              width, height, md5_hash, owner_user_id, created_at)
-                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                        (item["file_id"], item["storage_id"], orig, fr.get("name") or item["name"],
-                         fr.get("ext") or item["ext"], fr.get("size_bytes"), fr.get("width"),
-                         fr.get("height"), fr.get("md5_hash"), fr.get("owner_user_id"),
-                         fr.get("created_at")))
-            # своє повертаємо лише там, де воно ще має сенс: тег могли
-            # видалити, користувача — теж
-            for tag_id in snap.get("tags") or []:
-                cur.execute("""INSERT IGNORE INTO download_tags (download_id, tag_id)
-                               SELECT %s, id FROM tags WHERE id=%s""", (item["file_id"], tag_id))
-            for uid in snap.get("favorites") or []:
-                cur.execute("""INSERT IGNORE INTO user_favorites (user_id, download_id)
-                               SELECT id, %s FROM users WHERE id=%s""", (item["file_id"], uid))
-            for kid in snap.get("key_exceptions") or []:
-                cur.execute("""INSERT IGNORE INTO key_file_exceptions (key_id, file_id)
-                               SELECT id, %s FROM external_access_keys WHERE id=%s""", (item["file_id"], kid))
-        db.commit()
+        # Застосунки можуть заздалегідь сказати, чому відновлення зламає їхні
+        # дані (furry: цей пост уже скачано знову іншим файлом).
+        problems = events.apply_filters("file.restore_check", [], snapshot=snap,
+                                        file_id=item["file_id"], db=db) or []
+        if problems:
+            raise TrashError(" ".join(problems))
+
+        if not storage.move(trash_rel, orig):
+            raise TrashError("Не вдалося повернути файл з кошика")
+
+        try:
+            with db.cursor() as cur:
+                cur.execute("""INSERT INTO files (id, storage_id, rel_path, name, ext, size_bytes,
+                                                  width, height, md5_hash, owner_user_id, created_at)
+                               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                            (item["file_id"], item["storage_id"], orig, fr.get("name") or item["name"],
+                             fr.get("ext") or item["ext"], fr.get("size_bytes"), fr.get("width"),
+                             fr.get("height"), fr.get("md5_hash"), fr.get("owner_user_id"),
+                             fr.get("created_at")))
+                # своє повертаємо лише там, де воно ще має сенс: тег могли
+                # видалити, користувача — теж
+                for tag_id in snap.get("tags") or []:
+                    cur.execute("""INSERT IGNORE INTO download_tags (download_id, tag_id)
+                                   SELECT %s, id FROM tags WHERE id=%s""", (item["file_id"], tag_id))
+                for uid in snap.get("favorites") or []:
+                    cur.execute("""INSERT IGNORE INTO user_favorites (user_id, download_id)
+                                   SELECT id, %s FROM users WHERE id=%s""", (item["file_id"], uid))
+                for kid in snap.get("key_exceptions") or []:
+                    cur.execute("""INSERT IGNORE INTO key_file_exceptions (key_id, file_id)
+                                   SELECT id, %s FROM external_access_keys WHERE id=%s""", (item["file_id"], kid))
+            db.commit()
+        except Exception as e:
+            # база не прийняла — файл назад у кошик, інакше він застрягав на
+            # старому місці без запису, а кошик більше не міг його відновити
+            db.rollback()
+            try:
+                storage.move(orig, trash_rel)
+            except Exception as e2:
+                print(f"  ⚠ Кошик: не вдалося повернути {orig} → {trash_rel}: {e2}")
+            raise TrashError(f"Не вдалося відновити: помилка бази ({e}). Файл лишився в кошику.")
 
         # застосунки повертають своє. Файл уже в базі — навіть якщо якийсь
         # застосунок упаде, сам файл відновлено.
@@ -207,18 +265,28 @@ def restore_trash(trash_id):
 
 
 def purge_trash(trash_id):
-    """Видалити назавжди: і файл із .trash, і запис."""
+    """
+    Видалити назавжди: і файл із .trash, і запис.
+
+    Запис прибирається лише тоді, коли файлу на диску справді більше немає.
+    Раніше помилка видалення ковталась, а запис усе одно стирався — файл
+    лишався в .trash невидимим для кошика й тихо займав місце.
+    """
     from core.storage_api import get_storage
     db = get_db()
     try:
         item = q(db, "SELECT trash_rel_path FROM trash_items WHERE id=%s", (trash_id,))
         if not item:
             raise TrashError("У кошику такого немає")
-        if item["trash_rel_path"]:
+        rel = item["trash_rel_path"]
+        if rel:
+            storage = get_storage()
             try:
-                get_storage().delete(item["trash_rel_path"])
+                storage.delete(rel)
             except Exception as e:
-                print(f"  ⚠ Кошик: не вдалося стерти {item['trash_rel_path']}: {e}")
+                print(f"  ⚠ Кошик: не вдалося стерти {rel}: {e}")
+            if storage.exists(rel):
+                raise TrashError(f"Не вдалося стерти файл «{rel}» з диска — запис лишено в кошику.")
         with db.cursor() as cur:
             cur.execute("DELETE FROM trash_items WHERE id=%s", (trash_id,))
         db.commit()
@@ -227,7 +295,99 @@ def purge_trash(trash_id):
 
 
 def empty_trash():
-    ids = [r["id"] for r in list_trash()]
-    for tid in ids:
-        purge_trash(tid)
-    return len(ids)
+    """Повертає (скільки стерто, скільки не вдалося)."""
+    removed, failed = 0, 0
+    for r in list_trash():
+        try:
+            purge_trash(r["id"])
+            removed += 1
+        except TrashError as e:
+            print(f"  ⚠ Кошик: {e}")
+            failed += 1
+    return removed, failed
+
+
+# ── «Сироти»: файли в .trash без запису в кошику ─────────────────────
+#
+#  Звідки беруться: старий баг (база падала ПІСЛЯ переносу файлу — так
+#  було, коли скінчилось місце на диску) і старе «Видалити назавжди», яке
+#  стирало запис навіть тоді, коли файл стерти не вдалося. Їх не видно в
+#  кошику, але вони займають місце.
+#
+#  Ім'я в .trash — «<id кошика>__<назва>». Якщо в files є рядок з такою
+#  назвою, а на його місці файлу немає — це той самий файл, що «зник»:
+#  його можна повернути на місце. Інакше — лише стерти.
+# ─────────────────────────────────────────────────────────────────────
+
+def _orphan_rel(name: str) -> str | None:
+    if not name or "/" in name or "\\" in name or name in (".", ".."):
+        return None
+    return f"{TRASH_DIR}/{name}"
+
+
+def list_trash_orphans():
+    if not _storage_is_local():
+        return []
+    trash_abs = local_path(TRASH_DIR)
+    if not os.path.isdir(trash_abs):
+        return []
+    db = get_db()
+    try:
+        known = {r["trash_rel_path"] for r in qq(db, "SELECT trash_rel_path FROM trash_items")}
+        out = []
+        for name in sorted(os.listdir(trash_abs)):
+            full = os.path.join(trash_abs, name)
+            rel = f"{TRASH_DIR}/{name}"
+            if not os.path.isfile(full) or rel in known:
+                continue
+            real_name = name.split("__", 1)[1] if "__" in name else name
+            # кандидат на повернення: рядок files з тією ж назвою й тим самим
+            # розміром, файлу якого на місці немає. Розмір — щоб однакові
+            # назви на кшталт «1.png» не сплутались.
+            size = os.path.getsize(full)
+            back_to = None
+            for row in qq(db, """SELECT id, rel_path FROM files
+                                 WHERE name=%s AND (size_bytes=%s OR size_bytes IS NULL) LIMIT 20""",
+                          (real_name, size)):
+                if not os.path.exists(local_path(row["rel_path"])):
+                    back_to = row
+                    break
+            out.append({
+                "name": name, "real_name": real_name,
+                "ext": real_name.rsplit(".", 1)[-1].lower() if "." in real_name else "",
+                "size_bytes": size,
+                "mtime": int(os.path.getmtime(full)),
+                "restore_to": back_to["rel_path"] if back_to else None,
+                "restore_file_id": back_to["id"] if back_to else None,
+            })
+        return out
+    finally:
+        db.close()
+
+
+def restore_trash_orphan(name):
+    rel = _orphan_rel(name)
+    if not rel:
+        raise TrashError("Погане ім'я файлу")
+    match = next((o for o in list_trash_orphans() if o["name"] == name), None)
+    if not match:
+        raise TrashError("Такого файлу серед загублених немає")
+    if not match["restore_to"]:
+        raise TrashError("Невідомо, куди його повертати: у базі немає «порожнього» місця під цей файл.")
+    from core.storage_api import get_storage
+    if not get_storage().move(rel, match["restore_to"]):
+        raise TrashError("Не вдалося перемістити файл")
+    return match["restore_file_id"]
+
+
+def purge_trash_orphan(name):
+    rel = _orphan_rel(name)
+    if not rel:
+        raise TrashError("Погане ім'я файлу")
+    if not any(o["name"] == name for o in list_trash_orphans()):
+        raise TrashError("Такого файлу серед загублених немає")
+    from core.storage_api import get_storage
+    st = get_storage()
+    st.delete(rel)
+    if st.exists(rel):
+        raise TrashError("Не вдалося стерти файл з диска")
