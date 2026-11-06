@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Archive</title>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/dashboard.css?v=50">
+<link rel="stylesheet" href="/static/dashboard.css?v=51">
 <script src="https://unpkg.com/@ruffle-rs/ruffle"></script>
 </head>
 <body>
@@ -578,6 +578,7 @@
       <!-- Дії з файлами каталогу (лише адмін, лише своє сховище) -->
       <div id="catalog-actions" class="catalog-actions" style="display:none">
         <span id="catalog-sel-count"></span>
+        <button class="btn btn-ghost btn-sm" onclick="catalogCreateFolder()" title="Створити теку тут">📁＋ Нова тека</button>
         <button class="btn btn-ghost btn-sm" onclick="catalogSelectAll()" title="Обрати всі файли в теці (Ctrl/⌘-клік — по одному)">☑ Усі</button>
         <button class="btn btn-ghost btn-sm" data-needs-selection onclick="catalogMoveSelected()">➜ Перемістити</button>
         <button class="btn btn-ghost btn-sm" data-needs-selection style="color:var(--red)" onclick="catalogDeleteSelected()">🗑 У кошик</button>
@@ -946,7 +947,7 @@
 
 </div><!-- /#app-shell -->
 
-<script src="/static/dashboard.js?v=60"></script>
+<script src="/static/dashboard.js?v=61"></script>
 <script src="/static/apps.js?v=4"></script>
 
 </body>

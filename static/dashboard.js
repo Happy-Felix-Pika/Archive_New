@@ -4493,9 +4493,12 @@ function catalogRender() {
              style="position:absolute;top:6px;left:6px;font-size:14px;cursor:pointer;opacity:.5">🔑</span>`
         : '';
       const folderPath = _catalogPath ? `${_catalogPath}/${item.name}` : item.name;
+      const delBtn = _catalogCanEdit()
+        ? `<span class="catalog-folder-del" title="Видалити теку (файли — у кошик)">🗑</span>` : '';
       return `<div class="catalog-item" data-idx="${idx}" data-drop-folder="${esc(folderPath)}" style="position:relative;${isExcluded?'opacity:.55':''}">
         ${excludeBtn}
         ${accessBtn}
+        ${delBtn}
         <div class="catalog-icon">📁</div>
         <div class="catalog-name">${esc(item.name)}${isExcluded ? ' <span style="font-size:10px;color:var(--red)">(виключено)</span>' : ''}</div>
       </div>`;
@@ -4546,6 +4549,13 @@ document.getElementById('catalog-grid')?.addEventListener('click', e => {
   if (accessToggle) {
     e.stopPropagation();
     showCatalogFolderAccessModal(accessToggle.dataset.folder);
+    return;
+  }
+  const folderDel = e.target.closest('.catalog-folder-del');
+  if (folderDel) {
+    e.stopPropagation();
+    const fbox = folderDel.closest('.catalog-item');
+    if (fbox?.dataset.dropFolder) catalogDeleteFolder(fbox.dataset.dropFolder);
     return;
   }
   const box = e.target.closest('.catalog-item');
@@ -4738,6 +4748,55 @@ async function catalogMovePaths(paths, dest) {
     toast('Помилка мережі', 'err');
     return false;
   }
+}
+
+async function catalogCreateFolder() {
+  const name = (prompt(`Нова тека в «${_catalogPath || 'корені'}»\n(можна одразу вкладену: Документи/2026)`) || '').trim();
+  if (!name) return;
+  try {
+    const r = await fetch(`${API}/api/catalog/mkdir`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ path: _catalogJoin(name) })
+    });
+    const d = await r.json();
+    if (!r.ok) { toast(d.error || t('toast.error'), 'err'); return; }
+    toast(`Теку «${name}» створено`, 'ok');
+    await catalogLoad(_catalogPath);
+  } catch { toast('Помилка мережі', 'err'); }
+}
+
+async function catalogDeleteFolder(path) {
+  const call = (body) => fetch(`${API}/api/catalog/delete-folder`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)
+  }).then(async r => ({ ok: r.ok, d: await r.json().catch(() => ({})) }));
+  try {
+    // спершу питаємо, що зачепить: сервер рахує файли з підтеками й каже,
+    // якщо теку видаляти не можна (напр. тека автора)
+    const pre = await call({ path, dry_run: true });
+    if (!pre.ok) { alert(pre.d.error || t('toast.error')); return; }
+    const name = path.split('/').pop();
+    const msg = pre.d.files
+      ? `Видалити теку «${name}»?\n\n${pre.d.files} файл(ів) усередині (з підтеками) підуть у кошик — звідти їх можна відновити. Сама тека зникне.`
+      : `Видалити порожню теку «${name}»?`;
+    if (!confirm(msg)) return;
+    const res = await call({ path });
+    if (!res.ok && res.d.error) { alert(res.d.error); return; }
+    const errs = res.d.errors || [];
+    if (errs.length) {
+      alert(`У кошику: ${res.d.trashed || 0}. Не вдалося (${errs.length}):\n` +
+            errs.slice(0, 5).map(e => `• ${e.path.split('/').pop()}: ${e.error}`).join('\n') +
+            (errs.length > 5 ? '\n…' : '') + '\n\nТеку з рештою файлів залишено.');
+    } else {
+      toast(`Теку «${name}» видалено${res.d.trashed ? `, файлів у кошику: ${res.d.trashed}` : ''}`, 'ok');
+    }
+    // видалили теку, в якій стояли (чи її батька) — піднімаємось вище
+    if (_catalogPath === path || _catalogPath.startsWith(path + '/')) {
+      await catalogLoad(path.split('/').slice(0, -1).join('/'));
+    } else {
+      await catalogLoad(_catalogPath);
+    }
+  } catch { toast('Помилка мережі', 'err'); }
 }
 
 function catalogDeleteSelected() {

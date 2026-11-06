@@ -228,6 +228,47 @@ def trash_path(rel_path, user_id=None):
         db.close()
 
 
+def folder_delete_check(rel_path) -> list:
+    """Чому теку не можна видалити (список причин від застосунків), або []."""
+    from core import events
+    db = get_db()
+    try:
+        return events.apply_filters("folder.delete_check", [], rel_path=rel_path, db=db) or []
+    finally:
+        db.close()
+
+
+def trash_folder(rel_path, user_id=None) -> dict:
+    """
+    Видалити теку: кожен файл усередині (з підтеками) — у кошик тим самим
+    шляхом, що й поодинокий файл, тобто з базою і знімком тегів/автора.
+    Саму теку прибираємо лише коли вона стала порожньою: якщо хоч один файл
+    не пішов у кошик, тека лишається разом із ним.
+    """
+    from core.storage_api import get_storage
+
+    problems = folder_delete_check(rel_path)
+    if problems:
+        raise TrashError(" ".join(problems))
+    storage = get_storage()
+    if not storage.exists(rel_path):
+        raise TrashError("Теку не знайдено")
+
+    done, errors = 0, []
+    for f in storage.walk_files(rel_path):
+        try:
+            trash_path(f, user_id)
+            done += 1
+        except Exception as e:
+            errors.append({"path": f, "error": str(e)})
+    removed = False
+    if not errors:
+        removed = storage.remove_empty_dir(rel_path)
+        if not removed:
+            errors.append({"path": rel_path, "error": "Файли в кошику, але саму теку прибрати не вдалося"})
+    return {"trashed": done, "folder_removed": removed, "errors": errors}
+
+
 # ═════════════════════════════════════════════════════════════════════
 #  ПЕРЕМІЩЕННЯ
 #

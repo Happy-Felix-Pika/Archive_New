@@ -507,3 +507,8 @@ body.furry-absent .furry-col { display: none; }
 .overlay-info-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:13px}
 .overlay-info-name{font-family:var(--mono);font-size:12px;opacity:.75;max-width:40vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .catalog-list-view .catalog-check{position:static;opacity:1;flex:none}
+.catalog-folder-del{position:absolute;bottom:6px;right:8px;font-size:13px;cursor:pointer;opacity:0;transition:opacity .12s;z-index:2}
+.catalog-item:hover .catalog-folder-del{opacity:.6}
+.catalog-folder-del:hover{opacity:1!important}
+@media (hover:none){.catalog-folder-del{opacity:.6}}
+.catalog-list-view .catalog-folder-del{position:static;margin-left:auto;order:9}
