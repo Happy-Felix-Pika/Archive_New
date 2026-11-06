@@ -92,18 +92,49 @@ async function tgSendCode() {
   const btn = document.getElementById('tg-send-btn');
   btn.disabled = true; st.style.color = 'var(--muted)'; st.textContent = 'Надсилаю…';
   try {
-    await _tgFetch('/account/start', { method: 'POST', body: {
+    const d = await _tgFetch('/account/start', { method: 'POST', body: {
       api_id: document.getElementById('tg-api-id').value,
       api_hash: document.getElementById('tg-api-hash').value,
       phone: document.getElementById('tg-phone').value,
     }});
-    st.textContent = 'Код надіслано в Telegram (у чат «Telegram» на іншому пристрої).';
+    tgShowCodeSent(d);
     const step = document.getElementById('tg-code-step');
     step.style.display = 'flex';
     document.getElementById('tg-code').focus();
   } catch (e) {
     st.style.color = 'var(--red)'; st.textContent = e.message;
   } finally { btn.disabled = false; }
+}
+
+// Куди Telegram відправив код + кнопка «надіслати інакше» (SMS/дзвінок),
+// якщо Telegram дозволяє, — з відліком, скільки чекати.
+let _tgResendTimer = null;
+function tgShowCodeSent(d) {
+  const st = document.getElementById('tg-login-status');
+  st.style.color = 'var(--muted)';
+  st.innerHTML = `Код надіслано <b>${_tgEsc(d.where || 'у Telegram')}</b>.` +
+    (d.next ? ` <span id="tg-resend-wrap"></span>` : '');
+  if (_tgResendTimer) clearInterval(_tgResendTimer);
+  if (!d.next) return;
+  let left = parseInt(d.timeout, 10) || 0;
+  const draw = () => {
+    const w = document.getElementById('tg-resend-wrap');
+    if (!w) { clearInterval(_tgResendTimer); return; }
+    w.innerHTML = left > 0
+      ? `Не прийшов? Через ${left} с можна попросити ${_tgEsc(d.next)}.`
+      : `<a href="#" onclick="tgResend();return false">Не прийшов — надіслати ${_tgEsc(d.next)}</a>`;
+  };
+  draw();
+  _tgResendTimer = setInterval(() => { left--; draw(); if (left <= 0) clearInterval(_tgResendTimer); }, 1000);
+}
+
+async function tgResend() {
+  const st = document.getElementById('tg-login-status');
+  try {
+    tgShowCodeSent(await _tgFetch('/account/resend', { method: 'POST' }));
+  } catch (e) {
+    st.style.color = 'var(--red)'; st.textContent = e.message;
+  }
 }
 
 async function tgVerify() {
@@ -144,6 +175,9 @@ async function tgLoadArtists() {
 function _tgArtistPicker(prefix, selectedId) {
   const opts = _tgArtists.map(a =>
     `<option value="${a.id}" ${a.id === selectedId ? 'selected' : ''}>${_tgEsc(a.artist_name)}</option>`).join('');
+  const sel = _tgArtists.find(a => a.id === selectedId);
+  // Наявного автора можна і вписати (з підказками), і вибрати зі списку:
+  // вписане імʼя фільтрує список, вибір у списку підставляє імʼя.
   return `
     <div style="display:flex;gap:14px;font-size:12px;margin-bottom:6px">
       <label><input type="radio" name="${prefix}-mode" value="existing" ${_tgArtists.length ? 'checked' : 'disabled'}
@@ -151,21 +185,58 @@ function _tgArtistPicker(prefix, selectedId) {
       <label><input type="radio" name="${prefix}-mode" value="new" ${_tgArtists.length ? '' : 'checked'}
              onchange="tgArtistMode('${prefix}')"> новий автор</label>
     </div>
-    <select id="${prefix}-artist" style="${_tgInput};${_tgArtists.length ? '' : 'display:none'}">${opts}</select>
+    <div id="${prefix}-existing" style="${_tgArtists.length ? '' : 'display:none'}">
+      <input id="${prefix}-artist-type" list="${prefix}-artist-list" style="${_tgInput};margin-bottom:6px"
+             placeholder="впиши імʼя автора…" value="${_tgEsc(sel ? sel.artist_name : '')}" autocomplete="off"
+             oninput="tgArtistTyped('${prefix}')">
+      <datalist id="${prefix}-artist-list">${_tgArtists.map(a => `<option value="${_tgEsc(a.artist_name)}">`).join('')}</datalist>
+      <select id="${prefix}-artist" size="5" style="${_tgInput}" onchange="tgArtistPicked('${prefix}')">${opts}</select>
+    </div>
     <input id="${prefix}-artist-new" style="${_tgInput};${_tgArtists.length ? 'display:none' : ''}" placeholder="імʼя автора — буде тека @імʼя">`;
 }
 
 function tgArtistMode(prefix) {
   const mode = document.querySelector(`input[name="${prefix}-mode"]:checked`)?.value;
-  document.getElementById(`${prefix}-artist`).style.display = mode === 'existing' ? '' : 'none';
+  document.getElementById(`${prefix}-existing`).style.display = mode === 'existing' ? '' : 'none';
   document.getElementById(`${prefix}-artist-new`).style.display = mode === 'new' ? '' : 'none';
+}
+
+// Вписане імʼя: фільтруємо список і, якщо збіг точний, одразу вибираємо.
+function tgArtistTyped(prefix) {
+  const q = document.getElementById(`${prefix}-artist-type`).value.trim().toLowerCase();
+  const sel = document.getElementById(`${prefix}-artist`);
+  let exact = null, firstVisible = null;
+  for (const o of sel.options) {
+    const name = o.textContent.toLowerCase();
+    const show = !q || name.includes(q);
+    o.hidden = !show;
+    if (show && !firstVisible) firstVisible = o;
+    if (name === q) exact = o;
+  }
+  if (exact) sel.value = exact.value;
+  else if (firstVisible && q) sel.value = firstVisible.value;
+}
+
+function tgArtistPicked(prefix) {
+  const sel = document.getElementById(`${prefix}-artist`);
+  const opt = sel.options[sel.selectedIndex];
+  if (opt) document.getElementById(`${prefix}-artist-type`).value = opt.textContent;
 }
 
 function _tgArtistBody(prefix) {
   const mode = document.querySelector(`input[name="${prefix}-mode"]:checked`)?.value;
-  return mode === 'existing'
-    ? { artist_id: parseInt(document.getElementById(`${prefix}-artist`).value, 10) }
-    : { artist_name: document.getElementById(`${prefix}-artist-new`).value.trim() };
+  if (mode !== 'existing') return { artist_name: document.getElementById(`${prefix}-artist-new`).value.trim() };
+  // вписане імʼя важливіше за підсвічений рядок списку: шукаємо точний збіг
+  const typed = document.getElementById(`${prefix}-artist-type`).value.trim().toLowerCase();
+  if (typed) {
+    const a = _tgArtists.find(x => x.artist_name.toLowerCase() === typed ||
+                                   (x.folder_name || '').toLowerCase() === '@' + typed.replace(/^@/, ''));
+    if (!a) throw new Error(`Автора «${typed}» немає. Обери зі списку або перемкни на «новий автор».`);
+    return { artist_id: a.id };
+  }
+  const id = parseInt(document.getElementById(`${prefix}-artist`).value, 10);
+  if (!id) throw new Error('Обери автора');
+  return { artist_id: id };
 }
 
 // ── Канали ──────────────────────────────────────────────────────────────
@@ -286,9 +357,9 @@ async function tgSaveEdit(id) {
     enabled: document.getElementById(`${p}-on`).checked,
     rescan: document.getElementById(`${p}-rescan`).checked,
   };
-  const a = _tgArtistBody(p);
-  if ((a.artist_id && a.artist_id !== c.artist_id) || a.artist_name) Object.assign(body, a);
   try {
+    const a = _tgArtistBody(p);
+    if ((a.artist_id && a.artist_id !== c.artist_id) || a.artist_name) Object.assign(body, a);
     await _tgFetch(`/channels/${id}`, { method: 'PATCH', body });
     _tgToast('Збережено', 'ok');
     await tgLoadArtists();
