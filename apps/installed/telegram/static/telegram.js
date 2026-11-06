@@ -244,6 +244,7 @@ async function tgLoadChannels() {
           ${c.last_error ? `<div style="color:var(--red);font-size:11px;max-width:260px">${_tgEsc(c.last_error)}</div>` : ''}
         </td>
         <td style="white-space:nowrap;text-align:right">
+          ${c.mine ? `<button class="btn btn-ghost btn-sm" title="Переглянути канал у вкладці «Онлайн»" onclick="tgView(${c.id})">👁</button>` : ''}
           ${_tgIsAdmin ? `<button class="btn btn-ghost btn-sm" title="Скачати нове зараз" onclick="tgCheckNow(${c.id})">▶</button>` : ''}
           <button class="btn btn-ghost btn-sm" title="Налаштування" onclick="tgEdit(${c.id})">✎</button>
           <button class="btn btn-ghost btn-sm" style="color:var(--red)" title="Відвʼязати" onclick="tgDelete(${c.id})">🗑</button>
@@ -319,4 +320,17 @@ async function tgCheckNow(id) {
     if (!r.ok) throw new Error(d.error || 'Не вдалося запустити');
     _tgToast(`Перевірка «${c.artist_name}» запущена — хід у вкладці «Запуск»`, 'ok');
   } catch (e) { _tgToast(e.message, 'err'); }
+}
+
+// Переглянути канал у «Онлайн» — Telegram там звичайне джерело, як e621.
+async function tgView(id) {
+  const c = _tgChannels.find(x => x.id === id);
+  if (!c || typeof showPage !== 'function') return;
+  _liveSource = 'telegram';
+  showPage('live');
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.page === 'live'));
+  if (typeof liveLoadStatus === 'function') await liveLoadStatus();
+  if (typeof liveSetSource === 'function') liveSetSource('telegram');
+  liveSetField('channel', c.username ? `@${c.username}` : c.channel_ref);
+  liveSearchFresh();
 }

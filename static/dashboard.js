@@ -3587,6 +3587,14 @@ let _liveInPool = false;
 let _liveFavsUsername = '';
 let _liveResults = [];
 
+// Посилання на файл/превʼю результату «Онлайн». Сторонні CDN (e621,
+// Inkbunny) йдуть через наш проксі; джерело, яке віддає файли САМЕ через
+// наш сервер (Telegram: /api/apps/telegram/media/...), — напряму.
+function liveMediaUrl(u) {
+  if (!u) return '';
+  return u.startsWith('/') ? `${API}${u}` : `${API}/api/live/proxy?url=${encodeURIComponent(u)}`;
+}
+
 function liveSetSource(src) {
   _liveSource = src;
   document.querySelectorAll('#live-source-toggle .filter-btn').forEach(b =>
@@ -3856,7 +3864,7 @@ function liveRenderResults() {
     const isImg = !r.is_video;
     const thumb = r.in_library
       ? `${API}/api/gallery/stream/${r.download_id}`
-      : `${API}/api/live/proxy?url=${encodeURIComponent(r.thumb_url)}`;
+      : liveMediaUrl(r.thumb_url);
     const inner = isImg
       ? `<img class="catalog-thumb" src="${thumb}" loading="lazy">`
       : `<div class="catalog-icon">🎬</div>`;
@@ -4045,7 +4053,7 @@ function liveShowItem(idx) {
   const r = _liveResults[idx];
   const url = r.in_library
     ? `${API}/api/gallery/stream/${r.download_id}`
-    : `${API}/api/live/proxy?url=${encodeURIComponent(r.file_url)}`;
+    : liveMediaUrl(r.file_url);
   const mediaEl = r.is_flash
     ? `<div id="ruffle-container-live" class="gallery-media" style="background:#000;display:flex;align-items:center;justify-content:center;flex:1 1 auto;min-height:0;max-width:calc(100vw - 400px);width:min(920px, calc(100vw - 400px));height:min(600px, calc(100vh - 200px));border-radius:8px"></div>`
     : r.is_video
