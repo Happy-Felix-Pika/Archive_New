@@ -72,9 +72,9 @@ def api_download_meta_update(download_id):
         with db.cursor() as cur:
             if "source" in body:
                 src = (body.get("source") or "").strip() or None
-                if src not in (None, "e621", "inkbunny"):
+                if src not in (None, "e621", "inkbunny", "telegram"):
                     db.close()
-                    return jsonify({"error": "Джерело може бути тільки e621, inkbunny або порожнім"}), 400
+                    return jsonify({"error": "Джерело може бути тільки e621, inkbunny, telegram або порожнім"}), 400
                 cur.execute("UPDATE furry_posts SET source=%s WHERE file_id=%s", (src, download_id))
 
             if "post_url" in body:

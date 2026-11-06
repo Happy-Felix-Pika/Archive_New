@@ -6,3 +6,5 @@ webdavclient3
 Pillow
 imagehash
 videohash
+telethon
+cryptography

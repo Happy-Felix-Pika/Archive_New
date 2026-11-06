@@ -2262,6 +2262,7 @@ function galShowMetaEdit(downloadId) {
         <option value="">— ${t('meta.unknown')} —</option>
         <option value="e621">e621</option>
         <option value="inkbunny">inkbunny</option>
+        <option value="telegram">telegram</option>
       </select>
     </div>
     <div style="display:flex;flex-direction:column;gap:4px">
