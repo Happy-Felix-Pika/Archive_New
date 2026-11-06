@@ -11,12 +11,13 @@ Telegram — канали як джерело архіву.
 Адреси: /api/apps/telegram/...
 """
 
+import mimetypes
 import threading
 import time
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, send_file
 
-from . import tgcore
+from . import online, tgcore
 
 bp = Blueprint("telegram", __name__)
 core = None
@@ -46,6 +47,18 @@ def _account(db, user_id):
     with db.cursor() as cur:
         cur.execute("SELECT * FROM telegram_accounts WHERE user_id=%s", (user_id,))
         return cur.fetchone()
+
+
+def _creds_for_user(user_id):
+    """Розшифрований доступ користувача — для довгоживучих клієнтів «Онлайн»."""
+    db = core._db()
+    try:
+        return _creds(_account(db, user_id))
+    finally:
+        db.close()
+
+
+_pool = online.ClientPool(_creds_for_user)
 
 
 def _creds(row):
@@ -149,6 +162,7 @@ def account_verify():
         db.close()
     with _pending_lock:
         _pending_login.pop(_uid(), None)
+    _pool.drop(_uid())                 # «Онлайн» підхопить нову сесію
     return jsonify({"ok": True, "stage": "done", "tg_name": name})
 
 
@@ -171,7 +185,27 @@ def account_delete():
         db.close()
     with _pending_lock:
         _pending_login.pop(_uid(), None)
+    _pool.drop(_uid())
     return jsonify({"ok": True})
+
+
+# ── Файли для вкладки «Онлайн» ────────────────────────────────────────
+
+@bp.route("/media/<int:cid>/<int:mid>")
+def media(cid, mid):
+    """
+    Превʼю (?thumb=1) або сам файл повідомлення — для «Онлайн». Скачується
+    акаунтом того, хто дивиться, і кешується на диску окремо для нього.
+    """
+    thumb = request.args.get("thumb") == "1"
+    try:
+        path, ext = _pool.run(online.fetch_media(_pool, _uid(), cid, mid, thumb))
+    except tgcore.TgError as e:
+        return _err(str(e), 404)
+    except Exception as e:
+        return _err(f"Telegram: {e}", 502)
+    mime = mimetypes.guess_type(f"x.{ext}")[0] or "application/octet-stream"
+    return send_file(path, mimetype=mime, conditional=True, max_age=86400)
 
 
 # ── Автори для вибору ─────────────────────────────────────────────────
@@ -369,3 +403,7 @@ def register(core_api):
     global core
     core = core_api
     core.api.add_routes(bp)
+    # Джерело вкладки «Онлайн» — так само, як e621 й Inkbunny
+    registry = core.services.get("online.sources")
+    registry.register(online.build(registry.base, _pool, core.current_user_id,
+                                   core._db, core.url_prefix))

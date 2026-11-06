@@ -474,10 +474,10 @@ def api_live_favorites_list():
         for r in results:
             r["is_favorite"] = (username.lower() == get_user_live_credentials(current_user_id()).get(source_id, {}).get("username", "").lower())
         if results:
-            post_ids = [f"{src.id_prefix}{r['id']}" for r in results]
+            post_ids = [_lib_key(src, r) for r in results]
             existing_map = _resolve_in_library(post_ids)
             for r in results:
-                dl_id = existing_map.get(f"{src.id_prefix}{r['id']}")
+                dl_id = existing_map.get(_lib_key(src, r))
                 r["in_library"]  = dl_id is not None
                 r["download_id"] = dl_id
         return jsonify({"results": results})
@@ -492,10 +492,10 @@ def api_live_favorites_list():
         for r in results:
             r["is_favorite"] = True
         if results:
-            post_ids = [f"{src.id_prefix}{r['id']}" for r in results]
+            post_ids = [_lib_key(src, r) for r in results]
             existing_map = _resolve_in_library(post_ids)
             for r in results:
-                dl_id = existing_map.get(f"{src.id_prefix}{r['id']}")
+                dl_id = existing_map.get(_lib_key(src, r))
                 r["in_library"]  = dl_id is not None
                 r["download_id"] = dl_id
         return jsonify({"results": results})
@@ -561,6 +561,22 @@ def api_live_favorites_list():
         return jsonify({"results": results})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+def _lib_key(src, r) -> str:
+    """
+    post_id, під яким результат лежав би в архіві. Зазвичай префікс + id,
+    але джерело може сказати інакше (library_key): у Telegram альбом —
+    один пост архіву з id першого повідомлення, а в «Онлайн» кожна
+    картинка альбому — окремий результат.
+    """
+    fn = getattr(src, "library_key", None)
+    if fn:
+        try:
+            return fn(r)
+        except Exception:
+            pass
+    return f"{src.id_prefix}{r['id']}"
 
 
 def _resolve_in_library(post_ids: list) -> dict:
@@ -668,7 +684,7 @@ def api_live_search():
         # що зникли через об'єднання авторів — merge_duplicate_log)
         if results:
             prefix = src.id_prefix
-            post_ids = [f"{prefix}{r['id']}" for r in results]
+            post_ids = [_lib_key(src, r) for r in results]
             existing_map = _resolve_in_library(post_ids)
 
             # Улюблене для джерел без власного API улюбленого — окрема
@@ -684,7 +700,7 @@ def api_live_search():
                 fav_ids = {row["post_id"] for row in favs}
 
             for r in results:
-                dl_id = existing_map.get(f"{prefix}{r['id']}")
+                dl_id = existing_map.get(_lib_key(src, r))
                 r["in_library"]  = dl_id is not None
                 r["download_id"] = dl_id
                 if not src.supports_real_favorites:
