@@ -1,5 +1,8 @@
-// Telegram — сторінка застосунку.
-// Акаунт (свій у кожного користувача) і канали, привʼязані до авторів.
+// Telegram — усе у вкладці «Онлайн», коли обрано джерело Telegram:
+// рядок з каналами (клік — переглянути пости) і розгортуване керування —
+// акаунт (свій у кожного користувача) та привʼязка каналів до авторів.
+// Файл вантажиться при старті (manifest → scripts) і малює себе в зоні
+// ядра 'live.panel' — окремого пункту меню немає.
 
 const TG_API = '/api/apps/telegram';
 let _tgRoot = null;
@@ -24,21 +27,58 @@ async function _tgFetch(path, opts = {}) {
 const _tgInput = 'background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;color:var(--text);font-family:var(--mono);font-size:13px;outline:none;width:100%;box-sizing:border-box';
 const _tgLabel = 'font-size:11px;color:var(--muted);display:block;margin-bottom:4px';
 
+let _tgConnected = false;
+
+if (typeof registerContribution === 'function') {
+  registerContribution('live.panel', {
+    id: 'telegram',
+    mount: (el, ctx) => { if (ctx.source === 'telegram') telegramInit(el); else el.innerHTML = ''; },
+  });
+}
+
 async function telegramInit(root) {
   _tgRoot = root;
   root.innerHTML = `
-    <div class="card" style="margin-bottom:16px;max-width:900px">
-      <div style="font-weight:600;margin-bottom:10px">✈ Мій акаунт Telegram</div>
-      <div id="tg-account"><div class="muted">Завантаження…</div></div>
-    </div>
-    <div class="card" style="max-width:900px">
-      <div style="font-weight:600;margin-bottom:10px">Канали → автори</div>
-      <div id="tg-add"></div>
-      <div id="tg-channels" style="margin-top:16px"></div>
+    <div class="card" style="margin-top:12px">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <span style="font-weight:600">✈ Мої канали</span>
+        <span id="tg-status-mini" class="muted" style="font-size:12px"></span>
+        <span style="flex:1"></span>
+        <button class="btn btn-ghost btn-sm" id="tg-manage-btn" onclick="tgToggleManage()">⚙ Акаунт і канали</button>
+      </div>
+      <div id="tg-chips" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px"></div>
+      <div id="tg-manage" style="display:none;margin-top:14px;border-top:1px solid var(--border);padding-top:14px">
+        <div style="font-weight:600;margin-bottom:10px">Мій акаунт Telegram</div>
+        <div id="tg-account"><div class="muted">Завантаження…</div></div>
+        <div style="font-weight:600;margin:18px 0 10px">Канали → автори</div>
+        <div id="tg-add"></div>
+        <div id="tg-channels" style="margin-top:16px"></div>
+      </div>
     </div>`;
   await Promise.all([tgLoadAccount(), tgLoadArtists()]);
   tgRenderAddForm();
-  tgLoadChannels();
+  await tgLoadChannels();
+  // нема акаунта чи каналів — одразу показуємо керування
+  if (!_tgConnected || !_tgChannels.length) tgToggleManage(true);
+}
+
+function tgToggleManage(force) {
+  const box = document.getElementById('tg-manage');
+  if (!box) return;
+  const open = force === undefined ? box.style.display === 'none' : !!force;
+  box.style.display = open ? '' : 'none';
+  document.getElementById('tg-manage-btn').textContent = open ? '✕ Сховати керування' : '⚙ Акаунт і канали';
+}
+
+function tgRenderChips() {
+  const el = document.getElementById('tg-chips');
+  if (!el) return;
+  const mine = _tgChannels.filter(c => c.mine && c.enabled);
+  el.innerHTML = mine.length
+    ? mine.map(c => `<button class="filter-btn" onclick="tgView(${c.id})"
+          title="${_tgEsc(c.username ? '@' + c.username : 'закритий канал')} → ${_tgEsc(c.artist_name)}">
+          ${c.username ? '' : '🔒 '}${_tgEsc(c.title || c.channel_ref)}</button>`).join('')
+    : `<span class="muted" style="font-size:12px">Каналів ще немає — додай у «Акаунт і канали». Або впиши будь-який канал у поле пошуку вище.</span>`;
 }
 
 // ── Акаунт ───────────────────────────────────────────────────────────────
@@ -47,6 +87,11 @@ async function tgLoadAccount() {
   let a;
   try { a = await _tgFetch('/account'); }
   catch (e) { el.innerHTML = `<div style="color:var(--red)">${_tgEsc(e.message)}</div>`; return; }
+  _tgConnected = !!a.connected;
+  const mini = document.getElementById('tg-status-mini');
+  if (mini) mini.innerHTML = a.connected
+    ? `<span style="color:var(--green)">●</span> ${_tgEsc(a.tg_name || '')}`
+    : '<span style="color:var(--red)">●</span> акаунт не підключено';
   if (a.connected) {
     el.innerHTML = `
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
@@ -67,7 +112,8 @@ function tgShowLoginForm(apiId, phone, canCancel) {
     <div class="muted" style="font-size:12px;margin-bottom:12px;line-height:1.6">
       Архів читає канали <b>твоїм</b> акаунтом — так видно оригінали без стиснення, відео й закриті канали.
       Потрібні <b>api_id</b> і <b>api_hash</b>: зайди на <a href="https://my.telegram.org" target="_blank" rel="noopener">my.telegram.org</a>
-      → «API development tools» → створи застосунок (назва будь-яка). Потім Telegram надішле код у застосунок.
+      → «API development tools» → створи застосунок (назва будь-яка). Далі — <b>QR-код</b> (найнадійніше) або код,
+      який Telegram надсилає в застосунок, у чат «Telegram».
       Сесія зберігається на сервері зашифрованою; вийти можна будь-коли.
     </div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px">
@@ -75,16 +121,83 @@ function tgShowLoginForm(apiId, phone, canCancel) {
       <div><label style="${_tgLabel}">api_hash${apiId ? ' (порожньо = збережений)' : ''}</label><input id="tg-api-hash" type="password" style="${_tgInput}" autocomplete="off"></div>
       <div><label style="${_tgLabel}">Телефон</label><input id="tg-phone" style="${_tgInput}" value="${_tgEsc(phone)}" placeholder="+380…"></div>
     </div>
-    <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
-      <button class="btn btn-primary btn-sm" id="tg-send-btn" onclick="tgSendCode()">Надіслати код</button>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap">
+      <button class="btn btn-primary btn-sm" id="tg-qr-btn" onclick="tgQrStart()"
+              title="Надійніше за код: скануєш QR телефоном, де вже є Telegram">📷 Увійти за QR-кодом</button>
+      <button class="btn btn-ghost btn-sm" id="tg-send-btn" onclick="tgSendCode()">Надіслати код</button>
       ${canCancel ? '<button class="btn btn-ghost btn-sm" onclick="tgLoadAccount()">Скасувати</button>' : ''}
       <span id="tg-login-status" style="font-size:12px;color:var(--muted)"></span>
+    </div>
+    <div id="tg-qr-step" style="display:none;margin-top:12px;gap:16px;align-items:flex-start;flex-wrap:wrap">
+      <img id="tg-qr-img" alt="QR" style="width:220px;height:220px;background:#fff;border-radius:8px;padding:6px;box-sizing:border-box">
+      <div style="font-size:13px;line-height:1.7;max-width:420px">
+        На телефоні, де ти вже в Telegram:<br>
+        <b>Налаштування → Пристрої → Підключити пристрій</b><br>
+        і наведи камеру на цей код. Код оновлюється сам кожні ~30 с.
+        <div id="tg-qr-pass" style="display:none;margin-top:10px">
+          <label style="${_tgLabel}">Хмарний пароль Telegram (2FA)</label>
+          <div style="display:flex;gap:8px"><input id="tg-qr-pw" type="password" style="${_tgInput}">
+          <button class="btn btn-primary btn-sm" onclick="tgQrPassword()">Увійти</button></div>
+        </div>
+      </div>
     </div>
     <div id="tg-code-step" style="display:none;margin-top:12px;gap:8px;align-items:flex-end;flex-wrap:wrap">
       <div style="min-width:200px"><label style="${_tgLabel}" id="tg-code-label">Код з Telegram</label>
         <input id="tg-code" style="${_tgInput}" autocomplete="one-time-code"></div>
       <button class="btn btn-primary btn-sm" id="tg-verify-btn" onclick="tgVerify()">Увійти</button>
     </div>`;
+}
+
+// ── Вхід за QR ─────────────────────────────────────────────────────────
+let _tgQrPoll = null;
+
+async function tgQrStart() {
+  const st = document.getElementById('tg-login-status');
+  st.style.color = 'var(--muted)'; st.textContent = 'Готую QR…';
+  try {
+    await _tgFetch('/account/qr/start', { method: 'POST', body: {
+      api_id: document.getElementById('tg-api-id').value,
+      api_hash: document.getElementById('tg-api-hash').value,
+    }});
+  } catch (e) { st.style.color = 'var(--red)'; st.textContent = e.message; return; }
+  document.getElementById('tg-code-step').style.display = 'none';
+  document.getElementById('tg-qr-step').style.display = 'flex';
+  let lastUrl = null;
+  if (_tgQrPoll) clearInterval(_tgQrPoll);
+  _tgQrPoll = setInterval(async () => {
+    const box = document.getElementById('tg-qr-step');
+    if (!box) { clearInterval(_tgQrPoll); return; }
+    let d;
+    try { d = await _tgFetch('/account/qr/status'); } catch { return; }
+    if (d.state === 'waiting' && d.url && d.url !== lastUrl) {
+      lastUrl = d.url;
+      document.getElementById('tg-qr-img').src = `${TG_API}/account/qr.png?t=${Date.now()}`;
+      st.textContent = 'Скануй QR телефоном.';
+    } else if (d.state === 'password') {
+      document.getElementById('tg-qr-pass').style.display = '';
+      st.textContent = 'QR прийнято — на акаунті є хмарний пароль, введи його.';
+      clearInterval(_tgQrPoll);
+    } else if (d.state === 'done') {
+      clearInterval(_tgQrPoll);
+      _tgToast(`Telegram підключено: ${d.tg_name || ''}`, 'ok');
+      await tgLoadAccount(); tgRenderAddForm(); tgLoadChannels();
+    } else if (['error', 'expired', 'cancelled'].includes(d.state)) {
+      clearInterval(_tgQrPoll);
+      box.style.display = 'none';
+      st.style.color = 'var(--red)';
+      st.textContent = d.state === 'expired' ? 'Час на сканування вийшов — натисни ще раз.' : (d.error || 'Не вийшло');
+    }
+  }, 2000);
+}
+
+async function tgQrPassword() {
+  const st = document.getElementById('tg-login-status');
+  try {
+    const d = await _tgFetch('/account/qr/password', { method: 'POST',
+      body: { password: document.getElementById('tg-qr-pw').value } });
+    _tgToast(`Telegram підключено: ${d.tg_name || ''}`, 'ok');
+    await tgLoadAccount(); tgRenderAddForm(); tgLoadChannels();
+  } catch (e) { st.style.color = 'var(--red)'; st.textContent = e.message; }
 }
 
 async function tgSendCode() {
@@ -98,6 +211,7 @@ async function tgSendCode() {
       phone: document.getElementById('tg-phone').value,
     }});
     tgShowCodeSent(d);
+    document.getElementById('tg-qr-step').style.display = 'none';
     const step = document.getElementById('tg-code-step');
     step.style.display = 'flex';
     document.getElementById('tg-code').focus();
@@ -293,6 +407,7 @@ async function tgLoadChannels() {
   catch (e) { el.innerHTML = `<div style="color:var(--red)">${_tgEsc(e.message)}</div>`; return; }
   _tgChannels = d.items || [];
   _tgIsAdmin = !!d.is_admin;
+  tgRenderChips();
   if (!_tgChannels.length) {
     el.innerHTML = '<div class="muted">Каналів ще немає.</div>';
     return;
@@ -394,14 +509,12 @@ async function tgCheckNow(id) {
 }
 
 // Переглянути канал у «Онлайн» — Telegram там звичайне джерело, як e621.
-async function tgView(id) {
+// Переглянути пости каналу — ми вже у «Онлайн»: підставити канал у пошук.
+function tgView(id) {
   const c = _tgChannels.find(x => x.id === id);
-  if (!c || typeof showPage !== 'function') return;
-  _liveSource = 'telegram';
-  showPage('live');
-  document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.page === 'live'));
-  if (typeof liveLoadStatus === 'function') await liveLoadStatus();
-  if (typeof liveSetSource === 'function') liveSetSource('telegram');
+  if (!c) return;
   liveSetField('channel', c.username ? `@${c.username}` : c.channel_ref);
   liveSearchFresh();
+  document.querySelectorAll('#tg-chips .filter-btn').forEach(b =>
+    b.classList.toggle('active', b.getAttribute('onclick') === `tgView(${id})`));
 }

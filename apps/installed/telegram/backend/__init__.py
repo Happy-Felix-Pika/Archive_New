@@ -215,6 +215,156 @@ def account_delete():
     return jsonify({"ok": True})
 
 
+# ── Вхід за QR-кодом ──────────────────────────────────────────────────
+#
+#  Коли Telegram не доставляє код (часто при вході з сервера: код «надіслано
+#  в застосунок», але він так і не приходить), найнадійніше — QR, як у
+#  Telegram Desktop: телефон, де ти вже увійшов, сканує код з екрана
+#  (Налаштування → Пристрої → Підключити пристрій). Код не потрібен зовсім.
+#
+#  Клієнт живе у фоновому циклі «Онлайн» (_pool): він мусить чекати, поки
+#  QR відскановано, а QR оновлюється кожні ~30 с.
+
+import asyncio as _asyncio
+
+_qr = {}            # user_id -> {state, url, client, error, tg_name, api_id, api_hash, t}
+QR_TOTAL = 5 * 60
+
+
+def _save_account(user_id, api_id, api_hash, session, phone, name):
+    db = core._db()
+    try:
+        with db.cursor() as cur:
+            cur.execute("""INSERT INTO telegram_accounts (user_id, api_id, api_hash_enc, session_enc, phone, tg_name)
+                           VALUES (%s,%s,%s,%s,%s,%s)
+                           ON DUPLICATE KEY UPDATE api_id=VALUES(api_id), api_hash_enc=VALUES(api_hash_enc),
+                             session_enc=VALUES(session_enc), phone=VALUES(phone), tg_name=VALUES(tg_name)""",
+                        (user_id, api_id, tgcore.encrypt(api_hash), tgcore.encrypt(session), phone, name))
+        db.commit()
+    finally:
+        db.close()
+
+
+async def _qr_done(uid):
+    st = _qr[uid]
+    client = st["client"]
+    me = await client.get_me()
+    name = ("@" + me.username) if getattr(me, "username", None) else \
+        " ".join(p for p in [me.first_name, me.last_name] if p)
+    phone = ("+" + me.phone) if getattr(me, "phone", None) else None
+    _save_account(uid, st["api_id"], st["api_hash"], client.session.save(), phone, name)
+    st.update(state="done", tg_name=name, url=None)
+    await client.disconnect()
+    _pool.drop(uid)
+
+
+async def _qr_flow(uid):
+    from telethon.errors import SessionPasswordNeededError
+    st = _qr[uid]
+    try:
+        client = tgcore.make_client(st["api_id"], st["api_hash"])
+        st["client"] = client
+        await client.connect()
+        qr = await client.qr_login()
+        st.update(state="waiting", url=qr.url)
+        deadline = time.time() + QR_TOTAL
+        while True:
+            if st.get("cancel"):
+                raise _asyncio.CancelledError()
+            try:
+                await qr.wait(timeout=20)
+                break
+            except _asyncio.TimeoutError:
+                if time.time() > deadline:
+                    st.update(state="expired", url=None)
+                    await client.disconnect()
+                    return
+                await qr.recreate()
+                st["url"] = qr.url
+            except SessionPasswordNeededError:
+                st.update(state="password", url=None)
+                return                       # клієнт лишається підключеним до пароля
+        await _qr_done(uid)
+    except _asyncio.CancelledError:
+        st.update(state="cancelled", url=None)
+        try: await st["client"].disconnect()
+        except Exception: pass
+    except Exception as e:
+        st.update(state="error", url=None, error=tgcore.explain_error(e))
+        try: await st["client"].disconnect()
+        except Exception: pass
+
+
+@bp.route("/account/qr/start", methods=["POST"])
+def account_qr_start():
+    body = request.get_json(silent=True) or {}
+    try:
+        api_id = int(str(body.get("api_id") or "").strip())
+    except ValueError:
+        return _err("api_id — це число з my.telegram.org")
+    api_hash = (body.get("api_hash") or "").strip()
+    if not api_hash:
+        db = core.db
+        try:
+            row = _account(db, _uid())
+        finally:
+            db.close()
+        if row and row["api_id"] == api_id:
+            api_hash = tgcore.decrypt(row["api_hash_enc"])
+    if not api_hash:
+        return _err("Потрібні api_id і api_hash")
+    old = _qr.get(_uid())
+    if old and old.get("state") in ("starting", "waiting", "password"):
+        old["cancel"] = True
+    uid = _uid()
+    _qr[uid] = {"state": "starting", "api_id": api_id, "api_hash": api_hash, "t": time.time()}
+    _asyncio.run_coroutine_threadsafe(_qr_flow(uid), _pool._ensure_loop())
+    return jsonify({"ok": True, "state": "starting"})
+
+
+@bp.route("/account/qr/status")
+def account_qr_status():
+    st = _qr.get(_uid()) or {}
+    return jsonify({"state": st.get("state", "none"), "has_qr": bool(st.get("url")),
+                    "error": st.get("error"), "tg_name": st.get("tg_name"), "url": st.get("url")})
+
+
+@bp.route("/account/qr.png")
+def account_qr_png():
+    st = _qr.get(_uid()) or {}
+    if not st.get("url"):
+        return _err("QR ще немає", 404)
+    import io
+    import qrcode
+    img = qrcode.make(st["url"], box_size=8, border=2)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    resp = send_file(buf, mimetype="image/png")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@bp.route("/account/qr/password", methods=["POST"])
+def account_qr_password():
+    st = _qr.get(_uid()) or {}
+    if st.get("state") != "password":
+        return _err("Хмарний пароль зараз не потрібен")
+    pw = (request.get_json(silent=True) or {}).get("password") or ""
+    if not pw:
+        return _err("Введи хмарний пароль")
+
+    async def go():
+        await st["client"].sign_in(password=pw)
+        await _qr_done(_uid_val)
+    _uid_val = _uid()
+    try:
+        _pool.run(go(), timeout=60)
+    except Exception as e:
+        return _err(f"Не вдалося увійти: {tgcore.explain_error(e)}")
+    return jsonify({"ok": True, "state": "done", "tg_name": st.get("tg_name")})
+
+
 # ── Файли для вкладки «Онлайн» ────────────────────────────────────────
 
 @bp.route("/media/<int:cid>/<int:mid>")

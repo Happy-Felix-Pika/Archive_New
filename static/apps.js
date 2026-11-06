@@ -290,6 +290,12 @@ function appsConfigCollect() {
 //   file.actions     — кнопки в картці файлу.        ctx: {file_id}
 //   gallery.toolbar  — панель над «Артами».          ctx: {}
 //   catalog.toolbar  — панель каталогу.              ctx: {path}
+//   live.panel       — під пошуком «Онлайн», для джерела, яке має своє
+//                      керування (Telegram: акаунт і канали).  ctx: {source}
+//
+// Замість кнопки внесок може намалювати свій блок: mount(el, ctx) отримує
+// порожній div і робить у ньому що треба (зона перемальовується, коли
+// змінюється контекст, напр. обране джерело).
 //
 // Свідомо небагато: кожна зона — це обіцянка не ламати її надалі.
 // Додати нову зону легко, прибрати — вже ні.
@@ -307,6 +313,7 @@ function renderZone(el) {
   const zone = el.dataset.zone;
   const items = (_contributions[zone] || []).slice().sort((a, b) => (a.order ?? 50) - (b.order ?? 50));
   el.innerHTML = items.map(i => {
+    if (i.mount) return `<div data-contrib-mount="${esc(i.id)}"></div>`;
     if (i.html) return i.html;               // повна свобода, якщо треба
     return `<button class="btn btn-ghost btn-sm" data-contrib="${esc(i.id)}"
                     title="${esc(i.title || '')}">${i.icon || ''} ${esc(i.label || '')}</button>`;
@@ -317,6 +324,11 @@ function renderZone(el) {
   el.querySelectorAll('[data-contrib]').forEach(btn => {
     const item = items.find(i => i.id === btn.dataset.contrib);
     if (item && item.onClick) btn.addEventListener('click', () => item.onClick(ctx));
+  });
+  el.querySelectorAll('[data-contrib-mount]').forEach(box => {
+    const item = items.find(i => i.id === box.dataset.contribMount);
+    try { item && item.mount(box, ctx); }
+    catch (e) { console.error('zone mount', zone, item && item.id, e); }
   });
 }
 

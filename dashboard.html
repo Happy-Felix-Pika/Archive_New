@@ -616,6 +616,8 @@
         <button class="btn btn-ghost btn-sm" id="live-view-favs-btn" onclick="liveShowFavoritesOfUser()">👁 Переглянути</button>
         <div id="live-status" style="flex:1 1 100%;font-family:var(--mono);font-size:11px;color:var(--muted)"></div>
       </div>
+      <!-- Своє керування джерела (Telegram: акаунт і канали) — від застосунку -->
+      <div id="live-source-panel" data-zone="live.panel" data-source=""></div>
       <div id="live-grid" class="catalog-grid-view" style="margin-top:12px"></div>
       <div class="pending-toolbar" id="live-pager" style="justify-content:center;display:none">
         <button class="btn btn-ghost" onclick="liveChangePage(-1)">‹ <span data-i18n="pager.prev.plain">Попередня</span></button>
@@ -948,8 +950,8 @@
 
 </div><!-- /#app-shell -->
 
-<script src="/static/dashboard.js?v=66"></script>
-<script src="/static/apps.js?v=4"></script>
+<script src="/static/dashboard.js?v=67"></script>
+<script src="/static/apps.js?v=5"></script>
 
 </body>
 </html>

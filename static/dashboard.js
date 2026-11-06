@@ -3599,6 +3599,12 @@ function liveSetSource(src) {
   _liveSource = src;
   document.querySelectorAll('#live-source-toggle .filter-btn').forEach(b =>
     b.classList.toggle('active', b.dataset.source === src));
+  // Панель джерела від застосунку (напр. Telegram: акаунт і канали)
+  const panel = document.getElementById('live-source-panel');
+  if (panel && panel.dataset.source !== src) {
+    panel.dataset.source = src;
+    if (typeof renderZone === 'function') renderZone(panel);
+  }
   // Набір полів і підписи до них — справа джерела, не ядра.
   liveRenderFields();
 }
