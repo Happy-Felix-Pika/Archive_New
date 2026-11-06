@@ -8,3 +8,4 @@ imagehash
 videohash
 telethon
 cryptography
+qrcode

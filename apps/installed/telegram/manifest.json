@@ -2,7 +2,7 @@
   "id": "telegram",
   "name": "Telegram",
   "version": "1.0.0",
-  "description": "Канали Telegram: перегляд у вкладці «Онлайн» і джерело архіву. Кожен користувач входить своїм акаунтом, канал привʼязується до автора, нове скачується архіватором з перевіркою дублікатів",
+  "description": "Канали Telegram у вкладці «Онлайн»: акаунт, канали й перегляд — там само, де e621 й Inkbunny; нове скачується архіватором з перевіркою дублікатів",
   "author": "Felix",
   "icon": "✈",
   "core_api_version": 1,
@@ -17,25 +17,9 @@
   ],
   "backend": "backend",
   "table_prefix": "telegram_",
-  "menu": [
-    {
-      "id": "main",
-      "label": {
-        "uk": "Telegram",
-        "ru": "Telegram",
-        "en": "Telegram"
-      },
-      "icon": "✈",
-      "order": 23,
-      "page": "main",
-      "admin_only": false
-    }
-  ],
-  "pages": [
-    {
-      "id": "main",
-      "js": "static/telegram.js",
-      "init": "telegramInit"
-    }
+  "menu": [],
+  "pages": [],
+  "scripts": [
+    "static/telegram.js"
   ]
 }
