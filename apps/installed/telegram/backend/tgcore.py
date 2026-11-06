@@ -230,6 +230,8 @@ class ChannelReader:
     def __init__(self, api_id, api_hash, session, ref: dict, temp_dir: str,
                  fallback_id: int | None = None):
         self.loop = asyncio.new_event_loop()
+        # Telethon привʼязується до «поточного» циклу потоку — робимо ним наш
+        asyncio.set_event_loop(self.loop)
         self.client = make_client(api_id, api_hash, session)
         self.ref = ref
         self.fallback_id = fallback_id
@@ -249,10 +251,20 @@ class ChannelReader:
         return self
 
     def __exit__(self, *exc):
+        # disconnect() у Telethon повертає корутину лише ВСЕРЕДИНІ циклу, що
+        # працює; поза ним — None (і сам усе робить). Тому кличемо зсередини
+        # корутини: так це завжди правильне очікування.
+        async def _dc():
+            res = self.client.disconnect()
+            if asyncio.iscoroutine(res) or isinstance(res, asyncio.Future):
+                await res
         try:
-            self._run(self.client.disconnect())
+            self._run(_dc())
+        except Exception as e:
+            print(f"    ⚠ Telegram: відʼєднання: {e}")
         finally:
-            self.loop.close()
+            close_loop(self.loop)
+            asyncio.set_event_loop(None)
 
     def _fetch(self, min_id):
         return self._run(self.client.get_messages(self.entity, limit=self.BATCH,
@@ -317,13 +329,33 @@ class ChannelReader:
 
 # ── Вхід в акаунт (для веб-застосунку) ────────────────────────────────
 
+def close_loop(loop):
+    """
+    Закрити цикл акуратно. Telethon після disconnect() лишає свої фонові
+    задачі (прийом/відправка, keepalive) скасованими, але ще не завершеними;
+    якщо просто закрити цикл, Python наприкінці сипле в лог
+    «Task was destroyed but it is pending!». Даємо їм завершитись.
+    """
+    try:
+        pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+        for t in pending:
+            t.cancel()
+        if pending:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        loop.run_until_complete(loop.shutdown_asyncgens())
+    except Exception:
+        pass
+    finally:
+        loop.close()
+
+
 def run_sync(coro_fn, *args, **kwargs):
     """Виконати корутину в окремому циклі — Flask-потоки синхронні."""
     loop = asyncio.new_event_loop()
     try:
         return loop.run_until_complete(coro_fn(*args, **kwargs))
     finally:
-        loop.close()
+        close_loop(loop)
 
 
 # Куди Telegram відправив код — щоб людина знала, де його шукати.
