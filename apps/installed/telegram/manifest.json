@@ -1,0 +1,25 @@
+{
+  "id": "telegram",
+  "name": "Telegram",
+  "version": "1.0.0",
+  "description": "Канали Telegram як джерело архіву: кожен користувач входить своїм акаунтом, канал привʼязується до автора, нове скачується архіватором з перевіркою дублікатів",
+  "author": "Felix",
+  "icon": "✈",
+  "core_api_version": 1,
+  "min_core_version": "1.0.0",
+  "dependencies": {"furry": "1.0.0"},
+  "permissions": ["database", "users"],
+  "backend": "backend",
+  "table_prefix": "telegram_",
+  "menu": [
+    {"id": "main",
+     "label": {"uk": "Telegram", "ru": "Telegram", "en": "Telegram"},
+     "icon": "✈",
+     "order": 23,
+     "page": "main",
+     "admin_only": false}
+  ],
+  "pages": [
+    {"id": "main", "js": "static/telegram.js", "init": "telegramInit"}
+  ]
+}

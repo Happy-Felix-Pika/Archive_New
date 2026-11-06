@@ -193,7 +193,7 @@ class Database:
         id               BIGINT AUTO_INCREMENT PRIMARY KEY,
         artist_id        INT NOT NULL,
         post_id          VARCHAR(64) NOT NULL,
-        source           ENUM('e621','inkbunny') NOT NULL,
+        source           ENUM('e621','inkbunny','telegram') NOT NULL,
         post_url         VARCHAR(512),
         md5_hash         CHAR(32),
         phash            BIGINT UNSIGNED,
@@ -1983,6 +1983,158 @@ class FurryArchiver:
         print(f"    📦 {existing['name']} уже є — перенесено в pool «{pool_folder}» (#{pool_order})")
         return True
 
+    # ── Telegram (застосунок telegram) ─────────────────────────────────────
+    #
+    #  Канал привʼязаний до автора на сторінці «Telegram». Архіватор читає
+    #  його акаунтом того користувача, хто канал додав, і пропускає кожен
+    #  файл через той самий _check_and_upload, що й e621/Inkbunny.
+
+    def _tg(self):
+        """Модуль tgcore застосунку telegram, або None (застосунку/Telethon немає)."""
+        if hasattr(self, '_tg_mod'):
+            return self._tg_mod
+        self._tg_mod = None
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            'apps', 'installed', 'telegram', 'backend', 'tgcore.py')
+        if os.path.isfile(path):
+            try:
+                import importlib.util
+                spec = importlib.util.spec_from_file_location('archive_tgcore', path)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                import telethon  # noqa: F401 — без нього читати нічим
+                self._tg_mod = mod
+            except Exception as e:
+                print(f"  ⚠ Telegram недоступний: {e}")
+        return self._tg_mod
+
+    def _tg_bindings(self, artist_id: int) -> list:
+        """Увімкнені канали автора разом із зашифрованим доступом власника."""
+        if not self._tg():
+            return []
+        try:
+            with self.db.cursor() as cur:
+                cur.execute("""
+                    SELECT c.*, ta.api_id, ta.api_hash_enc, ta.session_enc
+                    FROM telegram_channels c
+                    JOIN telegram_accounts ta ON ta.user_id = c.user_id
+                    WHERE c.artist_id=%s AND c.enabled=1
+                    ORDER BY c.id
+                """, (artist_id,))
+                return cur.fetchall()
+        except pymysql.err.ProgrammingError:
+            return []          # таблиць ще немає — застосунок не встановлено
+        except Exception as e:
+            print(f"  ⚠ Telegram: не вдалося прочитати канали: {e}")
+            return []
+
+    def _tg_artist_names(self) -> list:
+        """Автори з увімкненими каналами — щоб повний запуск їх не пропустив."""
+        if not self._tg():
+            return []
+        try:
+            with self.db.cursor() as cur:
+                cur.execute("""SELECT DISTINCT a.artist_name, a.folder_name
+                               FROM telegram_channels c JOIN artists a ON a.id = c.artist_id
+                               WHERE c.enabled=1""")
+                return cur.fetchall()
+        except Exception:
+            return []
+
+    def _tg_mark(self, channel_row_id: int, last_id=None, error=None):
+        with self.db.cursor() as cur:
+            if last_id is not None:
+                cur.execute("""UPDATE telegram_channels SET last_message_id=GREATEST(last_message_id,%s),
+                               last_checked_at=NOW(), last_error=NULL WHERE id=%s""", (last_id, channel_row_id))
+            else:
+                cur.execute("""UPDATE telegram_channels SET last_checked_at=NOW(), last_error=%s
+                               WHERE id=%s""", ((error or '')[:500] or None, channel_row_id))
+        self.db.commit()
+
+    def _run_telegram_channel(self, b: dict, artist_id: int, artist_path: str, temp_dir: str,
+                              check_dup, dry_run: bool, secondary: bool) -> tuple:
+        """Нові пости одного каналу → архів. Повертає (нових, пропущено, на перевірку)."""
+        tg = self._tg()
+        label = b.get('title') or b.get('username') or b['channel_ref']
+        new_files = skipped = pending = 0
+        if not b.get('session_enc'):
+            print(f"  ✈ Telegram «{label}»: власник каналу вийшов з акаунта — пропускаю")
+            self._tg_mark(b['id'], error="Акаунт Telegram власника не підключено")
+            return 0, 0, 0
+        try:
+            api_hash = tg.decrypt(b['api_hash_enc'])
+            session  = tg.decrypt(b['session_enc'])
+            ref = tg.parse_ref(b['channel_ref'])
+        except Exception as e:
+            print(f"  ✈ Telegram «{label}»: {e}")
+            self._tg_mark(b['id'], error=f"Доступ: {e}")
+            return 0, 0, 0
+
+        after = int(b.get('last_message_id') or 0)
+        print(f"  ✈ Telegram «{label}»" + (f" — нове після #{after}" if after else " — увесь канал"))
+        tg_dir = os.path.join(temp_dir, f"tg_{b['channel_id']}")
+        try:
+            with tg.ChannelReader(b['api_id'], api_hash, session, ref, tg_dir,
+                                  fallback_id=b['channel_id']) as reader:
+                cid = reader.info['channel_id']
+                for post in reader.posts(after_id=after):
+                    post_id = f"tg_{cid}_{post['msg_id']}"
+                    if not post['media']:
+                        pass                                   # текст без медіа
+                    elif (self.tracker.is_post_downloaded(artist_id, post_id)
+                          or self.tracker.is_post_pending(artist_id, post_id)
+                          or self.tracker.is_rejected(artist_id, post_id)):
+                        skipped += 1
+                    elif dry_run:
+                        print(f"    [DRY RUN] tg {post['msg_id']} ({post['media']} файл.)")
+                        new_files += post['media']
+                    else:
+                        uploaded = 0
+                        for f in reader.download(post):
+                            with open(f['path'], 'rb') as fh:
+                                content = fh.read()
+                            width, height = get_media_dimensions(content, f['ext'])
+                            result_file = {
+                                'md5_hash': hashlib.md5(content).hexdigest(),
+                                'phash':    compute_phash(content, f['ext']),
+                                'width': width, 'height': height,
+                                'file_path': f['path'], 'filename': f['filename'],
+                                'file_ext': f['ext'], 'page_num': f['page_num'],
+                            }
+                            del content
+                            status = self._check_and_upload(
+                                artist_id, artist_path, result_file,
+                                post_id=post_id, source='telegram', post_url=post['url'],
+                                dry_run=dry_run, check_duplicates=check_dup,
+                                tags=post['tags'], secondary=secondary)
+                            if status == 'uploaded':
+                                uploaded += 1
+                            elif status in ('md5_dup', 'rejected') or status.startswith('cross_dup'):
+                                skipped += 1
+                            elif status.startswith('phash_pending') or status.startswith('pool_priority'):
+                                _, mfile, dist = status.split(':', 2)
+                                print(f"    ⏳ pHash tg {post['msg_id']}-p{f['page_num']} ≈ {mfile} (d={dist})")
+                                pending += 1
+                            else:
+                                print(f"    ✗ {status} tg {post['msg_id']}")
+                            if os.path.exists(f['path']):
+                                os.remove(f['path'])
+                        if uploaded:
+                            print(f"    ✓ tg {post['msg_id']}" + (f" ({uploaded} стр.)" if post['media'] > 1 else ""))
+                            new_files += uploaded
+                        self.tracker.save()
+                    # курсор просуваємо після кожного поста: перерваний запуск
+                    # продовжиться звідси, а не з початку каналу
+                    if not dry_run:
+                        self._tg_mark(b['id'], last_id=post['last_id'])
+                if not dry_run:
+                    self._tg_mark(b['id'], last_id=after)          # «перевірено» навіть без нового
+        except Exception as e:
+            print(f"  ✗ Telegram «{label}»: {e}")
+            if not dry_run:
+                self._tg_mark(b['id'], error=str(e))
+        return new_files, skipped, pending
+
     def recheck_pools(self, artist_name: str):
         """
         «Перевірити пули» для одного автора:
@@ -2069,6 +2221,28 @@ class FurryArchiver:
         else:
             print("[1/3] Сканирование Nextcloud...")
             artists = self.nc_scanner.scan_artists()
+            # автори з каналами Telegram, у яких ще немає теки (новий автор,
+            # нічого не скачано) — інакше повний запуск їх не побачив би
+            known = {a['folder_name'] for a in artists}
+            for row in self._tg_artist_names():
+                if row['folder_name'] in known or row['folder_name'] == '_root':
+                    continue
+                folder_name = row['folder_name']
+                if self.storage_mode == 'nextcloud':
+                    base = self.config.get('nextcloud', 'base_folder').strip('/')
+                    full_folder = f"{base}/{folder_name}"
+                    try:
+                        self.nc_scanner.client.mkdir(full_folder)
+                    except Exception:
+                        pass
+                    artist_path = f"{full_folder}/"
+                elif self.storage_mode == 'local':
+                    os.makedirs(os.path.join(self.nc_scanner.root, folder_name), exist_ok=True)
+                    artist_path = folder_name + '/'
+                else:
+                    artist_path = folder_name + '/'
+                artists.append({'artist_name': row['artist_name'], 'folder_name': folder_name,
+                                'path': artist_path})
             if not artists:
                 print("✗ Авторы не найдены.")
                 return
@@ -2110,12 +2284,19 @@ class FurryArchiver:
             # іде як `secondary`: якщо картинка візуально збігається з тим,
             # що вже лежить, вона мовчки відкидається, а не потрапляє в
             # чергу на ручний розбір.
+            tg_bindings = self._tg_bindings(artist_id)
+            # «тільки Telegram»: автор ніде більше не викладає (або його
+            # імʼя на e621/Inkbunny означає когось іншого) — не шукаємо там
+            tg_only = any(b.get('only_telegram') for b in tg_bindings)
+            if tg_only:
+                print("    джерела: лише Telegram")
+
             e621_posts, ib_subs = [], []
-            if self.e621_dl:
+            if self.e621_dl and not tg_only:
                 e621_posts = self.e621_dl.search_artist_posts(
                     artist_name, limit=self.config.get('e621', 'max_posts_per_artist')
                 ) or []
-            if self.ib_dl and self.ib_dl.sid:
+            if self.ib_dl and self.ib_dl.sid and not tg_only:
                 ib_subs = self.ib_dl.search_artist_submissions(
                     artist_name, limit=self.config.get('inkbunny', 'max_submissions_per_artist')
                 ) or []
@@ -2256,6 +2437,17 @@ class FurryArchiver:
 
             for idx, (_label, run_source) in enumerate(order):
                 run_source(secondary=(both and idx > 0))
+
+            # Telegram — після сайтів: якщо робота вже прийшла з e621/Inkbunny,
+            # копія з каналу відкинеться як дзеркало (secondary), а не піде
+            # на ручний розбір. Якщо сайтів у автора немає — канал основний.
+            tg_secondary = bool(e621_posts or ib_subs)
+            for b in tg_bindings:
+                n, sk, pe = self._run_telegram_channel(b, artist_id, artist_path, temp_dir,
+                                                       check_dup, dry_run, tg_secondary)
+                new_files += n
+                skipped   += sk
+                pending   += pe
 
             if new_files > 0 or pending > 0:
                 self.tracker.save()
