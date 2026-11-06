@@ -143,14 +143,86 @@ def _overview_stats(data, db, **_):
     return data
 
 
+def _artist_for_path(db, rel_path):
+    """
+    Чия це тека: (artist_id, subfolder) за шляхом файлу, або None.
+
+    Шлях furry-файлу — «тека автора / [підпапка] / ім'я» (або просто ім'я
+    для автора '_root'). Саме так його складають архіватор і
+    resync_rel_path, тому прив'язка мусить цьому відповідати.
+    """
+    parts = [p for p in rel_path.split("/") if p]
+    folder = parts[0] if len(parts) > 1 else "_root"
+    sub = "/".join(parts[1:-1]) or None
+    with db.cursor() as cur:
+        cur.execute("SELECT id, artist_name FROM artists WHERE folder_name=%s", (folder,))
+        row = cur.fetchone()
+    return (row["id"], sub) if row else None
+
+
+def _move_check(problems, file_id, new_rel, db, **_):
+    """
+    Файл з автором може переїжджати лише в теку автора: інакше архіватор
+    шукатиме його за старою схемою, вважатиме зниклим і прибере з бази.
+    """
+    with db.cursor() as cur:
+        cur.execute("""SELECT fp.artist_id, fp.post_id, fp.page_num, a.artist_name
+                       FROM furry_posts fp JOIN artists a ON a.id = fp.artist_id
+                       WHERE fp.file_id=%s""", (file_id,))
+        cur_row = cur.fetchone()
+    if not cur_row:
+        return problems
+    target = _artist_for_path(db, new_rel)
+    if not target:
+        problems.append(f"Файл прив'язаний до автора «{cur_row['artist_name']}» — його можна "
+                        f"переносити лише в теку автора (@…) або її підпапки.")
+        return problems
+    artist_id, _sub = target
+    if artist_id != cur_row["artist_id"]:
+        with db.cursor() as cur:
+            cur.execute("""SELECT file_id FROM furry_posts
+                           WHERE artist_id=%s AND post_id=%s AND page_num<=>%s AND file_id<>%s""",
+                        (artist_id, cur_row["post_id"], cur_row["page_num"], file_id))
+            if cur.fetchone():
+                problems.append("У того автора вже є цей самий пост — перенос дав би дубль.")
+    return problems
+
+
+def _on_file_moved(payload):
+    """Файл переїхав у каталозі — автор і підпапка тепер за новою текою."""
+    db = payload["db"]
+    target = _artist_for_path(db, payload["new_rel"])
+    if not target:
+        return
+    artist_id, sub = target
+    with db.cursor() as cur:
+        # у тій самій серії лишається її номер, у новій — ще не визначений
+        cur.execute("""UPDATE furry_posts
+                       SET pool_order = CASE WHEN artist_id=%s AND subfolder<=>%s THEN pool_order ELSE NULL END,
+                           artist_id=%s, subfolder=%s
+                       WHERE file_id=%s""",
+                    (artist_id, sub, artist_id, sub, payload["file_id"]))
+    try:
+        pools._invalidate_pools_cache()
+    except Exception:
+        pass
+
+
 def _upload_plan(plan, form, md5, db, **_):
     """
     Завантаження з указаним автором: кладемо в теку автора (створюємо його,
     якщо ще немає) і запам'ятовуємо, до кого прив'язати файл.
-    Без автора — нічого не робимо, файл іде туди, куди просили.
+    Без автора, але в теку автора (напр. перетягнули в каталозі в @вовк) —
+    прив'язуємо до того автора. Інакше файл іде туди, куди просили, без автора.
     """
     name = (form.get("artist_name") or "").strip()
     if not name:
+        folder = (plan.get("folder") or "").strip("/")
+        if folder:
+            target = _artist_for_path(db, f"{folder}/_")
+            if target:
+                plan["furry"] = {"artist_id": target[0], "post_id": f"manual_{md5[:16]}",
+                                 "subfolder": target[1]}
         return plan
     folder = name if name.startswith("@") else f"@{name}"
     with db.cursor() as cur:
@@ -174,9 +246,9 @@ def _on_file_created(payload):
     if data:
         with payload["db"].cursor() as cur:
             cur.execute("""INSERT IGNORE INTO furry_posts
-                           (file_id, artist_id, post_id, source, post_url, page_num, downloaded_at)
-                           VALUES (%s,%s,%s,NULL,NULL,1,NOW())""",
-                        (payload["file_id"], data["artist_id"], data["post_id"]))
+                           (file_id, artist_id, post_id, source, post_url, page_num, subfolder, downloaded_at)
+                           VALUES (%s,%s,%s,NULL,NULL,1,%s,NOW())""",
+                        (payload["file_id"], data["artist_id"], data["post_id"], data.get("subfolder")))
     try:
         pools._invalidate_pools_cache()
     except Exception:
@@ -199,6 +271,9 @@ def register(core):
     core.events.add_filter("file.trash", _snapshot_for_trash)
     core.events.on("file.restored", _restore_from_trash)
     core.events.add_filter("file.restore_check", _restore_check)
+    # переміщення в каталозі: лише в теки авторів, з оновленням прив'язки
+    core.events.add_filter("file.move_check", _move_check)
+    core.events.on("file.moved", _on_file_moved)
 
     # Кеш серій і нічний планувальник — турбота застосунку, не ядра.
     try:
