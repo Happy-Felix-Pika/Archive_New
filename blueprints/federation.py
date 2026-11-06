@@ -489,6 +489,10 @@ def api_external_archives_status(archive_id):
 
 def _get_external_cfg_or_404(archive_id):
     archives = get_external_archives(current_user_id())
+    # Далі майже завжди йде запит до ІНШОГО сервера (до 40 с). Зʼєднання з
+    # базою на цей час не потрібне — віддаємо його одразу (див. release_db).
+    from core.db import release_db
+    release_db()
     return next((a for a in archives if a["id"] == archive_id), None)
 
 

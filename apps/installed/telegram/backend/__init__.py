@@ -11,12 +11,13 @@ Telegram — канали як джерело архіву.
 Адреси: /api/apps/telegram/...
 """
 
+import mimetypes
 import threading
 import time
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, send_file
 
-from . import tgcore
+from . import online, tgcore
 
 bp = Blueprint("telegram", __name__)
 core = None
@@ -46,6 +47,18 @@ def _account(db, user_id):
     with db.cursor() as cur:
         cur.execute("SELECT * FROM telegram_accounts WHERE user_id=%s", (user_id,))
         return cur.fetchone()
+
+
+def _creds_for_user(user_id):
+    """Розшифрований доступ користувача — для довгоживучих клієнтів «Онлайн»."""
+    db = core._db()
+    try:
+        return _creds(_account(db, user_id))
+    finally:
+        db.close()
+
+
+_pool = online.ClientPool(_creds_for_user)
 
 
 def _creds(row):
@@ -100,13 +113,39 @@ def account_start():
     if not api_hash or not phone:
         return _err("Потрібні api_id, api_hash і номер телефону")
     try:
-        session, code_hash = tgcore.run_sync(tgcore.login_start, api_id, api_hash, phone)
+        session, code_hash, sent = tgcore.run_sync(tgcore.login_start, api_id, api_hash, phone)
     except Exception as e:
-        return _err(f"Telegram не надіслав код: {e}")
+        return _err(f"Telegram не надіслав код: {tgcore.explain_error(e)}")
+    return _code_sent(api_id, api_hash, phone, session, code_hash, sent)
+
+
+def _code_sent(api_id, api_hash, phone, session, code_hash, sent):
+    if sent.get("payment_required"):
+        return _err("Telegram вимагає оплату за SMS для входу з нового застосунку. "
+                    "Увійди спершу в офіційний застосунок Telegram на цьому номері — тоді код прийде туди.")
+    if sent.get("email_setup_required"):
+        return _err("Telegram вимагає спершу привʼязати пошту для входу. Відкрий офіційний застосунок "
+                    "Telegram → Налаштування → Конфіденційність → Пошта для входу, додай пошту і спробуй знову.")
     with _pending_lock:
         _pending_login[_uid()] = {"session": session, "phone_code_hash": code_hash, "api_id": api_id,
                                   "api_hash": api_hash, "phone": phone, "stage": "code", "t": time.time()}
-    return jsonify({"ok": True, "stage": "code"})
+    return jsonify({"ok": True, "stage": "code", "where": sent.get("where"),
+                    "next": sent.get("next"), "timeout": sent.get("timeout")})
+
+
+@bp.route("/account/resend", methods=["POST"])
+def account_resend():
+    """Код не прийшов — попросити інший спосіб (SMS, дзвінок), якщо Telegram дозволяє."""
+    with _pending_lock:
+        p = _pending_login.get(_uid())
+    if not p or time.time() - p["t"] > LOGIN_TTL:
+        return _err("Спершу натисни «Надіслати код»")
+    try:
+        session, code_hash, sent = tgcore.run_sync(tgcore.login_resend, p["api_id"], p["api_hash"],
+                                                   p["session"], p["phone"], p["phone_code_hash"])
+    except Exception as e:
+        return _err(f"Не вдалося надіслати ще раз: {tgcore.explain_error(e)}")
+    return _code_sent(p["api_id"], p["api_hash"], p["phone"], session, code_hash, sent)
 
 
 @bp.route("/account/verify", methods=["POST"])
@@ -129,7 +168,7 @@ def account_verify():
             p["phone_code_hash"], code=code if p["stage"] == "code" else None,
             password=password if p["stage"] == "password" else None)
     except Exception as e:
-        return _err(f"Не вдалося увійти: {e}")
+        return _err(f"Не вдалося увійти: {tgcore.explain_error(e)}")
     if status == "password":
         with _pending_lock:
             p.update(session=session, stage="password", t=time.time())
@@ -149,6 +188,7 @@ def account_verify():
         db.close()
     with _pending_lock:
         _pending_login.pop(_uid(), None)
+    _pool.drop(_uid())                 # «Онлайн» підхопить нову сесію
     return jsonify({"ok": True, "stage": "done", "tg_name": name})
 
 
@@ -171,7 +211,27 @@ def account_delete():
         db.close()
     with _pending_lock:
         _pending_login.pop(_uid(), None)
+    _pool.drop(_uid())
     return jsonify({"ok": True})
+
+
+# ── Файли для вкладки «Онлайн» ────────────────────────────────────────
+
+@bp.route("/media/<int:cid>/<int:mid>")
+def media(cid, mid):
+    """
+    Превʼю (?thumb=1) або сам файл повідомлення — для «Онлайн». Скачується
+    акаунтом того, хто дивиться, і кешується на диску окремо для нього.
+    """
+    thumb = request.args.get("thumb") == "1"
+    try:
+        path, ext = _pool.run(online.fetch_media(_pool, _uid(), cid, mid, thumb))
+    except tgcore.TgError as e:
+        return _err(str(e), 404)
+    except Exception as e:
+        return _err(f"Telegram: {e}", 502)
+    mime = mimetypes.guess_type(f"x.{ext}")[0] or "application/octet-stream"
+    return send_file(path, mimetype=mime, conditional=True, max_age=86400)
 
 
 # ── Автори для вибору ─────────────────────────────────────────────────
@@ -369,3 +429,7 @@ def register(core_api):
     global core
     core = core_api
     core.api.add_routes(bp)
+    # Джерело вкладки «Онлайн» — так само, як e621 й Inkbunny
+    registry = core.services.get("online.sources")
+    registry.register(online.build(registry.base, _pool, core.current_user_id,
+                                   core._db, core.url_prefix))

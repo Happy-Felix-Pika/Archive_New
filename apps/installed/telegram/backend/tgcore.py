@@ -326,15 +326,93 @@ def run_sync(coro_fn, *args, **kwargs):
         loop.close()
 
 
+# Куди Telegram відправив код — щоб людина знала, де його шукати.
+_CODE_WHERE = {
+    "SentCodeTypeApp":        "у застосунок Telegram на іншому пристрої — чат «Telegram» (синя галочка), не SMS",
+    "SentCodeTypeSms":        "SMS на номер",
+    "SentCodeTypeSmsWord":    "SMS на номер (слово)",
+    "SentCodeTypeSmsPhrase":  "SMS на номер (фраза)",
+    "SentCodeTypeCall":       "дзвінком — код продиктують",
+    "SentCodeTypeFlashCall":  "дзвінком — код це останні цифри номера, що дзвонив",
+    "SentCodeTypeMissedCall": "пропущеним дзвінком — код це останні цифри номера, що дзвонив",
+    "SentCodeTypeFragmentSms": "через Fragment (анонімний номер) — подивись на fragment.com",
+    "SentCodeTypeFirebaseSms": "SMS на номер",
+}
+
+
+def describe_sent(sent) -> dict:
+    """SentCode → що показати людині: куди пішов код і чи можна попросити інакше."""
+    if type(sent).__name__ == "SentCodePaymentRequired":
+        return {"type": "SentCodePaymentRequired", "where": None, "next": None, "timeout": None,
+                "email_setup_required": False, "payment_required": True}
+    t = type(getattr(sent, "type", None)).__name__
+    nt = getattr(sent, "next_type", None)
+    nt = type(nt).__name__ if nt is not None else None
+    if t == "SentCodeTypeEmailCode":
+        pattern = getattr(sent.type, "email_pattern", "") or ""
+        where = f"на пошту для входу {pattern}".strip()
+    elif t == "SentCodeTypeSetUpEmailRequired":
+        where = None
+    else:
+        where = _CODE_WHERE.get(t, f"невідомий спосіб ({t})")
+    next_where = None
+    if nt:
+        next_where = {"CodeTypeSms": "SMS", "CodeTypeCall": "дзвінок", "CodeTypeFlashCall": "дзвінок",
+                      "CodeTypeMissedCall": "пропущений дзвінок", "CodeTypeFragmentSms": "Fragment"}.get(nt, nt)
+    return {"type": t, "where": where, "next": next_where,
+            "timeout": getattr(sent, "timeout", None),
+            "email_setup_required": t == "SentCodeTypeSetUpEmailRequired"}
+
+
 async def login_start(api_id, api_hash, phone):
-    """Надіслати код. Повертає (рядок незавершеної сесії, phone_code_hash)."""
+    """
+    Надіслати код. Повертає (рядок незавершеної сесії, phone_code_hash, опис —
+    куди пішов код). Telegram майже завжди шле код У ЗАСТОСУНОК (чат «Telegram»),
+    а не SMS — через це «код не приходить».
+    """
     client = make_client(api_id, api_hash)
     await client.connect()
     try:
         sent = await client.send_code_request(phone)
-        return client.session.save(), sent.phone_code_hash
+        return client.session.save(), sent.phone_code_hash, describe_sent(sent)
     finally:
         await client.disconnect()
+
+
+async def login_resend(api_id, api_hash, session, phone, phone_code_hash):
+    """Надіслати код іншим способом (зазвичай SMS після застосунку)."""
+    from telethon.tl.functions.auth import ResendCodeRequest
+    client = make_client(api_id, api_hash, session)
+    await client.connect()
+    try:
+        sent = await client(ResendCodeRequest(phone_number=phone, phone_code_hash=phone_code_hash))
+        return client.session.save(), sent.phone_code_hash, describe_sent(sent)
+    finally:
+        await client.disconnect()
+
+
+def explain_error(e) -> str:
+    """Помилки Telegram при вході — людською мовою."""
+    name = type(e).__name__
+    msg = str(e)
+    table = {
+        "ApiIdInvalidError":        "api_id або api_hash неправильні — перевір на my.telegram.org",
+        "ApiIdPublishedFloodError": "цей api_id заблоковано Telegram — створи новий застосунок на my.telegram.org",
+        "PhoneNumberInvalidError":  "номер телефону неправильний — у форматі +380…",
+        "PhoneNumberBannedError":   "цей номер заблоковано в Telegram",
+        "PhoneNumberFloodError":    "забагато запитів коду на цей номер — зачекай і спробуй пізніше",
+        "PhoneCodeInvalidError":    "код неправильний",
+        "PhoneCodeExpiredError":    "код протерміновано — надішли новий. Telegram скасовує код, якщо його переслали комусь чи вставили в інший чат",
+        "PhoneCodeEmptyError":      "введи код",
+        "PasswordHashInvalidError": "хмарний пароль неправильний",
+        "SessionPasswordNeededError": "потрібен хмарний пароль",
+        "SendCodeUnavailableError": "Telegram вичерпав способи надіслати код — зачекай кілька годин",
+    }
+    if name in table:
+        return table[name]
+    if name == "FloodWaitError":
+        return f"Telegram просить зачекати {getattr(e, 'seconds', '?')} с перед новою спробою"
+    return msg or name
 
 
 async def login_finish(api_id, api_hash, session, phone, phone_code_hash, code=None, password=None):

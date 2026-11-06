@@ -433,6 +433,10 @@ def api_catalog_thumb(external: bool = False):
         if top_segment in get_hidden_catalog_folders(current_user_id()):
             return jsonify({"error": f"Папка «{top_segment}» прихована від цього користувача",
                             "origin": "сесія"}), 403
+    # Далі — лише файли й ffmpeg (до хвилини на відео). Базу віддаємо одразу,
+    # інакше сотні мініатюр одночасно вичерпують зʼєднання MariaDB.
+    from core.db import release_db
+    release_db()
 
     filename = rel_path.rsplit("/", 1)[-1]
     ext      = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
