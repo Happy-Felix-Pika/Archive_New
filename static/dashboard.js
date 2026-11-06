@@ -1050,6 +1050,28 @@ let _pendingOffset = 0;
 let _pendingTotal  = 0;
 let _pendingBusy   = false;
 
+// Pool (серія) у парі: новий файл — сторінка pool на сайті, збережений лежить
+// у pool в архіві. Від цього залежить, що станеться при кожній дії.
+function _pendingPoolLabel(name, order) {
+  return `«${esc(name)}»${order ? ` · стор. ${order}` : ''}`;
+}
+
+function pendingPoolNote(item) {
+  const np = item.pool_folder, op = item.matched_subfolder;
+  if (!np && !op) return '';
+  const notes = [];
+  if (item.pool_priority) {
+    notes.push(`⇄ Новий файл — сторінка пулу ${_pendingPoolLabel(np, item.pool_order)}, а збережений лежить поза пулом. ` +
+               `Заміниться автоматично після завершення архіватора (або натисни «${t('pending.replaceold')}»).`);
+  } else {
+    if (op) notes.push(`⚠ Збережений файл — сторінка пулу ${_pendingPoolLabel(op, item.matched_pool_order)}. ` +
+                       `«${t('pending.replaceold')}» поставить новий на його місце в пулі.`);
+    if (np && np !== op) notes.push(`⚠ Новий файл — сторінка пулу ${_pendingPoolLabel(np, item.pool_order)} на сайті. ` +
+                       `Якщо позначити його як дублікат, цієї сторінки в пулі не буде.`);
+  }
+  return `<div class="review-pool-note">${notes.map(n => `<div>${n}</div>`).join('')}</div>`;
+}
+
 function pendingCardHtml(item) {
     const d   = item.hamming_distance ?? '?';
     const cls = d === 0 ? 'h0' : d <= 4 ? 'hlo' : 'hhi';
@@ -1069,6 +1091,7 @@ function pendingCardHtml(item) {
           <button class="btn btn-reject"  onclick="rejectItem(${item.id})" title="${t('pending.title.reject')}">✕ ${t('pending.duplicate')}</button>
         </div>
       </div>
+      ${pendingPoolNote(item)}
       <div class="review-body">
         <div class="review-side">
           <div class="review-side-label label-new">⬆ ${t('pending.newfile')}</div>
@@ -1079,6 +1102,7 @@ function pendingCardHtml(item) {
             <div class="review-meta-row"><span class="review-meta-key">${t('pending.file')}</span><span class="review-meta-val">${item.filename||'—'}</span></div>
             <div class="review-meta-row"><span class="review-meta-key">${t('pending.format')}</span><span class="review-meta-val">.${item.file_ext||'?'}</span></div>
             <div class="review-meta-row"><span class="review-meta-key">${t('pending.size')}</span><span class="review-meta-val" id="size-new-${item.id}">…</span></div>
+            ${item.pool_folder ? `<div class="review-meta-row"><span class="review-meta-key">📚 пул</span><span class="review-meta-val review-pool">${_pendingPoolLabel(item.pool_folder, item.pool_order)}</span></div>` : ''}
           </div>
         </div>
         <div class="review-side">
@@ -1091,6 +1115,7 @@ function pendingCardHtml(item) {
             <div class="review-meta-row"><span class="review-meta-key">${t('pending.file')}</span><span class="review-meta-val">${item.matched_filename||'—'}</span></div>
             <div class="review-meta-row"><span class="review-meta-key">post</span><span class="review-meta-val">${item.matched_post_id||'—'}</span></div>
             <div class="review-meta-row"><span class="review-meta-key">${t('pending.size')}</span><span class="review-meta-val" id="size-match-${item.id}">…</span></div>
+            ${item.matched_subfolder ? `<div class="review-meta-row"><span class="review-meta-key">📚 пул</span><span class="review-meta-val review-pool">${_pendingPoolLabel(item.matched_subfolder, item.matched_pool_order)}</span></div>` : ''}
           </div>
         </div>
       </div>
@@ -1327,7 +1352,8 @@ async function replaceItem(id) {
   const r = await fetch(`${API}/api/pending/${id}/replace`, {method:'POST'});
   if (r.ok) {
     const d = await r.json();
-    toast(`↑ ${t('toast.replaced')}: ${d.replaced} → ${d.filename}`, 'ok');
+    toast(`↑ ${t('toast.replaced')}: ${d.replaced || '—'} → ${d.filename}` +
+          (d.pool ? ` (пул «${d.pool}»${d.pool_order ? `, стор. ${d.pool_order}` : ''})` : ''), 'ok');
     fadeRemove(card);
     adjustCounter(-1);
   } else {
@@ -1409,8 +1435,10 @@ async function rejectNearDuplicates() {
     body: JSON.stringify({max_distance: maxDistance, dry_run: true})
   }).then(r => r.json());
   if (pre.error) { toast('✗ ' + pre.error, 'err'); return; }
-  if (!pre.count) { toast('Під цю межу нічого не підпадає', 'ok'); return; }
-  if (!confirm(`Відхилити ${pre.count} з черги (відстань ≤ ${maxDistance})?`)) return;
+  const poolNote = pre.skipped_pool
+    ? `\n\n${pre.skipped_pool} — сторінки пулів: їх не чіпаю, перевір вручну (позначені 📚).` : '';
+  if (!pre.count) { toast('Під цю межу нічого не підпадає' + (pre.skipped_pool ? ` (крім ${pre.skipped_pool} сторінок пулів)` : ''), 'ok'); return; }
+  if (!confirm(`Відхилити ${pre.count} з черги (відстань ≤ ${maxDistance})?${poolNote}`)) return;
 
   const r = await fetch(`${API}/api/pending/reject-below`, {
     method:'POST', credentials:'include',
