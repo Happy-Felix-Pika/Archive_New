@@ -21,6 +21,237 @@ bp = Blueprint("duplicates", __name__)
 
 
 # ── Pending duplicates ────────────────────────────────────────────────────
+#
+#  Pool (серія) у черзі на перевірку.
+#
+#  Автор часто викладає ту саму роботу і на e621, і на Inkbunny, а в серію
+#  вона входить лише на одному сайті. Тому в кожній парі важливо знати:
+#    * чи новий файл — сторінка pool (pool_folder / pool_order у записі черги,
+#      пише архіватор);
+#    * чи вже збережений файл лежить у pool (дивимось у furry_posts).
+#  «Замінити» ставить новий файл на місце старого — у ту саму серію й на ту
+#  саму сторінку. «Зберегти новий» кладе його в його власний pool.
+
+_POOL_COLS = "p.pool_folder, p.pool_order, p.pool_priority,"
+_pool_cols_cache = {}
+
+
+def _has_pool_cols(db) -> bool:
+    """Чи застосовано міграцію з колонками pool_* (кешується на процес)."""
+    if not _pool_cols_cache.get("ok"):     # кешуємо лише «так»: міграція могла пройти пізніше
+        with db.cursor() as cur:
+            cur.execute("""SELECT COUNT(*) AS n FROM information_schema.COLUMNS
+                           WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'pending_duplicates'
+                             AND COLUMN_NAME = 'pool_priority'""")
+            _pool_cols_cache["ok"] = bool(cur.fetchone()["n"])
+    return _pool_cols_cache["ok"]
+
+
+def _matched_file(db, row: dict) -> dict | None:
+    """
+    Уже збережений файл пари: id, де лежить і чи в pool.
+    Автор — той, у чиїй теці файл (matched_folder_name при збігу з іншим
+    автором), пост і ім'я — бо в багатосторінкового поста кілька файлів.
+    """
+    folder = row.get("matched_folder_name") or row.get("folder_name")
+    if not row.get("matched_post_id") or not row.get("matched_filename"):
+        return None
+    return q(db, """SELECT f.id, f.rel_path, f.md5_hash, f.name,
+                           fp.artist_id, fp.post_id, fp.page_num, fp.subfolder, fp.pool_order,
+                           a.folder_name
+                    FROM furry_posts fp
+                    JOIN files f   ON f.id = fp.file_id
+                    JOIN artists a ON a.id = fp.artist_id
+                    WHERE fp.post_id = %s AND f.name = %s
+                    ORDER BY (a.folder_name = %s) DESC, f.id
+                    LIMIT 1""",
+             (row["matched_post_id"], row["matched_filename"], folder))
+
+
+def _attach_matched_pool(db, rows):
+    """Дописує в рядки черги, чи збережений файл лежить у pool."""
+    for r in rows:
+        m = None
+        try:
+            m = _matched_file(db, r)
+        except Exception:
+            pass
+        r["matched_file_id"]    = m["id"] if m else None
+        r["matched_subfolder"]  = m["subfolder"] if m else None
+        r["matched_pool_order"] = m["pool_order"] if m else None
+        r.setdefault("pool_folder", None)
+        r.setdefault("pool_order", None)
+        r.setdefault("pool_priority", 0)
+
+
+def _rel(folder: str, sub: str | None, name: str) -> str:
+    parts = [] if folder == "_root" else [folder]
+    if sub:
+        parts.append(sub)
+    parts.append(name)
+    return "/".join(p for p in parts if p)
+
+
+class PendingError(Exception):
+    """Зрозуміла причина відмови (показується користувачу)."""
+
+
+def _pending_row(db, pending_id):
+    return q(db, """SELECT p.*, a.folder_name FROM pending_duplicates p
+                    JOIN artists a ON a.id = p.artist_id WHERE p.id=%s""", (pending_id,))
+
+
+def _store_new(db, row, *, artist_id, folder, sub, order):
+    """Покласти новий файл з черги в сховище й записати в архів."""
+    lp = row["local_path"]
+    rel = _rel(folder, sub, row["filename"])
+    st = get_storage()
+    if not st.upload(lp, rel):
+        raise PendingError("Не вдалося покласти файл у сховище")
+    with db.cursor() as cur:
+        fid = _core.services.get("furry.library").create_file_with_post(cur,
+            artist_id=artist_id, post_id=row["post_id"], source=row["source"],
+            post_url=row["post_url"], md5_hash=row["md5_hash"], phash=row["phash"],
+            filename=row["filename"], file_ext=row["file_ext"], page_num=row["page_num"],
+            subfolder=sub or None, pool_order=order if sub else None,
+            folder_name=folder, size_bytes=os.path.getsize(lp))
+        if not fid:
+            raise PendingError("Цей пост уже є в архіві в того автора")
+        if artist_id != row["artist_id"]:
+            # файл записано за іншим автором (успадкував його pool) — свому
+            # автору кажемо «вже є», інакше архіватор качав би пост знову
+            cur.execute("""INSERT IGNORE INTO rejected_duplicates (artist_id, post_id, page_num, md5_hash)
+                           VALUES (%s,%s,%s,%s)""",
+                        (row["artist_id"], row["post_id"], row["page_num"], row["md5_hash"]))
+        cur.execute("DELETE FROM pending_duplicates WHERE id=%s", (row["id"],))
+    return rel
+
+
+def approve_pending(pending_id) -> dict:
+    """«Зберегти новий»: кладемо в теку автора — у його pool, якщо він там є."""
+    db = get_db()
+    try:
+        row = _pending_row(db, pending_id)
+        if not row:
+            raise PendingError("not found")
+        if not row["local_path"] or not os.path.exists(row["local_path"]):
+            raise PendingError("Файл не знайдено на диску")
+        sub = row.get("pool_folder")
+        rel = _rel(row["folder_name"], sub, row["filename"])
+        if get_storage().exists(rel):
+            raise PendingError(f"У «{rel.rsplit('/', 1)[0] or 'корені'}» уже є файл «{row['filename']}»")
+        _store_new(db, row, artist_id=row["artist_id"], folder=row["folder_name"],
+                   sub=sub, order=row.get("pool_order"))
+        db.commit()
+        try: os.remove(row["local_path"])
+        except Exception: pass
+        return {"ok": True, "filename": row["filename"], "pool": sub}
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def replace_pending(pending_id, user_id=None) -> dict:
+    """
+    «Замінити старий»: новий файл займає місце старого.
+
+    Якщо старий був сторінкою pool — новий іде в ту саму серію, на ту саму
+    сторінку (той самий pool_order), до того самого автора. Інакше — як
+    «Зберегти новий»: у теку автора, у свій pool, якщо він є.
+
+    Старий не зникає назавжди — іде в кошик. Порядок: спершу старий у кошик,
+    потім новий у сховище (якщо ім'я однакове, новий інакше затер би старий).
+    """
+    db = get_db()
+    try:
+        row = _pending_row(db, pending_id)
+        if not row:
+            raise PendingError("not found")
+        lp = row["local_path"]
+        if not lp or not os.path.exists(lp):
+            raise PendingError("Новий файл не знайдено на диску")
+
+        old = _matched_file(db, row)
+        if old and old["subfolder"]:
+            artist_id, folder = old["artist_id"], old["folder_name"]
+            sub, order = old["subfolder"], old["pool_order"]
+        else:
+            artist_id, folder = row["artist_id"], row["folder_name"]
+            sub, order = row.get("pool_folder"), row.get("pool_order")
+
+        rel = _rel(folder, sub, row["filename"])
+        if get_storage().exists(rel) and not (old and old["rel_path"] == rel):
+            raise PendingError(f"У «{rel.rsplit('/', 1)[0] or 'корені'}» уже є інший файл «{row['filename']}»")
+        with db.cursor() as cur:
+            cur.execute("""SELECT 1 FROM furry_posts WHERE artist_id=%s AND post_id=%s AND page_num<=>%s""",
+                        (artist_id, row["post_id"], row["page_num"]))
+            if cur.fetchone():
+                raise PendingError("Цей пост уже є в архіві в того автора")
+
+        if old:
+            # старий md5 — у відхилені, щоб скачування не підхопило його знову
+            with db.cursor() as cur:
+                cur.execute("""INSERT IGNORE INTO rejected_duplicates
+                                   (artist_id, post_id, page_num, md5_hash)
+                               VALUES (%s,%s,%s,%s)""",
+                            (old["artist_id"], old["post_id"], old["page_num"], old["md5_hash"]))
+            db.commit()
+            trash_file(old["id"], user_id)                 # 1. старий — у кошик
+
+        try:
+            _store_new(db, row, artist_id=artist_id, folder=folder, sub=sub, order=order)  # 2. новий
+            db.commit()
+        except PendingError as e:
+            db.rollback()
+            raise PendingError(f"{e}. Старий файл — у кошику, його можна відновити.")
+        try: os.remove(lp)
+        except Exception: pass
+        return {"ok": True, "filename": row["filename"],
+                "replaced": old["name"] if old else None,
+                "pool": sub, "pool_order": order if sub else None}
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def apply_pool_priority(log=print) -> tuple:
+    """
+    Автозаміна: пари, де новий файл — сторінка pool, а збережений — та сама
+    робота поза pool. Архіватор ставить їм pool_priority, а тут (після його
+    завершення, у веб-процесі з усіма застосунками) вони замінюються тим
+    самим шляхом, що й кнопка «Замінити старий» — з кошиком і знімком.
+    """
+    db = get_db()
+    try:
+        if not _has_pool_cols(db):
+            return 0, 0
+        ids = [r["id"] for r in qq(db, "SELECT id FROM pending_duplicates WHERE pool_priority=1 ORDER BY id")]
+    finally:
+        db.close()
+    done, failed = 0, 0
+    for pid in ids:
+        try:
+            r = replace_pending(pid)
+            done += 1
+            log(f"  ⇄ pool: {r['replaced'] or '—'} → {r['filename']} («{r['pool']}» #{r['pool_order']})")
+        except Exception as e:
+            failed += 1
+            # не вийшло — лишаємо на ручний розбір, без позначки автозаміни
+            try:
+                db2 = get_db()
+                with db2.cursor() as cur:
+                    cur.execute("UPDATE pending_duplicates SET pool_priority=0 WHERE id=%s", (pid,))
+                db2.commit(); db2.close()
+            except Exception:
+                pass
+            log(f"  ⚠ pool-заміна #{pid} не вдалась ({e}) — лишилась у «На перевірку»")
+    return done, failed
+
+
 
 @bp.route("/api/pending")
 @admin_required
@@ -50,12 +281,12 @@ def api_pending():
             SELECT p.id, p.post_id, p.source, p.post_url, p.filename, p.file_ext,
                    p.page_num, p.local_path, p.nc_target_path,
                    p.matched_post_id, p.matched_filename, p.matched_folder_name,
-                   p.hamming_distance,
+                   p.hamming_distance, {pool_cols}
                    p.created_at, a.artist_name, a.id AS artist_id, a.folder_name
             FROM pending_duplicates p
             JOIN artists a ON a.id = p.artist_id
             ORDER BY p.hamming_distance ASC, p.created_at DESC
-        """
+        """.format(pool_cols=_POOL_COLS if _has_pool_cols(db) else "")
         if limit is None:
             rows  = qq(db, sql)
             total = len(rows)
@@ -64,6 +295,7 @@ def api_pending():
             with db.cursor() as cur:
                 cur.execute("SELECT COUNT(*) AS n FROM pending_duplicates")
                 total = int(cur.fetchone()["n"])
+        _attach_matched_pool(db, rows)
         db.close()
         for r in rows:
             if r["created_at"]:
@@ -133,6 +365,13 @@ def api_pending_preview(pending_id, which):
             # прев'ю вже збереженого файлу не показувалось ніколи.
             if get_storage_mode() == "local":
                 rel = mfn if matched_folder == "_root" else f"{matched_folder}/{mfn}"
+                db4 = get_db()
+                try:
+                    mrow = _matched_file(db4, row)    # справжнє місце — з урахуванням pool
+                finally:
+                    db4.close()
+                if mrow:
+                    rel = mrow["rel_path"]
                 lp2 = local_path(rel)
                 if not os.path.isfile(lp2):
                     # Файл міг переїхати в підпапку (pool) — шукаємо в ядрі за іменем.
@@ -209,62 +448,11 @@ def api_pending_preview(pending_id, which):
 @bp.route("/api/pending/<int:pending_id>/replace", methods=["POST"])
 @admin_required
 def api_pending_replace(pending_id):
-    """
-    «Замінити старий»: новий файл займає місце старого.
-
-    Старий НЕ зникає назавжди — іде в кошик, звідки його можна повернути.
-    Порядок важливий: спершу старий у кошик, потім новий у сховище.
-    Якщо в них однакове ім'я, інакше новий затер би старий ще до того,
-    як той потрапив у кошик.
-
-    Раніше це вміло тільки з Nextcloud; тепер через єдине сховище ядра.
-    """
+    """«Замінити старий» — див. replace_pending: з успадкуванням pool і сторінки."""
     try:
-        db  = get_db()
-        row = q(db, """
-            SELECT p.*, a.folder_name FROM pending_duplicates p
-            JOIN artists a ON a.id = p.artist_id WHERE p.id=%s
-        """, (pending_id,))
-        if not row:
-            db.close()
-            return jsonify({"error": "not found"}), 404
-        lp = row["local_path"]
-        if not lp or not os.path.exists(lp):
-            db.close()
-            return jsonify({"error": "Новий файл не знайдено на диску"}), 400
-
-        old = q(db, """SELECT f.id, f.md5_hash FROM furry_posts fp
-                       JOIN files f ON f.id = fp.file_id
-                       WHERE fp.artist_id=%s AND fp.post_id=%s""",
-                (row["artist_id"], row["matched_post_id"]))
-        if old:
-            # старий md5 — у відхилені, щоб скачування не підхопило його знову
-            with db.cursor() as cur:
-                cur.execute("""INSERT IGNORE INTO rejected_duplicates
-                                   (artist_id, post_id, page_num, md5_hash)
-                               VALUES (%s,%s,%s,%s)""",
-                            (row["artist_id"], row["matched_post_id"], row["page_num"], old["md5_hash"]))
-            db.commit()
-            trash_file(old["id"], current_user_id())      # 1. старий — у кошик
-
-        folder = row["folder_name"]
-        rel = row["filename"] if folder == "_root" else f"{folder}/{row['filename']}"
-        if not get_storage().upload(lp, rel):             # 2. новий — у сховище
-            db.close()
-            return jsonify({"error": "Не вдалося покласти новий файл у сховище. Старий — у кошику."}), 500
-
-        with db.cursor() as cur:                           # 3. запис
-            _core.services.get("furry.library").create_file_with_post(cur,
-                artist_id=row["artist_id"], post_id=row["post_id"], source=row["source"],
-                post_url=row["post_url"], md5_hash=row["md5_hash"], phash=row["phash"],
-                filename=row["filename"], file_ext=row["file_ext"], page_num=row["page_num"],
-                folder_name=folder, size_bytes=os.path.getsize(lp))
-            cur.execute("DELETE FROM pending_duplicates WHERE id=%s", (pending_id,))
-        db.commit()
-        db.close()
-        try: os.remove(lp)
-        except Exception: pass
-        return jsonify({"ok": True, "filename": row["filename"]})
+        return jsonify(replace_pending(pending_id, current_user_id()))
+    except PendingError as e:
+        return jsonify({"error": str(e)}), 404 if str(e) == "not found" else 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -272,44 +460,11 @@ def api_pending_replace(pending_id):
 @bp.route("/api/pending/<int:pending_id>/approve", methods=["POST"])
 @admin_required
 def api_pending_approve(pending_id):
-    """
-    «Зберегти новий»: файл не дублікат — кладемо в теку автора.
-    Раніше це вміло тільки з Nextcloud (жорстко брало адресу WebDAV) і в
-    локальному режимі падало. Тепер через єдине сховище ядра.
-    """
+    """«Зберегти новий»: не дублікат — у теку автора, у свій pool, якщо є."""
     try:
-        db  = get_db()
-        row = q(db, """
-            SELECT p.*, a.folder_name FROM pending_duplicates p
-            JOIN artists a ON a.id = p.artist_id
-            WHERE p.id=%s
-        """, (pending_id,))
-        if not row:
-            db.close()
-            return jsonify({"error": "not found"}), 404
-        lp = row["local_path"]
-        if not lp or not os.path.exists(lp):
-            db.close()
-            return jsonify({"error": "Файл не знайдено на диску"}), 400
-
-        folder = row["folder_name"]
-        rel = row["filename"] if folder == "_root" else f"{folder}/{row['filename']}"
-        if not get_storage().upload(lp, rel):
-            db.close()
-            return jsonify({"error": "Не вдалося покласти файл у сховище"}), 500
-
-        with db.cursor() as cur:
-            _core.services.get("furry.library").create_file_with_post(cur,
-                artist_id=row["artist_id"], post_id=row["post_id"], source=row["source"],
-                post_url=row["post_url"], md5_hash=row["md5_hash"], phash=row["phash"],
-                filename=row["filename"], file_ext=row["file_ext"], page_num=row["page_num"],
-                folder_name=folder, size_bytes=os.path.getsize(lp))
-            cur.execute("DELETE FROM pending_duplicates WHERE id=%s", (pending_id,))
-        db.commit()
-        db.close()
-        try: os.remove(lp)
-        except Exception: pass
-        return jsonify({"ok": True, "filename": row["filename"]})
+        return jsonify(approve_pending(pending_id))
+    except PendingError as e:
+        return jsonify({"error": str(e)}), 404 if str(e) == "not found" else 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -415,12 +570,21 @@ def api_pending_reject_below():
 
     try:
         db   = get_db()
-        rows = qq(db, """SELECT id, local_path, artist_id, post_id, page_num, md5_hash
+        # Сторінки pool масово не відхиляємо: відхилення прибрало б сторінку
+        # з серії. Їх видно в черзі з позначкою, вирішувати — вручну.
+        pool_skip = " AND pool_folder IS NULL" if _has_pool_cols(db) else ""
+        rows = qq(db, f"""SELECT id, local_path, artist_id, post_id, page_num, md5_hash
                          FROM pending_duplicates
-                         WHERE hamming_distance <= %s""", (max_distance,))
+                         WHERE hamming_distance <= %s{pool_skip}""", (max_distance,))
+        skipped = 0
+        if pool_skip:
+            with db.cursor() as cur:
+                cur.execute("""SELECT COUNT(*) AS n FROM pending_duplicates
+                               WHERE hamming_distance <= %s AND pool_folder IS NOT NULL""", (max_distance,))
+                skipped = int(cur.fetchone()["n"])
         if dry_run:
             db.close()
-            return jsonify({"ok": True, "dry_run": True, "count": len(rows)})
+            return jsonify({"ok": True, "dry_run": True, "count": len(rows), "skipped_pool": skipped})
 
         for r in rows:
             try:
@@ -436,7 +600,7 @@ def api_pending_reject_below():
                             (r["artist_id"], r["post_id"], r["page_num"], r["md5_hash"]))
                 cur.execute("DELETE FROM pending_duplicates WHERE id=%s", (r["id"],))
         db.commit(); db.close()
-        return jsonify({"ok": True, "deleted": len(rows)})
+        return jsonify({"ok": True, "deleted": len(rows), "skipped_pool": skipped})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

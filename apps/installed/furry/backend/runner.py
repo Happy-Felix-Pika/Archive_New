@@ -101,6 +101,13 @@ def _stream_process(proc, job_id=None):
             fail_job(job_id, f"Архіватор завершився з кодом {proc.returncode}. {last_line[:300]}")
     with _process_lock:
         _active_process = None
+    # Інші застосунки можуть доробити своє по завершенні (дублікати:
+    # автоматична заміна файлів, які поступились сторінці pool).
+    try:
+        from core import events
+        events.emit("furry.archiver.finished", {"returncode": proc.returncode, "job_id": job_id})
+    except Exception as e:
+        _push_log(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠ Обробка після архіватора: {e}")
 
 @bp.route("/api/run", methods=["POST"])
 @admin_required

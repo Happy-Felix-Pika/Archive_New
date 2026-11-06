@@ -57,6 +57,23 @@ def _on_file_created(payload):
                        ON DUPLICATE KEY UPDATE phash=VALUES(phash)""", (payload["file_id"], h))
 
 
+def _after_archiver(payload=None):
+    """
+    Архіватор закінчив — замінюємо файли, які поступились сторінці pool.
+    Робиться тут, у веб-процесі: лише тут зареєстровані всі застосунки,
+    тож старий файл іде в кошик з повним знімком (автор, теги, pHash).
+    """
+    from datetime import datetime
+    try:
+        from core.logs import _push_log
+        log = lambda m: _push_log(f"[{datetime.now().strftime('%H:%M:%S')}] {m}")
+    except Exception:
+        log = print
+    done, failed = duplicates.apply_pool_priority(log)
+    if done or failed:
+        log(f"⇄ Pool має перевагу: замінено {done}" + (f", не вдалось {failed} (лишились «На перевірку»)" if failed else ""))
+
+
 def register(core):
     duplicates._core = core
     core.api.add_routes(duplicates.bp, at_root=True)
@@ -67,3 +84,8 @@ def register(core):
     core.events.add_filter("stats.overview", _overview_stats)
     core.events.on("file.created", _on_file_created)
     core.events.on("file.restored", _restore_from_trash)
+    # після архіватора — автозаміна на користь сторінок pool; і раз при
+    # старті, якщо сервер перезапустився, поки щось лишалось у черзі
+    core.events.on("furry.archiver.finished", _after_archiver)
+    import threading
+    threading.Thread(target=_after_archiver, daemon=True).start()

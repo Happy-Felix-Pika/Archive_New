@@ -320,6 +320,38 @@ class DatabaseTracker:
             )
             return cur.fetchone() is not None
 
+    def md5_file(self, artist_id: int, md5: str) -> dict | None:
+        """Той самий файл (за MD5) у цього автора — з його місцем у pool."""
+        with self.db.cursor() as cur:
+            cur.execute(
+                """SELECT f.id, f.name, fp.subfolder, fp.pool_order
+                   FROM furry_posts fp JOIN files f ON f.id=fp.file_id
+                   WHERE fp.artist_id=%s AND f.md5_hash=%s LIMIT 1""",
+                (artist_id, md5)
+            )
+            return cur.fetchone()
+
+    def matched_file(self, artist_id: int, post_id: str, filename: str) -> dict | None:
+        """
+        Уже збережений файл, з яким збігся новий за pHash: id і чи лежить
+        він у pool (subfolder + pool_order). Шукаємо за автором, постом і
+        іменем — у багатосторінкового поста кілька файлів з одним post_id.
+        """
+        with self.db.cursor() as cur:
+            cur.execute(
+                """SELECT f.id, f.name, fp.subfolder, fp.pool_order
+                   FROM furry_posts fp JOIN files f ON f.id=fp.file_id
+                   WHERE fp.artist_id=%s AND fp.post_id=%s AND f.name=%s LIMIT 1""",
+                (artist_id, post_id, filename)
+            )
+            return cur.fetchone()
+
+    def set_pool(self, file_id: int, subfolder: str, pool_order):
+        with self.db.cursor() as cur:
+            cur.execute("UPDATE furry_posts SET subfolder=%s, pool_order=%s WHERE file_id=%s",
+                        (subfolder, pool_order, file_id))
+        self._sync_rel_path(file_id)
+
     # ── pHash (MediaDC-style) ─────────────────────────────────────────────────
 
     def _load_phash_cache(self, artist_id: int):
@@ -591,17 +623,37 @@ class DatabaseTracker:
                     file_ext: str, page_num: int, local_path: str,
                     nc_target_path: str, matched_post_id: str,
                     matched_filename: str, hamming_distance: int,
-                    matched_folder_name: str = ''):
-        with self.db.cursor() as cur:
-            cur.execute("""
-                INSERT IGNORE INTO pending_duplicates
-                    (artist_id, post_id, source, post_url, md5_hash, phash, filename,
-                     file_ext, page_num, local_path, nc_target_path,
+                    matched_folder_name: str = '',
+                    pool_folder: str | None = None, pool_order=None,
+                    pool_priority: bool = False):
+        """
+        pool_folder/pool_order — у якому pool (серії) на сайті цей новий файл.
+        pool_priority — новий файл є сторінкою pool, а збережений ні: така
+        пара замінюється автоматично, щойно архіватор закінчить роботу.
+        """
+        base_cols = """artist_id, post_id, source, post_url, md5_hash, phash, filename,
+                       file_ext, page_num, local_path, nc_target_path,
+                       matched_post_id, matched_filename, matched_folder_name, hamming_distance"""
+        base_vals = (artist_id, post_id, source, post_url, md5_hash, phash_val,
+                     filename, file_ext, page_num, local_path, nc_target_path,
                      matched_post_id, matched_filename, matched_folder_name, hamming_distance)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            """, (artist_id, post_id, source, post_url, md5_hash, phash_val,
-                  filename, file_ext, page_num, local_path, nc_target_path,
-                  matched_post_id, matched_filename, matched_folder_name, hamming_distance))
+        with self.db.cursor() as cur:
+            try:
+                cur.execute(f"""
+                    INSERT IGNORE INTO pending_duplicates
+                        ({base_cols}, pool_folder, pool_order, pool_priority)
+                    VALUES ({",".join(["%s"] * (len(base_vals) + 3))})
+                """, base_vals + (pool_folder, pool_order, 1 if pool_priority else 0))
+            except pymysql.err.OperationalError as e:
+                if e.args and e.args[0] == 1054:
+                    # колонок pool_* ще немає (міграцію не застосовано) —
+                    # пишемо як раніше, без них
+                    cur.execute(f"""
+                        INSERT IGNORE INTO pending_duplicates ({base_cols})
+                        VALUES ({",".join(["%s"] * len(base_vals))})
+                    """, base_vals)
+                else:
+                    raise
 
     def update_hashes(self, artist_id: int, post_id: str, page_num: int,
                       md5_hash: str, phash_val: int | None,
@@ -1792,8 +1844,13 @@ class FurryArchiver:
 
         if check_duplicates:
             # 1. MD5 — точный дубликат
-            if self.tracker.is_md5_duplicate(artist_id, md5):
+            same = self.tracker.md5_file(artist_id, md5)
+            if same:
                 os.remove(fpath)
+                # Той самий файл уже є, але поза pool, а на сайті він — сторінка
+                # pool: переносимо наявний у pool, щоб у серії не було дірки.
+                if pool_folder and not same.get('subfolder'):
+                    self._move_into_pool(artist_path, same, pool_folder, pool_order)
                 return 'md5_dup'
 
             # 1b. Раніше відхилений як дублікат — пропускаємо
@@ -1809,9 +1866,24 @@ class FurryArchiver:
                     matched_artist_id     = dup[3] if len(dup) > 3 else artist_id
                     matched_folder_actual = dup[4] if len(dup) > 4 else ''
 
+                    # ── Pool має перевагу ────────────────────────────────
+                    # Автор викладає ту саму роботу і на e621, і на Inkbunny,
+                    # а в серію (pool) вона може входити лише на одному з них.
+                    # Раніше друге джерело при збігу відкидалось мовчки —
+                    # і якщо саме воно було сторінкою pool, серія лишалась
+                    # з діркою. Тепер дивимось, хто з двох у pool.
+                    matched  = self.tracker.matched_file(matched_artist_id, matched_post_id, matched_filename)
+                    old_pool = (matched or {}).get('subfolder')
+                    near     = hamming_dist <= self.cross_source_threshold
+                    pool_priority = bool(pool_folder and not old_pool and near)
+
                     # Друге джерело і збіг впритул — це дзеркало тієї самої
-                    # роботи. Відкидаємо одразу й запам'ятовуємо відмову.
-                    if secondary and hamming_dist <= self.cross_source_threshold:
+                    # роботи. Відкидаємо одразу й запам'ятовуємо відмову —
+                    # якщо тільки новий файл не потрібен якомусь pool:
+                    #   * новий у pool, старий ні → замінимо старий (pool_priority);
+                    #   * обидва в РІЗНИХ pool → на ручний розбір, хай вирішує людина.
+                    both_pools_differ = bool(pool_folder and old_pool and pool_folder != old_pool)
+                    if secondary and near and not pool_priority and not both_pools_differ:
                         os.remove(fpath)
                         self.tracker.add_rejected(artist_id, post_id, md5, pnum)
                         return f'cross_dup:{matched_filename}:{hamming_dist}'
@@ -1832,8 +1904,12 @@ class FurryArchiver:
                         matched_post_id=matched_post_id,
                         matched_filename=matched_filename,
                         hamming_distance=hamming_dist,
-                        matched_folder_name=matched_folder_actual
+                        matched_folder_name=matched_folder_actual,
+                        pool_folder=pool_folder, pool_order=pool_order,
+                        pool_priority=pool_priority,
                     )
+                    if pool_priority:
+                        return f'pool_priority:{matched_filename}:{hamming_dist}'
                     return f'phash_pending:{matched_filename}:{hamming_dist}'
 
         if dry_run:
@@ -1863,6 +1939,20 @@ class FurryArchiver:
         else:
             os.remove(fpath)
             return 'upload_error'
+
+    def _move_into_pool(self, artist_path: str, existing: dict, pool_folder: str, pool_order) -> bool:
+        """
+        Перенести вже збережений файл цього автора в підпапку pool.
+        artist_path — той самий шлях теки автора, яким користується
+        завантаження (для Nextcloud — разом з base_folder).
+        """
+        src = f"{artist_path}{existing['name']}"
+        dst = f"{artist_path}{pool_folder}/{existing['name']}"
+        if not self.nc_scanner.move_file(src, dst):
+            return False
+        self.tracker.set_pool(existing['id'], pool_folder, pool_order)
+        print(f"    📦 {existing['name']} уже є — перенесено в pool «{pool_folder}» (#{pool_order})")
+        return True
 
     def run(self, dry_run=False, artist_name: str | None = None, artist_names: list | None = None):
         print("\n" + "="*60)
@@ -2006,6 +2096,10 @@ class FurryArchiver:
                         _, mfile, dist = status.split(':', 2)
                         print(f"    ⊘ вже є з іншого джерела: e621 {post['id']} ≈ {mfile} (d={dist})")
                         skipped += 1
+                    elif status.startswith('pool_priority'):
+                        _, mfile, dist = status.split(':', 2)
+                        print(f"    ⇄ e621 {post['id']} — сторінка pool, замінить {mfile} (d={dist}) після завершення")
+                        pending += 1
                     elif status.startswith('phash_pending'):
                         _, mfile, dist = status.split(':', 2)
                         print(f"    ⏳ pHash e621 {post['id']} ≈ {mfile} (d={dist})")
@@ -2063,6 +2157,11 @@ class FurryArchiver:
                             print(f"    ⊘ вже є з іншого джерела: ib {sub['submission_id']}"
                                   f"-p{file_data['page_num']} ≈ {mfile} (d={dist})")
                             skipped += 1
+                        elif status.startswith('pool_priority'):
+                            _, mfile, dist = status.split(':', 2)
+                            print(f"    ⇄ ib {sub['submission_id']}-p{file_data['page_num']} — сторінка pool, "
+                                  f"замінить {mfile} (d={dist}) після завершення")
+                            pending += 1
                         elif status.startswith('phash_pending'):
                             _, mfile, dist = status.split(':', 2)
                             print(f"    ⏳ pHash ib {sub['submission_id']}-p{file_data['page_num']} ≈ {mfile} (d={dist})")
@@ -3019,7 +3118,7 @@ class FurryArchiver:
                 with self.db.cursor() as cur:
                     cur.execute("UPDATE furry_posts SET subfolder=%s, pool_order=%s WHERE file_id=%s",
                                 (pool_folder, pool_order, row['id']))
-                self._sync_rel_path(row['id'])   # файл переїхав — оновлюємо шлях у ядрі
+                self.tracker._sync_rel_path(row['id'])   # файл переїхав — оновлюємо шлях у ядрі
                 moved += 1
                 print(f"    📦 {row['filename']} → «{pool_folder}» (#{pool_order})")
             else:
@@ -3133,7 +3232,7 @@ class FurryArchiver:
                 with self.db.cursor() as cur:
                     cur.execute("UPDATE furry_posts SET subfolder=%s, pool_order=%s WHERE file_id=%s",
                                 (pool_folder, pool_order, row['id']))
-                self._sync_rel_path(row['id'])   # файл переїхав — оновлюємо шлях у ядрі
+                self.tracker._sync_rel_path(row['id'])   # файл переїхав — оновлюємо шлях у ядрі
                 moved += 1
                 print(f"    📦 {row['filename']} → «{pool_folder}» (#{pool_order})")
             else:
