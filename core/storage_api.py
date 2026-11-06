@@ -56,6 +56,34 @@ class BaseStorage:
         """[{'name':.., 'is_dir':bool, 'size':int|None, 'mtime':int|None}, ...]"""
         raise NotImplementedError
 
+    def mkdir(self, rel_path: str) -> bool:
+        """Створити теку (разом з проміжними). Уже існує — теж True."""
+        raise NotImplementedError
+
+    def _remove_dir(self, rel_path: str) -> bool:
+        raise NotImplementedError
+
+    def walk_files(self, rel_path: str) -> list:
+        """Усі файли всередині теки, з підтеками — відносні шляхи."""
+        out = []
+        for it in self.list_dir(rel_path):
+            child = f"{rel_path}/{it['name']}" if rel_path else it["name"]
+            if it["is_dir"]:
+                out.extend(self.walk_files(child))
+            else:
+                out.append(child)
+        return out
+
+    def remove_empty_dir(self, rel_path: str) -> bool:
+        """
+        Прибрати теку, лише якщо в ній (і в підтеках) немає жодного файлу.
+        Захист від випадкового стирання: файли мають іти в кошик окремо,
+        через ядро, а сюди доходить уже порожня тека.
+        """
+        if not rel_path or self.walk_files(rel_path):
+            return False
+        return self._remove_dir(rel_path)
+
 
 class LocalStorage(BaseStorage):
     """Файли просто лежать у теці на диску."""
@@ -120,6 +148,17 @@ class LocalStorage(BaseStorage):
     def size(self, rel_path):
         p = self._abs(rel_path)
         return os.path.getsize(p) if os.path.isfile(p) else None
+
+    def mkdir(self, rel_path):
+        os.makedirs(self._abs(rel_path), exist_ok=True)
+        return True
+
+    def _remove_dir(self, rel_path):
+        p = self._abs(rel_path)
+        if not os.path.isdir(p) or os.path.normpath(p) == os.path.normpath(self.root):
+            return False
+        shutil.rmtree(p)          # усередині лише порожні теки — перевірено вище
+        return True
 
     def list_dir(self, rel_path=""):
         p = self._abs(rel_path) if rel_path else self.root
@@ -236,6 +275,21 @@ class NextcloudStorage(BaseStorage):
     def exists(self, rel_path):
         try:
             return bool(self._client.check(self._remote(rel_path)))
+        except Exception:
+            return False
+
+    def mkdir(self, rel_path):
+        # _ensure_dir створює теки для ФАЙЛУ — даємо йому шлях «файлу» всередині
+        self._ensure_dir(self._remote(rel_path).rstrip("/") + "/_")
+        return self.exists(rel_path)
+
+    def _remove_dir(self, rel_path):
+        remote = self._remote(rel_path)
+        if not remote.strip("/") or remote.strip("/") == self.base:
+            return False
+        try:
+            self._client.clean(remote)
+            return True
         except Exception:
             return False
 

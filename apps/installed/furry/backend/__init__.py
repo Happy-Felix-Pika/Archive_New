@@ -188,6 +188,23 @@ def _move_check(problems, file_id, new_rel, db, **_):
     return problems
 
 
+def _folder_delete_check(problems, rel_path, db, **_):
+    """
+    Теку автора цілком з каталогу не видаляємо: автор лишився б у базі з
+    увімкненим автооновленням, і архіватор скачав би все знову. Підтеки
+    (серії) — можна.
+    """
+    if "/" in rel_path.strip("/"):
+        return problems
+    with db.cursor() as cur:
+        cur.execute("SELECT artist_name FROM artists WHERE folder_name=%s", (rel_path.strip("/"),))
+        row = cur.fetchone()
+    if row:
+        problems.append(f"Це тека автора «{row['artist_name']}». Щоб прибрати автора, скористайся "
+                        f"вкладкою «Автори»; окремі файли й підтеки звідси видаляти можна.")
+    return problems
+
+
 def _on_file_moved(payload):
     """Файл переїхав у каталозі — автор і підпапка тепер за новою текою."""
     db = payload["db"]
@@ -274,6 +291,7 @@ def register(core):
     # переміщення в каталозі: лише в теки авторів, з оновленням прив'язки
     core.events.add_filter("file.move_check", _move_check)
     core.events.on("file.moved", _on_file_moved)
+    core.events.add_filter("folder.delete_check", _folder_delete_check)
 
     # Кеш серій і нічний планувальник — турбота застосунку, не ядра.
     try:

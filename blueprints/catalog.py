@@ -241,6 +241,61 @@ def api_catalog_delete():
     return jsonify({"ok": not errors, "done": done, "errors": errors})
 
 
+@bp.route("/api/catalog/mkdir", methods=["POST"])
+@admin_required
+def api_catalog_mkdir():
+    """Нова тека в каталозі (можна одразу вкладену: «Документи/2026»)."""
+    from blueprints.upload import _safe_folder
+    from core.storage_api import get_storage
+    rel = _safe_folder((flask_request.get_json(silent=True) or {}).get("path") or "")
+    if not rel:
+        return jsonify({"error": "Недопустима назва теки"}), 400
+    try:
+        st = get_storage()
+        if st.exists(rel):
+            return jsonify({"error": f"«{rel}» уже існує"}), 409
+        if not st.mkdir(rel):
+            return jsonify({"error": "Не вдалося створити теку"}), 500
+        return jsonify({"ok": True, "path": rel})
+    except StorageError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/api/catalog/delete-folder", methods=["POST"])
+@admin_required
+def api_catalog_delete_folder():
+    """
+    Видалити теку: усі файли з неї (і з підтек) — у кошик, потім порожня тека.
+    dry_run=true — нічого не робити, лише сказати, скільки файлів зачепить
+    і чи можна це взагалі (для підтвердження на фронті).
+    """
+    from core.files_api import TrashError, folder_delete_check, trash_folder
+    from core.storage_api import get_storage
+    body = flask_request.get_json(silent=True) or {}
+    rel = _catalog_target_folder(body.get("path") or "")
+    if not rel:
+        return jsonify({"error": "Недопустима тека"}), 400
+    try:
+        if body.get("dry_run"):
+            st = get_storage()
+            if not st.exists(rel):
+                return jsonify({"error": "Теку не знайдено"}), 404
+            problems = folder_delete_check(rel)
+            if problems:
+                return jsonify({"error": " ".join(problems)}), 409
+            return jsonify({"ok": True, "files": len(st.walk_files(rel))})
+        res = trash_folder(rel, current_user_id())
+        return jsonify({"ok": not res["errors"], **res})
+    except TrashError as e:
+        return jsonify({"error": str(e)}), 409
+    except StorageError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @bp.route("/api/catalog/move", methods=["POST"])
 @admin_required
 def api_catalog_move():
