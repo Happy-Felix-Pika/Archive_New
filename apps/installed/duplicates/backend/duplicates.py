@@ -47,6 +47,27 @@ def _has_pool_cols(db) -> bool:
     return _pool_cols_cache["ok"]
 
 
+def _reject(cur, artist_id, post_id, page_num, md5, reason):
+    """
+    Запам'ятати відмову з причиною: 'manual' — рішення людини, 'replaced' —
+    старий файл, замінений новим. «Перевірити пули» їх не чіпає, на відміну
+    від автоматичних відмов архіватора.
+    """
+    if not _pool_cols_cache.get("reason"):
+        cur.execute("""SELECT COUNT(*) AS n FROM information_schema.COLUMNS
+                       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'rejected_duplicates'
+                         AND COLUMN_NAME = 'reason'""")
+        _pool_cols_cache["reason"] = bool(cur.fetchone()["n"])
+    if _pool_cols_cache["reason"]:
+        cur.execute("""INSERT INTO rejected_duplicates (artist_id, post_id, page_num, md5_hash, reason)
+                       VALUES (%s,%s,%s,%s,%s)
+                       ON DUPLICATE KEY UPDATE reason=VALUES(reason)""",
+                    (artist_id, post_id, page_num, md5, reason))
+    else:
+        cur.execute("""INSERT IGNORE INTO rejected_duplicates (artist_id, post_id, page_num, md5_hash)
+                       VALUES (%s,%s,%s,%s)""", (artist_id, post_id, page_num, md5))
+
+
 def _matched_file(db, row: dict) -> dict | None:
     """
     Уже збережений файл пари: id, де лежить і чи в pool.
@@ -120,9 +141,7 @@ def _store_new(db, row, *, artist_id, folder, sub, order):
         if artist_id != row["artist_id"]:
             # файл записано за іншим автором (успадкував його pool) — свому
             # автору кажемо «вже є», інакше архіватор качав би пост знову
-            cur.execute("""INSERT IGNORE INTO rejected_duplicates (artist_id, post_id, page_num, md5_hash)
-                           VALUES (%s,%s,%s,%s)""",
-                        (row["artist_id"], row["post_id"], row["page_num"], row["md5_hash"]))
+            _reject(cur, row["artist_id"], row["post_id"], row["page_num"], row["md5_hash"], "replaced")
         cur.execute("DELETE FROM pending_duplicates WHERE id=%s", (row["id"],))
     return rel
 
@@ -193,10 +212,7 @@ def replace_pending(pending_id, user_id=None) -> dict:
         if old:
             # старий md5 — у відхилені, щоб скачування не підхопило його знову
             with db.cursor() as cur:
-                cur.execute("""INSERT IGNORE INTO rejected_duplicates
-                                   (artist_id, post_id, page_num, md5_hash)
-                               VALUES (%s,%s,%s,%s)""",
-                            (old["artist_id"], old["post_id"], old["page_num"], old["md5_hash"]))
+                _reject(cur, old["artist_id"], old["post_id"], old["page_num"], old["md5_hash"], "replaced")
             db.commit()
             trash_file(old["id"], user_id)                 # 1. старий — у кошик
 
@@ -488,11 +504,7 @@ def api_pending_reject(pending_id):
             if lp and os.path.exists(lp): os.remove(lp)
         except: pass
         with db.cursor() as cur:
-            cur.execute("""
-                INSERT IGNORE INTO rejected_duplicates
-                    (artist_id, post_id, page_num, md5_hash)
-                VALUES (%s, %s, %s, %s)
-            """, (row["artist_id"], row["post_id"], row["page_num"], row["md5_hash"]))
+            _reject(cur, row["artist_id"], row["post_id"], row["page_num"], row["md5_hash"], "manual")
             cur.execute("DELETE FROM pending_duplicates WHERE id=%s", (pending_id,))
         db.commit()
         db.close()
@@ -517,11 +529,7 @@ def api_pending_reject_all():
             except: pass
         with db.cursor() as cur:
             for r in rows:
-                cur.execute("""
-                    INSERT IGNORE INTO rejected_duplicates
-                        (artist_id, post_id, page_num, md5_hash)
-                    VALUES (%s, %s, %s, %s)
-                """, (r["artist_id"], r["post_id"], r["page_num"], r["md5_hash"]))
+                _reject(cur, r["artist_id"], r["post_id"], r["page_num"], r["md5_hash"], "manual")
                 cur.execute("DELETE FROM pending_duplicates WHERE id=%s", (r["id"],))
         db.commit()
         db.close()
@@ -594,10 +602,7 @@ def api_pending_reject_below():
                 pass
         with db.cursor() as cur:
             for r in rows:
-                cur.execute("""INSERT IGNORE INTO rejected_duplicates
-                                   (artist_id, post_id, page_num, md5_hash)
-                               VALUES (%s,%s,%s,%s)""",
-                            (r["artist_id"], r["post_id"], r["page_num"], r["md5_hash"]))
+                _reject(cur, r["artist_id"], r["post_id"], r["page_num"], r["md5_hash"], "manual")
                 cur.execute("DELETE FROM pending_duplicates WHERE id=%s", (r["id"],))
         db.commit(); db.close()
         return jsonify({"ok": True, "deleted": len(rows), "skipped_pool": skipped})

@@ -609,14 +609,43 @@ class DatabaseTracker:
         """
         try:
             with self.db.cursor() as cur:
-                cur.execute(
-                    """INSERT IGNORE INTO rejected_duplicates
-                       (artist_id, post_id, page_num, md5_hash)
-                       VALUES (%s,%s,%s,%s)""",
-                    (artist_id, post_id, page_num, md5)
-                )
+                try:
+                    cur.execute(
+                        """INSERT IGNORE INTO rejected_duplicates
+                           (artist_id, post_id, page_num, md5_hash, reason)
+                           VALUES (%s,%s,%s,%s,'auto')""",
+                        (artist_id, post_id, page_num, md5)
+                    )
+                except pymysql.err.OperationalError as e:
+                    if not (e.args and e.args[0] == 1054):
+                        raise
+                    cur.execute(            # колонки reason ще немає
+                        """INSERT IGNORE INTO rejected_duplicates
+                           (artist_id, post_id, page_num, md5_hash)
+                           VALUES (%s,%s,%s,%s)""",
+                        (artist_id, post_id, page_num, md5)
+                    )
         except Exception as e:
             print(f"    ! не вдалось записати відмову {post_id}: {e}")
+
+    def clear_auto_rejected(self, artist_id: int) -> int:
+        """
+        Забути автоматичні відмови автора («вже є з іншого сайту»), щоб
+        наступне скачування перевірило ці пости знову — за новими правилами,
+        з перевагою сторінок pool. Ручні рішення ('manual') і замінені
+        файли ('replaced') лишаються.
+        """
+        with self.db.cursor() as cur:
+            try:
+                cur.execute("""DELETE FROM rejected_duplicates
+                               WHERE artist_id=%s AND (reason IS NULL OR reason='auto')""", (artist_id,))
+            except pymysql.err.OperationalError as e:
+                if not (e.args and e.args[0] == 1054):
+                    raise
+                cur.execute("DELETE FROM rejected_duplicates WHERE artist_id=%s", (artist_id,))
+            n = cur.rowcount
+        self.db.commit()
+        return n
 
     def add_pending(self, artist_id: int, post_id: str, source: str,
                     post_url: str, md5_hash, phash_val, filename: str,
@@ -1953,6 +1982,43 @@ class FurryArchiver:
         self.tracker.set_pool(existing['id'], pool_folder, pool_order)
         print(f"    📦 {existing['name']} уже є — перенесено в pool «{pool_folder}» (#{pool_order})")
         return True
+
+    def recheck_pools(self, artist_name: str):
+        """
+        «Перевірити пули» для одного автора:
+          1. уже наявні файли, що на своєму сайті входять у pool, але лежать
+             поза його підпапкою, — переносимо в pool (e621 і Inkbunny);
+          2. забуваємо автоматичні відмови «вже є з іншого сайту» — серед них
+             могли бути сторінки pool, які раніше відкинули мовчки;
+          3. звичайне скачування автора: ці пости перевіряються заново, і
+             сторінки pool стають на місце (перенос або заміна після
+             завершення), а звичайні копії знову відкидаються самі.
+        """
+        print("\n" + "=" * 60)
+        print(f"  ПЕРЕВІРКА ПУЛІВ: {artist_name}")
+        print("=" * 60)
+        folder_name = f"@{artist_name}"
+        with self.db.cursor() as cur:
+            cur.execute("SELECT id, folder_name FROM artists WHERE artist_name=%s OR folder_name=%s "
+                        "ORDER BY (folder_name=%s) DESC LIMIT 1", (artist_name, folder_name, folder_name))
+            row = cur.fetchone()
+        if not row:
+            print(f"✗ Автора «{artist_name}» немає в базі")
+            return
+        artist_id, folder_name = row['id'], row['folder_name']
+
+        print("[1/3] Наявні файли → pool-підпапки")
+        moved = self._sync_check_pool_relocate(artist_id, folder_name) or 0
+        moved_ib = self._sync_check_pool_relocate_inkbunny(artist_id, folder_name) or 0
+        self.tracker.save()
+        print(f"    📦 перенесено в pool: e621 {moved}, Inkbunny {moved_ib}")
+
+        print("[2/3] Автоматичні відмови «вже є з іншого сайту»")
+        cleared = self.tracker.clear_auto_rejected(artist_id)
+        print(f"    ↺ забуто {cleared} — їх буде перевірено заново")
+
+        print("[3/3] Скачування автора з перевагою сторінок pool")
+        self.run(artist_name=folder_name[1:] if folder_name.startswith('@') else artist_name)
 
     def run(self, dry_run=False, artist_name: str | None = None, artist_names: list | None = None):
         print("\n" + "="*60)
@@ -3677,6 +3743,7 @@ def main():
     parser.add_argument('--artist',        type=str, default=None, help='Завантажити всю бібліотеку одного конкретного автора (створює папку якщо треба)')
     parser.add_argument('--auto-update',   action='store_true', help='Перевірити на нове ТІЛЬКИ авторів з увімкненим авто-оновленням (для щоденного планувальника)')
     parser.add_argument('--find-duplicates', action='store_true', help='Ретроактивний пошук дублікатів у вже наявній бібліотеці (обмежується --artist і/або --subfolder, якщо задані)')
+    parser.add_argument('--recheck-pools', action='store_true', help='Разом з --artist: перенести наявні файли в pool, забути автоматичні відмови й перекачати автора з перевагою сторінок pool')
     parser.add_argument('--subfolder',     type=str, default=None, help='Обмежити --find-duplicates конкретним pool усередині автора')
     parser.add_argument('--backfill-sizes', action='store_true', help='Довантажити вагу (size_bytes) для файлів, скачаних до появи цього відстежування')
     parser.add_argument('--cleanup',       action='store_true', help='Видалити з БД записи файлів яких немає на Nextcloud')
@@ -3706,6 +3773,8 @@ def main():
             archiver.scan_for_duplicates(artist_name=args.artist, subfolder=args.subfolder)
         elif args.backfill_sizes:
             archiver.backfill_file_sizes()
+        elif args.recheck_pools and args.artist:
+            archiver.recheck_pools(args.artist)
         elif args.artist:
             archiver.run(dry_run=args.dry_run, artist_name=args.artist)
         elif args.auto_update:
