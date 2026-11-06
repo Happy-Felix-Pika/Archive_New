@@ -167,7 +167,101 @@ def api_catalog_list(hidden_folders_override=None):
 
     folders.sort(key=lambda x: x["name"].lower())
     files.sort(key=lambda x: x["name"].lower())
+
+    # Для свого каталогу — id файлу в архіві та «улюблене»: з ними перегляд
+    # показує автора й посилання на оригінал, а дії працюють з базою.
+    # Файл без id — лежить у сховищі, але в архів не внесений.
+    if hidden_folders_override is None and files:
+        try:
+            from core.files_api import file_ids_by_paths
+            db = get_db()
+            prefix = f"{rel_path}/" if rel_path else ""
+            ids = file_ids_by_paths([prefix + f["name"] for f in files], db)
+            favs = set()
+            if ids:
+                ph = ",".join(["%s"] * len(ids))
+                favs = {r["download_id"] for r in qq(
+                    db, f"SELECT download_id FROM user_favorites WHERE user_id=%s AND download_id IN ({ph})",
+                    [current_user_id()] + list(ids.values()))}
+            db.close()
+            for f in files:
+                fid = ids.get(prefix + f["name"])
+                f["id"] = fid
+                f["is_favorite"] = fid in favs
+        except Exception as e:
+            print(f"  ⚠ Каталог: не вдалося підтягнути id файлів: {e}")
+
     return jsonify({"path": rel_path, "folders": folders, "files": files})
+
+
+# ── Дії з файлами в каталозі (лише адмін) ─────────────────────────────
+#
+#  Кожна дія йде через ядро (core/files_api), яке міняє і сховище, і базу:
+#  видалення — у кошик зі знімком тегів/автора, переміщення — з новим
+#  files.rel_path. Тому після дій у каталозі «Арти», кошик і архіватор
+#  бачать файл там, де він справді лежить.
+
+def _catalog_target_folder(raw: str) -> str | None:
+    """Тека призначення: без '..', не кошик. None — шлях недопустимий."""
+    rel = _safe_rel_path(raw)
+    if rel is None:
+        return None
+    if rel.split("/")[0] == ".trash":
+        return None
+    return rel
+
+
+def _catalog_paths(body) -> list | None:
+    out = []
+    for raw in body.get("paths") or []:
+        rel = _safe_rel_path(raw)
+        if not rel or rel.split("/")[0] == ".trash":
+            return None
+        out.append(rel)
+    return out
+
+
+@bp.route("/api/catalog/delete", methods=["POST"])
+@admin_required
+def api_catalog_delete():
+    """Файли з каталогу — у кошик (з бази теж: тегі, автор, улюблене зберігаються у знімку)."""
+    from core.files_api import TrashError, trash_path
+    paths = _catalog_paths(flask_request.get_json(silent=True) or {})
+    if not paths:
+        return jsonify({"error": "Не вказано файли"}), 400
+    done, errors = [], []
+    for p in paths:
+        try:
+            trash_path(p, current_user_id())
+            done.append(p)
+        except TrashError as e:
+            errors.append({"path": p, "error": str(e)})
+        except Exception as e:
+            errors.append({"path": p, "error": str(e)})
+    return jsonify({"ok": not errors, "done": done, "errors": errors})
+
+
+@bp.route("/api/catalog/move", methods=["POST"])
+@admin_required
+def api_catalog_move():
+    """Перемістити файли в іншу теку — і в сховищі, і в базі (files.rel_path)."""
+    from core.files_api import MoveError, move_path
+    body = flask_request.get_json(silent=True) or {}
+    paths = _catalog_paths(body)
+    dest = _catalog_target_folder(body.get("dest") or "")
+    if not paths:
+        return jsonify({"error": "Не вказано файли"}), 400
+    if dest is None:
+        return jsonify({"error": "Недопустима тека призначення"}), 400
+    done, errors = [], []
+    for p in paths:
+        try:
+            done.append({"from": p, "to": move_path(p, dest)})
+        except MoveError as e:
+            errors.append({"path": p, "error": str(e)})
+        except Exception as e:
+            errors.append({"path": p, "error": str(e)})
+    return jsonify({"ok": not errors, "done": done, "errors": errors})
 
 
 # ─────────────────────────────────────────────────────────────────────

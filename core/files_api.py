@@ -29,6 +29,46 @@ def get_file(file_id, db=None) -> dict | None:
             db.close()
 
 
+def find_file_by_path(rel_path: str, db=None, storage_id: str = "default") -> dict | None:
+    """Рядок files за шляхом у сховищі (через path_hash — він під індексом)."""
+    own = db is None
+    if own:
+        db = get_db()
+    try:
+        return q(db, """SELECT id, storage_id, rel_path, name, ext, size_bytes, md5_hash
+                        FROM files WHERE storage_id=%s AND path_hash=MD5(%s) AND rel_path=%s""",
+                 (storage_id, rel_path, rel_path))
+    finally:
+        if own:
+            db.close()
+
+
+def file_ids_by_paths(rel_paths, db=None, storage_id: str = "default") -> dict:
+    """{rel_path: id} для списку шляхів — одним-двома запитами, а не по
+    запиту на файл (каталог показує теки з тисячами файлів)."""
+    import hashlib
+    paths = [p for p in rel_paths if p]
+    if not paths:
+        return {}
+    own = db is None
+    if own:
+        db = get_db()
+    out = {}
+    try:
+        for i in range(0, len(paths), 500):
+            chunk = paths[i:i + 500]
+            hashes = [hashlib.md5(p.encode("utf-8")).hexdigest() for p in chunk]
+            ph = ",".join(["%s"] * len(hashes))
+            for r in qq(db, f"""SELECT id, rel_path FROM files
+                                WHERE storage_id=%s AND path_hash IN ({ph})""",
+                        [storage_id] + hashes):
+                out[r["rel_path"]] = r["id"]
+    finally:
+        if own:
+            db.close()
+    return out
+
+
 def local_path(rel_path: str) -> str:
     """
     Абсолютний шлях у локальному сховищі для rel_path з БД.
@@ -146,6 +186,112 @@ def trash_file(file_id, user_id=None):
     return trash_id
 
 
+def trash_path(rel_path, user_id=None):
+    """
+    Видалення з каталогу — за шляхом, а не за id.
+
+    Файл з бази йде звичайним trash_file (зі знімком тегів, автора тощо).
+    Файл, якого в базі немає (особисті файли у виключених теках, щось
+    скопійоване руками), теж іде в кошик, а не стирається: запис кошика
+    з file_id = 0 — «лише файл, без запису в архіві».
+    """
+    from core.storage_api import get_storage
+
+    row = find_file_by_path(rel_path)
+    if row:
+        return trash_file(row["id"], user_id)
+
+    storage = get_storage()
+    if not storage.exists(rel_path):
+        raise TrashError("Файл не знайдено")
+    name = rel_path.rsplit("/", 1)[-1]
+    ext = name.rsplit(".", 1)[-1].lower()[:10] if "." in name else ""
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute("""INSERT INTO trash_items
+                           (file_id, name, ext, size_bytes, storage_id, original_rel_path,
+                            trash_rel_path, snapshot, deleted_by)
+                           VALUES (0,%s,%s,%s,'default',%s,'',%s,%s)""",
+                        (name, ext, storage.size(rel_path), rel_path,
+                         _json.dumps({"untracked": True}), user_id))
+            trash_id = cur.lastrowid
+        trash_rel = f"{TRASH_DIR}/{trash_id}__{name}"
+        if not storage.move(rel_path, trash_rel):
+            db.rollback()
+            raise TrashError("Не вдалося перемістити файл у кошик")
+        with db.cursor() as cur:
+            cur.execute("UPDATE trash_items SET trash_rel_path=%s WHERE id=%s", (trash_rel, trash_id))
+        db.commit()
+        return trash_id
+    finally:
+        db.close()
+
+
+# ═════════════════════════════════════════════════════════════════════
+#  ПЕРЕМІЩЕННЯ
+#
+#  Файл переїжджає у сховищі, і в тій самій транзакції оновлюється
+#  files.rel_path — інакше він перестав би відкриватись, а перевірка
+#  «відсутніх файлів» прибрала б його з бази.
+#
+#  Застосунки можуть:
+#    * фільтр 'file.move_check' — заборонити переїзд (список причин);
+#    * подія  'file.moved'      — оновити своє в тій самій транзакції
+#                                 (furry: автор і підпапка за новою текою).
+# ═════════════════════════════════════════════════════════════════════
+
+class MoveError(Exception):
+    """Зрозуміла причина, чому файл не переїхав (показується користувачу)."""
+
+
+def move_path(src_rel: str, dst_folder: str) -> str:
+    """Перемістити файл src_rel у теку dst_folder ('' — корінь). Повертає новий шлях."""
+    from core import events
+    from core.storage_api import get_storage
+
+    name = src_rel.rsplit("/", 1)[-1]
+    dst_rel = f"{dst_folder}/{name}" if dst_folder else name
+    if dst_rel == src_rel:
+        return src_rel
+
+    storage = get_storage()
+    if not storage.exists(src_rel):
+        raise MoveError("Файл не знайдено")
+    db = get_db()
+    try:
+        if storage.exists(dst_rel) or find_file_by_path(dst_rel, db):
+            raise MoveError(f"У «{dst_folder or 'корені'}» уже є файл «{name}»")
+        row = find_file_by_path(src_rel, db)
+        if row:
+            problems = events.apply_filters("file.move_check", [], file_id=row["id"],
+                                            old_rel=src_rel, new_rel=dst_rel, db=db) or []
+            if problems:
+                raise MoveError(" ".join(problems))
+
+        if not storage.move(src_rel, dst_rel):
+            raise MoveError("Не вдалося перемістити файл у сховищі")
+        if not row:
+            return dst_rel          # файл поза архівом — у базі міняти нічого
+
+        try:
+            with db.cursor() as cur:
+                cur.execute("UPDATE files SET rel_path=%s WHERE id=%s", (dst_rel, row["id"]))
+            events.emit("file.moved", {"file_id": row["id"], "old_rel": src_rel,
+                                       "new_rel": dst_rel, "db": db})
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            try:
+                storage.move(dst_rel, src_rel)
+            except Exception as e2:
+                print(f"  ⚠ Переміщення: не вдалося повернути {dst_rel} → {src_rel}: {e2}")
+            raise MoveError(f"Помилка бази ({e}) — файл повернуто на місце.")
+        return dst_rel
+    finally:
+        db.close()
+
+
 def _storage_is_local():
     from core.storage import get_storage_mode
     return get_storage_mode() == "local"
@@ -193,6 +339,21 @@ def restore_trash(trash_id):
         snap = _json.loads(item["snapshot"] or "{}")
         fr   = snap.get("file") or {}
         orig = item["original_rel_path"]
+
+        if not item["file_id"]:
+            # файл поза архівом (видалений з каталогу): повертаємо лише сам файл
+            storage = get_storage()
+            trash_rel = item["trash_rel_path"]
+            if not trash_rel or not storage.exists(trash_rel):
+                raise TrashError("Самого файлу в кошику вже немає на диску — відновити нічого.")
+            if storage.exists(orig):
+                raise TrashError(f"У сховищі на місці «{orig}» уже лежить файл. Прибери його і спробуй знову.")
+            if not storage.move(trash_rel, orig):
+                raise TrashError("Не вдалося повернути файл з кошика")
+            with db.cursor() as cur:
+                cur.execute("DELETE FROM trash_items WHERE id=%s", (trash_id,))
+            db.commit()
+            return None
 
         # на старому місці вже щось є — не затираємо
         if q(db, "SELECT id FROM files WHERE storage_id=%s AND rel_path=%s", (item["storage_id"], orig)):

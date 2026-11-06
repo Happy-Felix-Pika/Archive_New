@@ -1289,6 +1289,7 @@ function _showOverlayBox(box) {
   }
   ov.classList.add('open');
   _updateOverlayNav();
+  catalogOverlayInfo(box);
 }
 
 function overlayNav(delta) {
@@ -1314,6 +1315,8 @@ function closeOverlay() {
   document.getElementById('overlay-nav-next').style.display = 'none';
   const lbl = document.getElementById('overlay-label');
   if (lbl) lbl.style.display = 'none';
+  const info = document.getElementById('overlay-info');
+  if (info) { info.style.display = 'none'; info.innerHTML = ''; }
   _overlayBoxes = [];
 }
 
@@ -2374,6 +2377,33 @@ function galShowUploadModal() {
   document.getElementById('upload-modal').style.display = 'flex';
 }
 
+// Завантаження кількох файлів по черзі. Сервер приймає файл за запит —
+// так простіше показувати прогрес і помилку саме того файлу, що не пройшов
+// (дубль у теці, недопустима тека), а решта все одно завантажується.
+// Спільне для модалки «Арти» і drag&drop у каталозі.
+async function uploadFilesSequential(files, opts = {}, onProgress = () => {}) {
+  const res = { ok: [], failed: [] };
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    onProgress(i, files.length, file.name);
+    const fd = new FormData();
+    fd.append('file', file);
+    if (opts.artist) fd.append('artist_name', opts.artist);
+    if (opts.folder) fd.append('folder', opts.folder);
+    fd.append('tags', opts.tags || '');
+    try {
+      const r = await fetch(`${API}/api/upload`, { method: 'POST', body: fd });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok) res.ok.push(d.filename || file.name);
+      else res.failed.push({ name: file.name, error: d.error || `HTTP ${r.status}` });
+    } catch (e) {
+      res.failed.push({ name: file.name, error: 'Помилка мережі' });
+    }
+  }
+  onProgress(files.length, files.length, '');
+  return res;
+}
+
 async function galSubmitUpload() {
   const fileInput   = document.getElementById('upload-file-input');
   const artistInput = document.getElementById('upload-artist-input');
@@ -2381,37 +2411,26 @@ async function galSubmitUpload() {
   const statusEl    = document.getElementById('upload-status');
   const btn         = document.getElementById('upload-submit-btn');
 
-  const file   = fileInput.files[0];
+  const files  = Array.from(fileInput.files || []);
   // Автор — справа застосунку furry і НЕ обов'язковий: без нього файл іде
   // у вказану теку або в корінь. Поля автора може й не бути, якщо furry вимкнено.
   const artist = artistInput ? artistInput.value.trim() : '';
   const folder = (document.getElementById('upload-folder-input')?.value || '').trim();
-  if (!file) { statusEl.textContent = 'Обери файл'; statusEl.style.color = 'var(--red)'; return; }
-
-  const fd = new FormData();
-  fd.append('file', file);
-  if (artist) fd.append('artist_name', artist);
-  if (folder) fd.append('folder', folder);
-  fd.append('tags', tagsInput.value.trim());
+  if (!files.length) { statusEl.textContent = 'Обери файли'; statusEl.style.color = 'var(--red)'; return; }
 
   btn.disabled = true;
   statusEl.style.color = 'var(--muted)';
-  statusEl.textContent = 'Завантаження…';
   try {
-    const r = await fetch(`${API}/api/upload`, { method: 'POST', body: fd });
-    const d = await r.json();
-    if (!r.ok) {
-      statusEl.style.color = 'var(--red)';
-      statusEl.textContent = d.error || 'Помилка завантаження';
-      return;
+    const res = await uploadFilesSequential(files, { artist, folder, tags: tagsInput.value.trim() },
+      (i, n, name) => { if (name) statusEl.textContent = `Завантаження ${i + 1} / ${n}: ${name}`; });
+    const lines = [`✓ Збережено: ${res.ok.length} з ${files.length}`];
+    res.failed.forEach(f => lines.push(`✗ ${f.name}: ${f.error}`));
+    statusEl.textContent = lines.join('\n');
+    statusEl.style.color = res.failed.length ? (res.ok.length ? 'var(--yellow)' : 'var(--red)') : 'var(--green)';
+    if (res.ok.length) toast(`Додано файлів: ${res.ok.length}`, res.failed.length ? 'err' : 'ok');
+    if (!res.failed.length) {
+      setTimeout(() => { document.getElementById('upload-modal').style.display = 'none'; }, 1200);
     }
-    statusEl.style.color = 'var(--green)';
-    statusEl.textContent = `✓ Збережено: ${d.filename}`;
-    toast('Файл додано до бібліотеки', 'ok');
-    setTimeout(() => { document.getElementById('upload-modal').style.display = 'none'; }, 1200);
-  } catch (e) {
-    statusEl.style.color = 'var(--red)';
-    statusEl.textContent = 'Помилка мережі';
   } finally {
     btn.disabled = false;
   }
@@ -4368,6 +4387,7 @@ function catalogThumbFailed(img) {
 }
 
 async function catalogLoad(path = '') {
+  if ((path || '') !== _catalogPath) _catalogSelected.clear();
   _catalogPath = path || '';
   const grid = document.getElementById('catalog-grid');
   grid.innerHTML = `<div style="opacity:.6">${t('catalog.loading')}</div>`;
@@ -4383,10 +4403,14 @@ async function catalogLoad(path = '') {
       ...d.folders.map(f => ({...f, type:'folder'})),
       ...d.files.map(f => ({...f, type:'file'})),
     ];
+    // вибране, якого вже немає в теці (перемістили/видалили), — прибираємо
+    const names = new Set(_catalogItems.filter(i => i.type === 'file').map(i => i.name));
+    [..._catalogSelected].forEach(n => { if (!names.has(n)) _catalogSelected.delete(n); });
     catalogRender();
   } catch (e) {
     grid.innerHTML = `<div style="opacity:.6">${t('catalog.error')}</div>`;
   }
+  catalogUpdateActionBar();
 }
 
 function catalogSortedFiltered() {
@@ -4468,7 +4492,8 @@ function catalogRender() {
              title="Кому видно цю папку"
              style="position:absolute;top:6px;left:6px;font-size:14px;cursor:pointer;opacity:.5">🔑</span>`
         : '';
-      return `<div class="catalog-item" data-idx="${idx}" style="position:relative;${isExcluded?'opacity:.55':''}">
+      const folderPath = _catalogPath ? `${_catalogPath}/${item.name}` : item.name;
+      return `<div class="catalog-item" data-idx="${idx}" data-drop-folder="${esc(folderPath)}" style="position:relative;${isExcluded?'opacity:.55':''}">
         ${excludeBtn}
         ${accessBtn}
         <div class="catalog-icon">📁</div>
@@ -4488,15 +4513,21 @@ function catalogRender() {
     // сотні мегабайт заради сітки.
     const thumbUrl = _catalogThumbUrl(itemPath);
     const thumb = (isImage || isVideo)
-      ? `<img class="catalog-thumb" src="${thumbUrl}" loading="lazy"
+      ? `<img class="catalog-thumb" src="${thumbUrl}" loading="lazy" draggable="false"
               data-icon="${icon}" ${isImage ? `data-full="${fileUrl}"` : ''}
               onerror="catalogThumbFailed(this)">`
       : `<div class="catalog-icon">${icon}</div>`;
     const playBadge = isVideo
       ? `<span class="catalog-play">▶</span>`
       : '';
-    return `<div class="catalog-item" data-idx="${idx}" style="position:relative">
-      ${thumb}${playBadge}
+    const canEdit = _catalogCanEdit();
+    const selected = _catalogSelected.has(item.name);
+    const check = canEdit
+      ? `<span class="catalog-check${selected ? ' on' : ''}" title="Обрати">${selected ? '✓' : ''}</span>`
+      : '';
+    const favMark = item.is_favorite ? `<span class="catalog-fav-mark" title="${t('gal.favorite')}">★</span>` : '';
+    return `<div class="catalog-item${selected ? ' selected' : ''}" data-idx="${idx}" ${canEdit ? 'draggable="true"' : ''} style="position:relative">
+      ${check}${favMark}${thumb}${playBadge}
       <div class="catalog-name">${esc(item.name)}</div>
       ${metaHtml}
     </div>`;
@@ -4522,6 +4553,13 @@ document.getElementById('catalog-grid')?.addEventListener('click', e => {
   const idx  = parseInt(box.dataset.idx, 10);
   const item = _catalogRenderItems[idx];
   if (!item) return;
+  // Вибір: галочка, або Ctrl/⌘-клік по файлу
+  if (item.type === 'file' && _catalogCanEdit() &&
+      (e.target.closest('.catalog-check') || e.ctrlKey || e.metaKey)) {
+    e.stopPropagation();
+    catalogToggleSelect(item.name);
+    return;
+  }
   if (item.type === 'folder') {
     const newPath = _catalogPath ? `${_catalogPath}/${item.name}` : item.name;
     catalogLoad(newPath);
@@ -4547,6 +4585,7 @@ function renderCatalogBreadcrumb() {
   const rootCrumb = document.createElement('span');
   rootCrumb.className = 'catalog-crumb';
   rootCrumb.textContent = t('catalog.root');
+  rootCrumb.dataset.dropFolder = '';   // «крихти» приймають файли — так їх можна підняти вище
   rootCrumb.onclick = () => catalogLoad('');
   el.appendChild(rootCrumb);
 
@@ -4558,6 +4597,7 @@ function renderCatalogBreadcrumb() {
     c.className = 'catalog-crumb';
     c.textContent = p;
     const pathCopy = acc;
+    c.dataset.dropFolder = acc;
     c.onclick = () => catalogLoad(pathCopy);
     el.appendChild(c);
   });
@@ -4594,12 +4634,331 @@ function catalogOpenFile(url, clickedExt) {
     const mime = CATALOG_VIDEO_EXT.includes(ext) ? `video/${ext}`
                : CATALOG_AUDIO_EXT.includes(ext) ? `audio/${ext}`
                : `image/${ext}`;
-    return { dataset: { src: fUrl, mime }, isCatalog: true };
+    return { dataset: { src: fUrl, mime }, isCatalog: true,
+             catalogPath: p, catalogName: it.name, fileId: it.id || null };
   });
   _overlayBoxIdx = _overlayBoxes.findIndex(b => b.dataset.src === url);
   if (_overlayBoxIdx < 0) _overlayBoxIdx = 0;
 
   _showOverlayBox(_overlayBoxes[_overlayBoxIdx] || { dataset: { src: url, mime: `${CATALOG_VIDEO_EXT.includes(clickedExt)?'video':CATALOG_AUDIO_EXT.includes(clickedExt)?'audio':'image'}/${clickedExt}` }, isCatalog: true });
+}
+
+// ── Каталог: вибір, дії з файлами, drag&drop ─────────────────────────────
+//
+// Усе це — лише для свого сховища й лише адміну. Кожна дія йде на сервер,
+// а він міняє і сховище, і базу: видалення — у кошик, переміщення — з новим
+// шляхом файлу в БД, тож «Арти» й архіватор далі бачать файл на новому місці.
+
+const _catalogSelected = new Set();   // імена файлів у поточній теці
+
+function _catalogCanEdit() {
+  return _catalogSource === 'local' && !!_currentUser?.is_admin;
+}
+
+function _catalogJoin(name) {
+  return _catalogPath ? `${_catalogPath}/${name}` : name;
+}
+
+function catalogToggleSelect(name) {
+  if (_catalogSelected.has(name)) _catalogSelected.delete(name);
+  else _catalogSelected.add(name);
+  catalogRender();
+  catalogUpdateActionBar();
+}
+
+function catalogSelectAll() {
+  const visible = (_catalogRenderItems || []).filter(i => i.type === 'file').map(i => i.name);
+  const allOn = visible.length && visible.every(n => _catalogSelected.has(n));
+  if (allOn) visible.forEach(n => _catalogSelected.delete(n));
+  else visible.forEach(n => _catalogSelected.add(n));
+  catalogRender();
+  catalogUpdateActionBar();
+}
+
+function catalogClearSelection() {
+  _catalogSelected.clear();
+  catalogRender();
+  catalogUpdateActionBar();
+}
+
+function catalogUpdateActionBar() {
+  const bar = document.getElementById('catalog-actions');
+  if (!bar) return;
+  const canEdit = _catalogCanEdit();
+  bar.style.display = canEdit ? 'flex' : 'none';
+  if (!canEdit) return;
+  const n = _catalogSelected.size;
+  document.getElementById('catalog-sel-count').textContent =
+    n ? `Обрано: ${n}` : 'Перетягни файли з комп\'ютера сюди, щоб завантажити в цю теку';
+  bar.querySelectorAll('[data-needs-selection]').forEach(b => b.style.display = n ? '' : 'none');
+}
+
+function _catalogShowResult(d, verb) {
+  const done = (d.done || []).length;
+  const errs = d.errors || [];
+  if (done) toast(`${verb}: ${done}`, errs.length ? 'err' : 'ok');
+  if (errs.length) {
+    const msg = errs.slice(0, 5).map(e => `• ${e.path.split('/').pop()}: ${e.error}`).join('\n');
+    alert(`Не вдалося (${errs.length}):\n${msg}${errs.length > 5 ? '\n…' : ''}`);
+  }
+}
+
+async function catalogDeletePaths(paths) {
+  if (!paths.length) return false;
+  const what = paths.length === 1 ? `«${paths[0].split('/').pop()}»` : `${paths.length} файл(ів)`;
+  if (!confirm(`Перемістити ${what} у кошик?\nЗвідти можна відновити разом з тегами й автором.`)) return false;
+  try {
+    const d = await fetch(`${API}/api/catalog/delete`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ paths })
+    }).then(r => r.json());
+    if (d.error) { toast(d.error, 'err'); return false; }
+    _catalogShowResult(d, 'У кошику');
+    await catalogLoad(_catalogPath);
+    return (d.done || []).length > 0;
+  } catch {
+    toast('Помилка мережі', 'err');
+    return false;
+  }
+}
+
+async function catalogMovePaths(paths, dest) {
+  if (!paths.length) return false;
+  dest = (dest || '').replace(/\\/g, '/').split('/').map(s => s.trim()).filter(Boolean).join('/');
+  try {
+    const d = await fetch(`${API}/api/catalog/move`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ paths, dest })
+    }).then(r => r.json());
+    if (d.error) { toast(d.error, 'err'); return false; }
+    _catalogShowResult(d, `Переміщено в «${dest || 'корінь'}»`);
+    await catalogLoad(_catalogPath);
+    return (d.done || []).length > 0;
+  } catch {
+    toast('Помилка мережі', 'err');
+    return false;
+  }
+}
+
+function catalogDeleteSelected() {
+  catalogDeletePaths([..._catalogSelected].map(_catalogJoin));
+}
+
+// ── Вікно «Перемістити»: маленький браузер тек ──────────────────────────
+let _catalogMovePaths = [];
+let _catalogMoveDest  = '';
+
+function catalogMoveSelected() {
+  catalogShowMoveModal([..._catalogSelected].map(_catalogJoin));
+}
+
+function catalogShowMoveModal(paths) {
+  if (!paths.length) return;
+  _catalogMovePaths = paths;
+  document.getElementById('catalog-move-title').textContent =
+    paths.length === 1 ? `Перемістити «${paths[0].split('/').pop()}»` : `Перемістити ${paths.length} файл(ів)`;
+  document.getElementById('catalog-move-modal').style.display = 'flex';
+  catalogMoveBrowse(_catalogPath);
+}
+
+async function catalogMoveBrowse(path) {
+  _catalogMoveDest = path || '';
+  document.getElementById('catalog-move-dest').value = _catalogMoveDest;
+  const list = document.getElementById('catalog-move-list');
+  list.innerHTML = `<div style="opacity:.6">${t('catalog.loading')}</div>`;
+  try {
+    const d = await fetch(`${API}/api/catalog/list?path=${encodeURIComponent(_catalogMoveDest)}`).then(r => r.json());
+    if (d.error) { list.innerHTML = `<div style="opacity:.6">${esc(d.error)}</div>`; return; }
+    const up = _catalogMoveDest
+      ? `<div class="catalog-move-row" data-path="${esc(_catalogMoveDest.split('/').slice(0, -1).join('/'))}">⬆ ..</div>` : '';
+    list.innerHTML = up + (d.folders.length
+      ? d.folders.map(f => `<div class="catalog-move-row" data-path="${esc(_catalogMoveDest ? `${_catalogMoveDest}/${f.name}` : f.name)}">📁 ${esc(f.name)}</div>`).join('')
+      : `<div style="opacity:.5;padding:6px">Підтек немає</div>`);
+  } catch {
+    list.innerHTML = `<div style="opacity:.6">${t('catalog.error')}</div>`;
+  }
+}
+
+document.getElementById('catalog-move-list')?.addEventListener('click', e => {
+  const row = e.target.closest('.catalog-move-row');
+  if (row) catalogMoveBrowse(row.dataset.path);
+});
+
+async function catalogMoveConfirm() {
+  const dest = document.getElementById('catalog-move-dest').value;
+  const btn = document.getElementById('catalog-move-btn');
+  btn.disabled = true;
+  try {
+    if (await catalogMovePaths(_catalogMovePaths, dest)) {
+      document.getElementById('catalog-move-modal').style.display = 'none';
+    }
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ── Drag&drop ────────────────────────────────────────────────────────────
+//  * файли з комп'ютера → завантаження в поточну теку (або в теку-плитку,
+//    на яку їх кинули);
+//  * плитки файлів каталогу → на плитку теки чи «крихту» шляху = переміщення.
+const CATALOG_DND_TYPE = 'application/x-archive-catalog';
+
+function _dndHasOsFiles(e) {
+  // перетягування плитки з картинкою браузер теж позначає як 'Files' —
+  // тому «файли з комп'ютера» лише тоді, коли це не наша плитка
+  const types = Array.from(e.dataTransfer?.types || []);
+  return types.includes('Files') && !types.includes(CATALOG_DND_TYPE);
+}
+function _dndHasCatalog(e) {
+  return Array.from(e.dataTransfer?.types || []).includes(CATALOG_DND_TYPE);
+}
+function _catalogDropFolderOf(el) {
+  const t = el.closest('[data-drop-folder]');
+  return t ? t.dataset.dropFolder : null;
+}
+
+(function setupCatalogDnd() {
+  const page = document.getElementById('page-catalog');
+  const grid = document.getElementById('catalog-grid');
+  const hint = document.getElementById('catalog-drop-hint');
+  if (!page || !grid) return;
+
+  let depth = 0;
+  const clearHi = () => document.querySelectorAll('.catalog-drop-target')
+    .forEach(el => el.classList.remove('catalog-drop-target'));
+  const hideHint = () => { depth = 0; if (hint) hint.style.display = 'none'; clearHi(); };
+
+  grid.addEventListener('dragstart', e => {
+    const box = e.target.closest('.catalog-item');
+    if (!box || !_catalogCanEdit()) return;
+    const item = _catalogRenderItems[parseInt(box.dataset.idx, 10)];
+    if (!item || item.type !== 'file') { e.preventDefault(); return; }
+    // тягнемо обрану плитку — разом з усіма обраними; інакше лише її
+    const names = _catalogSelected.has(item.name) ? [..._catalogSelected] : [item.name];
+    e.dataTransfer.setData(CATALOG_DND_TYPE, JSON.stringify(names.map(_catalogJoin)));
+    e.dataTransfer.effectAllowed = 'move';
+  });
+
+  page.addEventListener('dragenter', e => {
+    if (!_catalogCanEdit() || !_dndHasOsFiles(e)) return;
+    depth++;
+    if (hint) {
+      hint.textContent = `⬆ Відпусти, щоб завантажити в «${_catalogPath || 'корінь'}»`;
+      hint.style.display = 'flex';
+    }
+  });
+  page.addEventListener('dragleave', e => {
+    if (!_dndHasOsFiles(e)) return;
+    if (--depth <= 0) hideHint();
+  });
+
+  page.addEventListener('dragover', e => {
+    if (!_catalogCanEdit()) return;
+    const osFiles = _dndHasOsFiles(e), internal = _dndHasCatalog(e);
+    if (!osFiles && !internal) return;
+    const folder = _catalogDropFolderOf(e.target);
+    if (internal && folder === null) return;      // переміщення — лише на теку
+    e.preventDefault();
+    e.dataTransfer.dropEffect = internal ? 'move' : 'copy';
+    clearHi();
+    const t = e.target.closest('[data-drop-folder]');
+    if (t) t.classList.add('catalog-drop-target');
+    if (hint && osFiles) hint.textContent = `⬆ Відпусти, щоб завантажити в «${(folder ?? _catalogPath) || 'корінь'}»`;
+  });
+
+  page.addEventListener('drop', async e => {
+    if (!_catalogCanEdit()) return;
+    const folder = _catalogDropFolderOf(e.target);
+    if (_dndHasCatalog(e)) {
+      e.preventDefault(); hideHint();
+      if (folder === null) return;
+      let paths = [];
+      try { paths = JSON.parse(e.dataTransfer.getData(CATALOG_DND_TYPE) || '[]'); } catch {}
+      // у ту саму теку — нічого не робимо
+      paths = paths.filter(p => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '') !== folder);
+      if (paths.length) catalogMovePaths(paths, folder);
+      return;
+    }
+    if (!_dndHasOsFiles(e)) return;
+    e.preventDefault(); hideHint();
+    const files = Array.from(e.dataTransfer.files || []).filter(f => f.size > 0 || f.type);
+    if (!files.length) { toast('Теки перетягувати не можна — лише файли', 'err'); return; }
+    catalogUploadFiles(files, folder ?? _catalogPath);
+  });
+})();
+
+async function catalogUploadFiles(files, folder) {
+  const status = document.getElementById('catalog-sel-count');
+  const res = await uploadFilesSequential(files, { folder },
+    (i, n, name) => { if (status && name) status.textContent = `Завантаження ${i + 1} / ${n}: ${name}`; });
+  if (res.ok.length) toast(`Завантажено: ${res.ok.length} з ${files.length}`, res.failed.length ? 'err' : 'ok');
+  if (res.failed.length) {
+    const msg = res.failed.slice(0, 5).map(f => `• ${f.name}: ${f.error}`).join('\n');
+    alert(`Не завантажено (${res.failed.length}):\n${msg}${res.failed.length > 5 ? '\n…' : ''}`);
+  }
+  await catalogLoad(_catalogPath);
+}
+
+// ── Інформація про файл у перегляді з каталогу ──────────────────────────
+//  Те саме, що й в «Артах»: автор, ★, посилання на оригінал — якщо файл
+//  є в архіві (має id). Файл поза архівом показує лише ім'я.
+let _overlayInfoToken = 0;
+
+async function catalogOverlayInfo(box) {
+  const el = document.getElementById('overlay-info');
+  if (!el) return;
+  if (!box?.isCatalog || _catalogSource !== 'local') { el.style.display = 'none'; el.innerHTML = ''; return; }
+  const token = ++_overlayInfoToken;
+  const isAdmin = !!_currentUser?.is_admin;
+  const delBtn = isAdmin
+    ? `<span class="catalog-crumb" style="color:var(--red)" title="${t('gal.delete')}" onclick="catalogOverlayDelete()">🗑</span>` : '';
+  const moveBtn = isAdmin
+    ? `<span class="catalog-crumb" title="Перемістити" onclick="catalogOverlayMove()">➜</span>` : '';
+  const base = (inner) => `<div class="overlay-info-row">${inner}
+      <span class="overlay-info-name" title="${esc(box.catalogName)}">${esc(box.catalogName)}</span>
+      ${moveBtn}${delBtn}</div>`;
+  el.style.display = 'block';
+  el.innerHTML = base('');
+  if (!box.fileId) return;
+  try {
+    const d = await fetch(`${API}/api/gallery/meta/${box.fileId}`).then(r => r.json());
+    if (token !== _overlayInfoToken || d.error) return;
+    el.innerHTML = base(`
+      <span class="catalog-crumb" style="font-size:17px" id="ov-fav-${box.fileId}"
+            title="${t('gal.favorite')}" onclick="catalogOverlayFav(${box.fileId})">${d.is_favorite ? '★' : '☆'}</span>
+      ${d.artist ? `<span class="gallery-artist-name">${esc(d.artist)}</span>` : ''}
+      ${d.source ? `<span class="badge badge-${esc(d.source)}">${esc(d.source)}</span>` : ''}
+      ${d.post_url ? `<a href="${esc(d.post_url)}" target="_blank" rel="noopener" class="gallery-info-link">↗ ${t('gal.original')}</a>` : ''}`);
+  } catch {}
+}
+
+async function catalogOverlayFav(id) {
+  try {
+    const r = await fetch(`${API}/api/download/${id}/favorite`, {method:'POST'}).then(r => r.json());
+    if (r.error) { toast(r.error, 'err'); return; }
+    const el = document.getElementById(`ov-fav-${id}`);
+    if (el) el.textContent = r.is_favorite ? '★' : '☆';
+    const item = _catalogItems.find(i => i.id === id);
+    if (item) { item.is_favorite = !!r.is_favorite; catalogRender(); }
+  } catch { toast(t('toast.error'), 'err'); }
+}
+
+async function catalogOverlayDelete() {
+  const box = _overlayBoxes[_overlayBoxIdx];
+  if (!box?.catalogPath) return;
+  if (await catalogDeletePaths([box.catalogPath])) {
+    _overlayBoxes.splice(_overlayBoxIdx, 1);
+    if (!_overlayBoxes.length) { closeOverlay(); return; }
+    if (_overlayBoxIdx >= _overlayBoxes.length) _overlayBoxIdx = 0;
+    _showOverlayBox(_overlayBoxes[_overlayBoxIdx]);
+  }
+}
+
+function catalogOverlayMove() {
+  const box = _overlayBoxes[_overlayBoxIdx];
+  if (!box?.catalogPath) return;
+  closeOverlay();
+  catalogShowMoveModal([box.catalogPath]);
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
