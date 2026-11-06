@@ -290,6 +290,7 @@
       <div class="card mb-6" id="artist-detail-header"></div>
       <div style="margin-bottom:14px;display:flex;align-items:center;gap:10px">
         <button class="btn btn-ghost btn-sm" id="artist-dup-scan-btn" onclick="artistRunDuplicateScan()">🔍 Знайти дублікати цього автора</button>
+        <button class="btn btn-ghost btn-sm" id="artist-pool-recheck-btn" onclick="artistRecheckPools()" title="Перенести наявні файли в пули й перекачати сторінки пулів, які раніше відкинули як копію з іншого сайту">🔄 Перевірити пули</button>
         <button class="btn btn-ghost btn-sm" onclick="showPoolEditor()">📖 Редактор pool</button>
         <span id="artist-dup-scan-status" style="font-size:12px;color:var(--muted)"></span>
       </div>
@@ -947,7 +948,7 @@
 
 </div><!-- /#app-shell -->
 
-<script src="/static/dashboard.js?v=62"></script>
+<script src="/static/dashboard.js?v=63"></script>
 <script src="/static/apps.js?v=4"></script>
 
 </body>

@@ -789,6 +789,35 @@ async function artistRunDuplicateScan() {
   btn.disabled = false;
 }
 
+// «Перевірити пули» для одного автора: наявні файли — у пули, автоматичні
+// відмови «вже є з іншого сайту» забуваються, і автор перекачується з
+// перевагою сторінок пулів. Ручні рішення («Дублікат») лишаються.
+async function artistRecheckPools() {
+  if (!_artistDetailName) return;
+  if (!confirm(`Перевірити пули автора «${_artistDetailName}»?\n\n` +
+      `1. Наявні файли, що на сайті входять у пул, переїдуть у його теку.\n` +
+      `2. Пости, які архіватор раніше сам відкинув як копію з іншого сайту, буде перевірено знову ` +
+      `(їх доведеться скачати ще раз): сторінки пулів стануть на місце, звичайні копії знову відкинуться.\n\n` +
+      `Те, що ти відхилив сам кнопкою «Дублікат», не чіпається. ` +
+      `(Крім старих відмов, записаних до цього оновлення: там причина невідома, тож вони теж перевіряться — частина може знову з'явитись «На перевірку».)`)) return;
+  const btn = document.getElementById('artist-pool-recheck-btn');
+  const status = document.getElementById('artist-dup-scan-status');
+  btn.disabled = true;
+  status.textContent = 'Запускаю перевірку пулів…';
+  try {
+    const r = await fetch(`${API}/api/run`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ artist: _artistDetailName, recheck_pools: true })
+    });
+    const d = await r.json();
+    if (!r.ok) { status.textContent = d.error || 'Помилка запуску'; btn.disabled = false; return; }
+    status.innerHTML = `Перевірка пулів іде у фоні — прогрес у <span style="cursor:pointer;color:var(--accent2)" onclick="showPage('runner')">"Запуск"</span>. Заміни на користь пулів зробляться самі після завершення.`;
+  } catch {
+    status.textContent = 'Помилка мережі';
+  }
+  btn.disabled = false;
+}
+
 async function artistLoadDuplicates(id) {
   try {
     const rows = await fetch(`${API}/api/artists/${id}/duplicate-scan`).then(r => r.json());

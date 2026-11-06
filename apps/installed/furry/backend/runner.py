@@ -126,6 +126,7 @@ def api_run():
         if body.get("cleanup_dry"):  flags.append("--cleanup-dry")
         elif body.get("cleanup"):    flags.append("--cleanup")
         if body.get("find_duplicates"): flags.append("--find-duplicates")
+        if body.get("recheck_pools"):   flags.append("--recheck-pools")
         if body.get("backfill_sizes"):  flags.append("--backfill-sizes")
         if body.get("subfolder"):    flags.extend(["--subfolder", str(body.get("subfolder"))])
         try:
