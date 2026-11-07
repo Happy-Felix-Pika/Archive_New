@@ -35,11 +35,18 @@ function appLoadAsset(url, kind) {
 }
 
 // ── побудова меню з маніфестів ────────────────────────────────────────
+var _appsMenuNeedsRebuild = false;   // перший запит був до входу (401)
+
 async function appsBuildMenu() {
   try {
     const lang = (typeof _lang !== 'undefined' && _lang) ? _lang : 'uk';
-    _appsUi = await fetch(`${API}/api/apps/ui?lang=${lang}`, { credentials: 'include' })
-                      .then(r => r.json());
+    const resp = await fetch(`${API}/api/apps/ui?lang=${lang}`, { credentials: 'include' });
+    if (resp.status === 401) {          // ще не увійшли — збудуємо після входу
+      _appsMenuNeedsRebuild = true;
+      return;
+    }
+    _appsMenuNeedsRebuild = false;
+    _appsUi = await resp.json();
   } catch (e) {
     console.warn('Не вдалось отримати меню застосунків', e);
     return;

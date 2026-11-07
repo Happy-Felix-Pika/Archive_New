@@ -332,133 +332,133 @@ def _get_image_info(filepath: str) -> dict:
 @bp.route("/api/pending/<int:pending_id>/preview/<which>")
 @admin_required
 def api_pending_preview(pending_id, which):
+    """
+    Що показати в картці «На перевірку»: посилання на файл і мініатюру,
+    тип і вагу.
+
+    Раніше тут віддавався ВЕСЬ файл у base64 всередині JSON, і браузер
+    вставляв його в сторінку. На сторінці 20 пар — 40 файлів одразу; для
+    відео по десятки мегабайт це сотні мегабайт тексту в памʼяті й 40
+    роликів, що декодуються разом: комп'ютер починав гальмувати. Тепер —
+    звичайні посилання: картинка вантажиться, коли видна, відео — лише
+    після натискання ▶, з перемоткою.
+    """
+    if which not in ("new", "matched"):
+        return jsonify({"error": "bad which"}), 400
     try:
         db  = get_db()
         row = q(db, """
             SELECT p.*, a.folder_name FROM pending_duplicates p
             JOIN artists a ON a.id = p.artist_id WHERE p.id=%s
         """, (pending_id,))
-        db.close()
         if not row:
             return jsonify({"error": "not found"}), 404
 
         if which == "new":
             lp = row["local_path"]
-
-            # Якщо файл відсутній — намагаємось відновити з Nextcloud
+            # Файл зник з pending_review — пробуємо відновити (як і раніше)
             if not lp or not os.path.exists(lp):
-                recovered = _recover_pending_file(row)
-                if recovered:
-                    lp = recovered
-                    # Оновлюємо local_path в БД
-                    db2 = get_db()
-                    with db2.cursor() as cur:
-                        cur.execute("UPDATE pending_duplicates SET local_path=%s WHERE id=%s",
-                                    (lp, pending_id))
-                    db2.commit(); db2.close()
-                else:
+                lp = _recover_pending_file(row)
+                if not lp:
                     return jsonify({"error": "Файл не знайдено і не вдалося відновити"}), 404
+                with db.cursor() as cur:
+                    cur.execute("UPDATE pending_duplicates SET local_path=%s WHERE id=%s", (lp, pending_id))
+                db.commit()
+            name = row["filename"] or os.path.basename(lp)
+            return jsonify({
+                "mime":      mimetypes.guess_type(name)[0] or "application/octet-stream",
+                "filename":  name,
+                "file_size": os.path.getsize(lp),
+                "url":       f"/api/pending/{pending_id}/file/new",
+                "thumb_url": f"/api/pending/{pending_id}/thumb/new",
+            })
 
-            mime     = mimetypes.guess_type(lp)[0] or "application/octet-stream"
-            info     = _get_image_info(lp)
-            with open(lp, "rb") as f:
-                b64 = base64.b64encode(f.read()).decode()
-            return jsonify({"mime": mime, "data": b64,
-                            "filename": row["filename"], **info})
-
-        elif which == "matched":
-            mfn = row["matched_filename"]
-            if not mfn:
-                return jsonify({"error": "matched_filename відсутній"}), 404
-
-            # matched_folder_name зберігається при крос-авторських дублікатах
-            matched_folder = row.get("matched_folder_name") or row["folder_name"]
-            mime        = mimetypes.guess_type(mfn)[0] or "application/octet-stream"
-
-            # ЛОКАЛЬНЕ СХОВИЩЕ. Раніше цієї гілки не було взагалі: код одразу
-            # йшов у Nextcloud і падав з KeyError 'webdav_url', бо в
-            # локальному режимі цих налаштувань просто немає. Через це
-            # прев'ю вже збереженого файлу не показувалось ніколи.
-            if get_storage_mode() == "local":
-                rel = mfn if matched_folder == "_root" else f"{matched_folder}/{mfn}"
-                db4 = get_db()
-                try:
-                    mrow = _matched_file(db4, row)    # справжнє місце — з урахуванням pool
-                finally:
-                    db4.close()
-                if mrow:
-                    rel = mrow["rel_path"]
-                lp2 = local_path(rel)
-                if not os.path.isfile(lp2):
-                    # Файл міг переїхати в підпапку (pool) — шукаємо в ядрі за іменем.
-                    # З'єднання вище вже закрите, тому відкриваємо своє.
-                    db3 = get_db()
-                    frow = q(db3, """SELECT rel_path FROM files
-                                     WHERE name = %s ORDER BY id LIMIT 1""", (mfn,))
-                    db3.close()
-                    if frow:
-                        lp2 = local_path(frow["rel_path"])
-                if not os.path.isfile(lp2):
-                    return jsonify({"error": "Файл не знайдено на диску"}), 404
-                with open(lp2, "rb") as f2:
-                    b64m = base64.b64encode(f2.read()).decode()
-                return jsonify({"mime": mime, "data": b64m, "filename": mfn,
-                                "folder": matched_folder, **_get_image_info(lp2)})
-
-            # Беремо реальний шлях файлу напряму з NC БД — без здогадок про base_folder
-            file_info = get_file_nc_real_path(matched_folder, mfn)
-
-            # Розмір файлу з oc_filecache
-            info = {}
-            try:
-                nc_conn = get_nc_db()
-                if file_info:
-                    full_dir, fname = file_info
-                    nc_path_db = f"files/{full_dir}/{fname}"
-                    r = q(nc_conn, "SELECT size FROM oc_filecache WHERE path = %s LIMIT 1", (nc_path_db,))
-                else:
-                    r = q(nc_conn, "SELECT size FROM oc_filecache WHERE name = %s LIMIT 1", (mfn,))
-                nc_conn.close()
-                if r and r.get("size"):
-                    info["file_size"] = int(r["size"])
-            except Exception as e:
-                info["_nc_err"] = str(e)[:120]
-
-            # Повертаємо share_url якщо є — браузер завантажить напряму
-            share_url = nc_share_url(matched_folder, mfn)
-            if share_url:
-                return jsonify({"mime": mime, "filename": mfn,
-                                "folder": matched_folder,
-                                "share_url": share_url, **info})
-
-            # Без share token — WebDAV кеш (повільно але працює)
-            user_nc     = get_user_nc_config()
-            base_folder = user_nc.get("base_folder", "").strip("/")
-            nc_path    = f"{base_folder}/{matched_folder}/{mfn}"
-            cache_key  = hashlib.md5(nc_path.encode()).hexdigest()
-            cache_path = os.path.join(_IMG_CACHE_DIR, f"pending_{cache_key}")
-            if not os.path.exists(cache_path):
-                try:
-                    from webdav3.client import Client
-                    client = Client({
-                        "webdav_hostname": user_nc["webdav_url"],
-                        "webdav_login":    user_nc["username"],
-                        "webdav_password": user_nc["password"],
-                        "disable_check":   True,
-                    })
-                    client.download_sync(remote_path=nc_path, local_path=cache_path)
-                except Exception as e:
-                    return jsonify({"error": f"WebDAV: {e}"}), 500
-            cache_info = _get_image_info(cache_path)
-            info.update(cache_info)
-            with open(cache_path, "rb") as f:
-                b64 = base64.b64encode(f.read()).decode()
-            return jsonify({"mime": mime, "data": b64,
-                            "filename": mfn, **info})
-        else:
-            return jsonify({"error": "bad which"}), 400
+        mfn = row["matched_filename"]
+        if not mfn:
+            return jsonify({"error": "matched_filename відсутній"}), 404
+        # Уже збережений файл — у архіві, тож віддається тим самим шляхом,
+        # що й у каталозі (з перемоткою для відео, кешем мініатюр).
+        matched_folder = row.get("matched_folder_name") or row["folder_name"]
+        rel, size = None, None
+        mrow = _matched_file(db, row)
+        if mrow:
+            rel = mrow["rel_path"]
+            fr = q(db, "SELECT size_bytes FROM files WHERE id=%s", (mrow["id"],))
+            size = fr["size_bytes"] if fr else None
+        if not rel:
+            rel = mfn if matched_folder == "_root" else f"{matched_folder}/{mfn}"
+            if get_storage_mode() == "local" and not os.path.isfile(local_path(rel)):
+                frow = q(db, "SELECT rel_path, size_bytes FROM files WHERE name=%s ORDER BY id LIMIT 1", (mfn,))
+                if frow:
+                    rel, size = frow["rel_path"], frow["size_bytes"]
+        if get_storage_mode() == "local":
+            lp2 = local_path(rel)
+            if not os.path.isfile(lp2):
+                return jsonify({"error": "Файл не знайдено на диску"}), 404
+            size = os.path.getsize(lp2)
+        from urllib.parse import quote
+        return jsonify({
+            "mime":      mimetypes.guess_type(mfn)[0] or "application/octet-stream",
+            "filename":  mfn,
+            "folder":    matched_folder,
+            "file_size": size,
+            "url":       f"/api/catalog/file?path={quote(rel)}",
+            "thumb_url": f"/api/catalog/thumb?path={quote(rel)}",
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+def _pending_new_path(pending_id):
+    """Шлях до нового файлу з черги (він ще не в архіві — лежить у pending_review)."""
+    db = get_db()
+    row = q(db, "SELECT local_path FROM pending_duplicates WHERE id=%s", (pending_id,))
+    lp = (row or {}).get("local_path")
+    # шлях береться лише з бази (його пише архіватор), а не з запиту
+    if not lp or not os.path.isfile(lp):
+        return None
+    return lp
+
+
+@bp.route("/api/pending/<int:pending_id>/file/new")
+@admin_required
+def api_pending_file_new(pending_id):
+    """Сам новий файл — з підтримкою Range, щоб відео перемотувалось."""
+    from flask import send_file
+    lp = _pending_new_path(pending_id)
+    if not lp:
+        return jsonify({"error": "Файл не знайдено"}), 404
+    from core.db import release_db
+    release_db()
+    mime = mimetypes.guess_type(lp)[0] or "application/octet-stream"
+    return send_file(lp, mimetype=mime, conditional=True)
+
+
+@bp.route("/api/pending/<int:pending_id>/thumb/new")
+@admin_required
+def api_pending_thumb_new(pending_id):
+    """Мініатюра нового файлу (кадр для відео) — тими ж засобами, що й у каталозі."""
+    from flask import send_file
+    from blueprints.catalog import (_THUMB_IMAGE_EXT, _THUMB_VIDEO_EXT, _make_image_thumb,
+                                    _make_video_thumb, _thumb_cache_path)
+    lp = _pending_new_path(pending_id)
+    if not lp:
+        return jsonify({"error": "Файл не знайдено"}), 404
+    from core.db import release_db
+    release_db()
+    ext = lp.rsplit(".", 1)[-1].lower() if "." in lp else ""
+    if ext not in _THUMB_IMAGE_EXT and ext not in _THUMB_VIDEO_EXT:
+        return jsonify({"error": "no preview"}), 404
+    try:
+        tag = str(int(os.path.getmtime(lp)))
+    except OSError:
+        tag = ""
+    out = _thumb_cache_path("pending:" + lp, tag)
+    if not os.path.exists(out):
+        ok = _make_image_thumb(lp, out) if ext in _THUMB_IMAGE_EXT else _make_video_thumb(lp, out)
+        if not ok:
+            return jsonify({"error": "thumb failed"}), 404
+    return send_file(out, mimetype="image/jpeg", conditional=True, max_age=86400)
 
 
 @bp.route("/api/pending/<int:pending_id>/replace", methods=["POST"])
