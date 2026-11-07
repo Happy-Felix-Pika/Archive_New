@@ -1237,39 +1237,51 @@ async function loadPreview(id, which, box) {
   if (!box) return;
   box.innerHTML = '<div class="preview-loading"><div class="gallery-spinner" style="width:24px;height:24px;border-width:2px"></div></div>';
   try {
+    // Сервер віддає лише посилання й опис — не сам файл. Раніше тут
+    // приходив увесь файл у base64: 40 файлів на сторінку, відео по десятки
+    // мегабайт — і комп'ютер починав гальмувати.
     const r = await fetch(`${API}/api/pending/${id}/preview/${which}`);
+    const data = await r.json().catch(() => ({}));
     if (!r.ok) {
-      const e = await r.json();
-      box.innerHTML = `<div class="preview-error">✗ ${esc(e.error||'Помилка')}<br><small style="color:var(--muted)">Файл може бути відсутній на диску</small></div>`;
+      box.innerHTML = `<div class="preview-error">✗ ${esc(data.error||'Помилка')}<br><small style="color:var(--muted)">Файл може бути відсутній на диску</small></div>`;
       return;
     }
-    const data = await r.json();
-
-    // Якщо є share_url — завантажуємо напряму з Nextcloud (швидко)
-    const src = data.share_url || (data.data ? `data:${data.mime};base64,${data.data}` : null);
+    const src = data.url ? `${API}${data.url}`
+              : data.data ? `data:${data.mime};base64,${data.data}` : null;   // старий сервер
     if (!src) {
       box.innerHTML = `<div class="preview-error">✗ ${t('preview.nodata')}</div>`;
       return;
     }
-
-    if (data.mime && data.mime.startsWith('video/')) {
-      box.innerHTML = `<video controls src="${src}" style="max-width:100%;max-height:340px"></video>`;
-    } else {
-      box.innerHTML = `<img src="${src}" style="max-width:100%;max-height:340px;object-fit:contain;cursor:zoom-in" onclick="openOverlayFromBox(this.parentElement)">`;
-    }
+    const isVideo = !!(data.mime && data.mime.startsWith('video/'));
     box.dataset.src   = src;
-    box.dataset.mime  = data.mime;
+    box.dataset.mime  = data.mime || '';
+    box.dataset.thumb = data.thumb_url ? `${API}${data.thumb_url}` : '';
     box.dataset.loaded = '1';
 
-    // Показуємо розмір файлу і розміри зображення
+    if (isVideo) {
+      // Відео: спершу кадр-мініатюра з ▶. Сам ролик вантажиться лише після
+      // натискання — інакше 20 карток означали б 20–40 роликів одразу.
+      box.innerHTML = `<div class="pending-video-poster" onclick="pendingPlayVideo(this.parentElement)" title="Відтворити">
+          ${box.dataset.thumb ? `<img src="${box.dataset.thumb}" loading="lazy" onerror="this.remove()">` : ''}
+          <span class="pending-play">▶</span>
+        </div>`;
+    } else {
+      box.innerHTML = `<img src="${src}" loading="lazy" decoding="async" style="max-width:100%;max-height:340px;object-fit:contain;cursor:zoom-in" onclick="openOverlayFromBox(this.parentElement)">`;
+    }
+
     const prefix = which === 'new' ? 'new' : 'match';
     const sizeEl = document.getElementById(`size-${prefix}-${id}`);
-    if (sizeEl) {
-      sizeEl.textContent = data.file_size ? fmtSize(data.file_size) : '—';
-    }
+    if (sizeEl) sizeEl.textContent = data.file_size ? fmtSize(data.file_size) : '—';
   } catch(e) {
     box.innerHTML = `<div class="preview-error">✗ ${esc(e.message)}</div>`;
   }
+}
+
+function pendingPlayVideo(box) {
+  if (!box || !box.dataset.src) return;
+  box.innerHTML = `<video controls autoplay preload="metadata" src="${box.dataset.src}"
+                          ${box.dataset.thumb ? `poster="${box.dataset.thumb}"` : ''}
+                          style="max-width:100%;max-height:340px"></video>`;
 }
 
 function fmtSize(bytes) {
@@ -5216,6 +5228,10 @@ async function onAuthSuccess(data) {
     showSetupScreen();
   } else {
     await showAppShell();
+    // Меню застосунків будується одразу після завантаження сторінки — якщо
+    // в ту мить ще не було входу, сервер відповів 401 і пунктів застосунків
+    // (Автори, Онлайн, На перевірку…) не було аж до перезавантаження.
+    if (typeof _appsMenuNeedsRebuild !== 'undefined' && _appsMenuNeedsRebuild && typeof appsBuildMenu === 'function') appsBuildMenu();
   }
 }
 
