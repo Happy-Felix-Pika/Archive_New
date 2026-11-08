@@ -3617,14 +3617,10 @@ async function loadUsersFull() {
       <tr>
         <td style="font-weight:500">${esc(u.display_name || '—')}</td>
         <td style="color:var(--muted)">${esc(u.email)}</td>
-        <td>${u.id === _currentUser?.user_id
-              ? `<span class="badge badge-e621">${ROLE_LABELS[u.role] || u.role}</span> <span class="muted" style="font-size:11px">(ти)</span>`
-              : `<select class="role-select" onchange="setUserRole(${u.id}, this)" data-prev="${u.role}">
-                   ${['user','moderator','admin'].map(r => `<option value="${r}" ${u.role === r ? 'selected' : ''}>${ROLE_LABELS[r]}</option>`).join('')}
-                 </select>`}</td>
+        <td>${userRoleCell(u)}</td>
         <td style="color:var(--muted)">${fmtDate(u.created_at)}</td>
         <td style="color:var(--muted)">${u.last_login_at ? fmtDate(u.last_login_at) : '— ще не заходив —'}</td>
-        <td>${u.id !== _currentUser?.user_id ? `<span class="catalog-crumb" style="color:var(--red)" onclick="deleteUserAccount(${u.id}, '${esc(u.display_name || u.email)}')" title="Видалити обліковий запис">🗑</span>` : ''}</td>
+        <td>${u.id !== _currentUser?.user_id && !u.is_owner && (u.role !== 'admin' || _currentUser?.is_owner) ? `<span class="catalog-crumb" style="color:var(--red)" onclick="deleteUserAccount(${u.id}, '${esc(u.display_name || u.email)}')" title="Видалити обліковий запис">🗑</span>` : ''}</td>
       </tr>`).join('');
   } catch {
     tbody.innerHTML = `<tr><td colspan="6" class="empty-row">${t('catalog.error')}</td></tr>`;
@@ -3632,6 +3628,22 @@ async function loadUsersFull() {
 }
 
 const ROLE_LABELS = { user: 'користувач', moderator: 'модератор', admin: 'адмін' };
+
+// Хто кому може змінити роль:
+//   Творець (id 1) — завжди адмін, його роль не змінює ніхто;
+//   лише Творець призначає й знімає адмінів;
+//   звичайний адмін — лише між «користувач» і «модератор».
+function userRoleCell(u) {
+  const me = _currentUser || {};
+  if (u.is_owner) return `<span class="badge badge-owner" title="Власник архіву: завжди адмін, лише він призначає й знімає адмінів">👑 Творець</span>${u.id === me.user_id ? ' <span class="muted" style="font-size:11px">(ти)</span>' : ''}`;
+  if (u.id === me.user_id) return `<span class="badge badge-e621">${ROLE_LABELS[u.role] || u.role}</span> <span class="muted" style="font-size:11px">(ти)</span>`;
+  if (u.role === 'admin' && !me.is_owner)
+    return `<span class="badge badge-e621" title="Знімати адмінів може лише Творець">${ROLE_LABELS.admin}</span>`;
+  const roles = me.is_owner ? ['user', 'moderator', 'admin'] : ['user', 'moderator'];
+  return `<select class="role-select" onchange="setUserRole(${u.id}, this)" data-prev="${u.role}">
+            ${roles.map(r => `<option value="${r}" ${u.role === r ? 'selected' : ''}>${ROLE_LABELS[r]}</option>`).join('')}
+          </select>`;
+}
 
 async function setUserRole(userId, sel) {
   const role = sel.value, prev = sel.dataset.prev;

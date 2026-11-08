@@ -502,6 +502,8 @@ def ensure_tables():
                 cur.execute("ALTER TABLE users ADD COLUMN role VARCHAR(16) NOT NULL DEFAULT 'user'")
                 cur.execute("UPDATE users SET role='admin' WHERE is_admin=1")
                 print("  ✓ Додано колонку users.role")
+            # Творець (id 1) — завжди адмін, хоч би що було в базі
+            cur.execute("UPDATE users SET role='admin', is_admin=1 WHERE id=1 AND (is_admin<>1 OR role<>'admin')")
 
         db.commit()
         db.close()

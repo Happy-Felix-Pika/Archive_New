@@ -4,7 +4,7 @@
 from flask import Blueprint, jsonify, request as flask_request
 
 
-from core.auth import ROLES, admin_required, current_user_id
+from core.auth import OWNER_ID, ROLES, admin_required, current_user_id, is_owner
 from core.db import get_db, q, qq
 
 bp = Blueprint("users", __name__)
@@ -31,6 +31,7 @@ def api_users_list_full():
     db.close()
     for r in rows:
         r["role"] = "admin" if r["is_admin"] else (r.get("role") or "user")
+        r["is_owner"] = r["id"] == OWNER_ID
         if r["created_at"]:     r["created_at"]     = r["created_at"].isoformat()
         if r["last_login_at"]:  r["last_login_at"]  = r["last_login_at"].isoformat()
     return jsonify(rows)
@@ -43,12 +44,16 @@ def api_users_delete(user_id):
     можна лишити архів взагалі без жодного адміна."""
     if user_id == current_user_id():
         return jsonify({"error": "Не можна видалити самого себе"}), 400
+    if user_id == OWNER_ID:
+        return jsonify({"error": "Творця архіву видалити не можна"}), 403
     try:
         db  = get_db()
         row = q(db, "SELECT is_admin, display_name FROM users WHERE id=%s", (user_id,))
         if not row:
             db.close()
             return jsonify({"error": "Юзера не знайдено"}), 404
+        if row["is_admin"] and not is_owner():
+            return jsonify({"error": "Видалити адміна може лише Творець"}), 403
         if row["is_admin"]:
             admin_count = q(db, "SELECT COUNT(*) AS c FROM users WHERE is_admin=1")["c"]
             if admin_count <= 1:
@@ -73,11 +78,17 @@ def api_users_set_role(user_id):
     if role not in ROLES:
         return jsonify({"error": "Роль: user, moderator або admin"}), 400
     if user_id == current_user_id():
-        return jsonify({"error": "Свою роль змінити не можна — попроси іншого адміна"}), 400
+        return jsonify({"error": "Свою роль змінити не можна"}), 400
+    if user_id == OWNER_ID:
+        return jsonify({"error": "Творець завжди адмін — його роль не змінюється"}), 403
     db = get_db()
     row = q(db, "SELECT is_admin, display_name, email FROM users WHERE id=%s", (user_id,))
     if not row:
         return jsonify({"error": "Користувача не знайдено"}), 404
+    # Адмінів призначає й знімає лише Творець; звичайні адміни керують
+    # модераторами й користувачами.
+    if (role == "admin" or row["is_admin"]) and not is_owner():
+        return jsonify({"error": "Призначати й знімати адмінів може лише Творець"}), 403
     if row["is_admin"] and role != "admin":
         n = q(db, "SELECT COUNT(*) AS c FROM users WHERE is_admin=1")["c"]
         if n <= 1:
