@@ -75,6 +75,16 @@ def admin_required(f):
 
 ROLES = ("user", "moderator", "admin")
 
+# Творець архіву — користувач з id 1. Він завжди адмін, його роль не змінити,
+# його не видалити, і ЛИШЕ він призначає й знімає інших адмінів. Звичайні
+# адміни керують модераторами й користувачами.
+OWNER_ID = 1
+
+
+def is_owner(user_id=None) -> bool:
+    uid = user_id if user_id is not None else session.get("user_id")
+    return uid == OWNER_ID
+
 
 def current_role() -> str:
     """Роль поточного користувача ('user' без сесії теж)."""

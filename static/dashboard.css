@@ -536,3 +536,4 @@ body[data-role="moderator"] [data-admin] { display:none !important; }
 .modlog-main{flex:1;min-width:0}
 .modlog-what{font-size:13px}
 .modlog-detail{font-size:12px;color:var(--muted);word-break:break-word}
+.badge-owner{background:rgba(251,191,36,.18);color:var(--yellow)}

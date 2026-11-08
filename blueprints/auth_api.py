@@ -100,6 +100,7 @@ def api_auth_login():
         return jsonify({"ok": True, "user_id": user["id"],
                         "is_admin": bool(user["is_admin"]),
                         "role": "admin" if user["is_admin"] else (user.get("role") or "user"),
+                        "is_owner": user["id"] == 1,
                         "setup_done": bool(user["setup_done"])})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -124,6 +125,7 @@ def api_auth_me():
         "display_name":  user["display_name"],
         "is_admin":      bool(user["is_admin"]),
         "role":          "admin" if user["is_admin"] else (user.get("role") or "user"),
+        "is_owner":      user["id"] == 1,
         "setup_done":    bool(user["setup_done"]),
     })
 
