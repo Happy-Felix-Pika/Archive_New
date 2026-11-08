@@ -1,0 +1,13 @@
+{
+ "_about": "English для застосунку chat: українська фраза з коду → переклад.",
+ "Архів не знайдено": "Archive not found",
+ "Вкажи співрозмовника": "Specify the recipient",
+ "Збережено локально, але не вдалося доставити: {0}": "Saved locally, but could not be delivered: {0}",
+ "Не вдалося доставити": "Could not be delivered",
+ "Некоректні дані": "Invalid data",
+ "Немає взаємного підключення — цей архів має спершу підключити і твій теж": "No mutual connection — that archive must connect yours too first",
+ "Особисті повідомлення між користувачами архіву": "Private messages between archive users",
+ "Порожнє повідомлення": "Empty message",
+ "Юзера '{0}' у нас не знайдено": "User '{0}' not found here",
+ "Юзера не знайдено": "User not found"
+}
