@@ -5,7 +5,8 @@ import os
 from flask import Blueprint, jsonify, request as flask_request
 
 
-from core.auth import admin_required, current_user_id, get_user_nc_config, login_required
+from core.auth import admin_required, moderator_required, current_user_id, get_user_nc_config, login_required
+from core import modlog
 from core.db import get_db, q, qq, table_exists
 from core.storage_api import StorageError, get_storage
 from core.files_api import TrashError, trash_file, get_file, local_path
@@ -37,14 +38,17 @@ def api_download_toggle_favorite(download_id):
 
 
 @bp.route("/api/download/<int:download_id>", methods=["DELETE"])
-@admin_required
+@moderator_required
 def api_download_delete(download_id):
     """
     Видалення файлу. Файл НЕ зникає одразу — він іде в кошик, звідки його
     можна відновити з тегами, автором і всім іншим або прибрати назавжди.
     """
     try:
+        f = get_file(download_id)
         trash_id = trash_file(download_id, current_user_id())
+        if f:
+            modlog.record("file.trash", f"«{f['name']}»", {"items": [{"path": f["rel_path"], "trash_id": trash_id}]})
         return jsonify({"ok": True, "trash_id": trash_id})
     except TrashError as e:
         return jsonify({"error": str(e)}), 404
@@ -53,7 +57,7 @@ def api_download_delete(download_id):
 
 
 @bp.route("/api/download/<int:download_id>/meta", methods=["POST"])
-@admin_required
+@moderator_required
 def api_download_meta_update(download_id):
     """
     Ручне редагування файлу адміном: джерело (e621/inkbunny/невідоме),
@@ -64,10 +68,22 @@ def api_download_meta_update(download_id):
     body = flask_request.get_json(silent=True) or {}
     try:
         db  = get_db()
-        row = q(db, "SELECT artist_id FROM furry_posts WHERE file_id=%s", (download_id,))
+        row = q(db, """SELECT fp.artist_id, fp.source, fp.post_url, a.artist_name, f.name
+                       FROM furry_posts fp JOIN artists a ON a.id = fp.artist_id
+                       JOIN files f ON f.id = fp.file_id WHERE fp.file_id=%s""", (download_id,))
         if not row:
             db.close()
             return jsonify({"error": "not found"}), 404
+        # як було — для журналу модераторів (відміна повертає ці значення)
+        before = {"file_id": download_id}
+        changed = []
+        if "source" in body:
+            before["source"] = row["source"]; changed.append("джерело")
+        if "post_url" in body:
+            before["post_url"] = row["post_url"]; changed.append("посилання")
+        if (body.get("artist_name") or "").strip() and body["artist_name"].strip() != row["artist_name"]:
+            before["artist_id"] = row["artist_id"]; before["artist_name"] = row["artist_name"]
+            changed.append(f"автор «{row['artist_name']}» → «{body['artist_name'].strip()}»")
 
         with db.cursor() as cur:
             if "source" in body:
@@ -88,6 +104,8 @@ def api_download_meta_update(download_id):
                                 (name, row["artist_id"]))
         db.commit()
         db.close()
+        if changed:
+            modlog.record("file.meta", f"«{row['name']}»: {', '.join(changed)}", before)
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -112,18 +130,13 @@ def api_download_tags_get(download_id):
 
 
 @bp.route("/api/download/<int:download_id>/tags", methods=["POST"])
+@moderator_required
 def api_download_tags_set(download_id):
-    """Замінити теги файлу (приймає список tag_id)."""
-    body    = flask_request.get_json(silent=True) or {}
-    tag_ids = body.get("tag_ids", [])
+    """Замінити теги файлу (приймає список tag_id) — модератор/адмін."""
+    from core.tagops import set_tags
+    body = flask_request.get_json(silent=True) or {}
     try:
-        db = get_db()
-        with db.cursor() as cur:
-            cur.execute("DELETE FROM download_tags WHERE download_id=%s", (download_id,))
-            for tid in tag_ids:
-                cur.execute("INSERT IGNORE INTO download_tags (download_id, tag_id) VALUES (%s,%s)",
-                            (download_id, tid))
-        db.commit(); db.close()
+        set_tags(download_id, [int(t) for t in body.get("tag_ids", [])])
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -131,37 +144,40 @@ def api_download_tags_set(download_id):
 
 @bp.route("/api/download/<int:download_id>/tags/add", methods=["POST"])
 def api_download_tag_add(download_id):
+    """
+    Додати тег. Модератор/адмін — одразу; користувач — пропозиція, яку
+    вирішить модератор.
+    """
+    from core.auth import current_role
+    from core.tagops import TagError, add_tag, suggest
     body     = flask_request.get_json(silent=True) or {}
-    name     = (body.get("name") or "").strip().lower()[:100]
+    name     = body.get("name")
     category = body.get("category") or "other"
-    if category not in ("character","species","general","other"):
-        category = "other"
-    if not name:
-        return jsonify({"error": "name required"}), 400
     try:
-        db = get_db()
-        with db.cursor() as cur:
-            cur.execute("INSERT IGNORE INTO tags (name, category) VALUES (%s,%s)", (name, category))
-            cur.execute("SELECT id, name, category FROM tags WHERE name=%s", (name,))
-            tag = cur.fetchone()
-            cur.execute("INSERT IGNORE INTO download_tags (download_id, tag_id) VALUES (%s,%s)",
-                        (download_id, tag["id"]))
-        db.commit(); db.close()
+        if current_role() == "user":
+            s = suggest("add", current_user_id(), file_id=download_id, name=name, category=category)
+            return jsonify({"suggested": True, "suggestion": s})
+        tag, _created = add_tag(download_id, name, category)
         return jsonify(tag)
+    except TagError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 @bp.route("/api/download/<int:download_id>/tags/<int:tag_id>", methods=["DELETE"])
 def api_download_tag_remove(download_id, tag_id):
-    """Видалити тег з файлу."""
+    """Прибрати тег з файлу: модератор/адмін — одразу, користувач — пропозиція."""
+    from core.auth import current_role
+    from core.tagops import TagError, remove_tag, suggest
     try:
-        db = get_db()
-        with db.cursor() as cur:
-            cur.execute("DELETE FROM download_tags WHERE download_id=%s AND tag_id=%s",
-                        (download_id, tag_id))
-        db.commit(); db.close()
+        if current_role() == "user":
+            s = suggest("remove", current_user_id(), file_id=download_id, tag_id=tag_id)
+            return jsonify({"suggested": True, "suggestion": s})
+        remove_tag(download_id, tag_id)
         return jsonify({"ok": True})
+    except TagError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

@@ -7,7 +7,8 @@ from flask import Blueprint, jsonify, request as flask_request
 
 from .pools import _invalidate_pools_cache
 from blueprints.tags import _invalidate_tags_cache
-from core.auth import admin_required, get_user_nc_config
+from core.auth import admin_required, moderator_required, get_user_nc_config
+from core import modlog
 from core.db import get_db, q, qq
 from .library import resync_rel_path
 from core.storage_api import get_storage
@@ -19,7 +20,7 @@ bp = Blueprint("artists", __name__)
 # ── Artists ───────────────────────────────────────────────────────────────
 
 @bp.route("/api/artists")
-@admin_required
+@moderator_required
 def api_artists():
     f = flask_request.args.get("filter", "all")
     tag_ids = flask_request.args.getlist("tag_id")
@@ -76,7 +77,7 @@ def api_artists():
 
 
 @bp.route("/api/artist/<int:artist_id>/downloads")
-@admin_required
+@moderator_required
 def api_artist_downloads(artist_id):
     page   = int(flask_request.args.get("page", 1))
     limit  = int(flask_request.args.get("limit", 100))
@@ -165,7 +166,7 @@ def api_artists_toggle_auto_update_bulk():
 
 
 @bp.route("/api/artists/<int:artist_id>/auto-update", methods=["POST"])
-@admin_required
+@moderator_required
 def api_artists_toggle_auto_update(artist_id):
     """Перемикає, чи перевіряти цього автора на нове при щоденному
     авто-оновленні."""
@@ -173,9 +174,13 @@ def api_artists_toggle_auto_update(artist_id):
     enabled = 1 if body.get("enabled") else 0
     try:
         db = get_db()
+        art = q(db, "SELECT artist_name, auto_update FROM artists WHERE id=%s", (artist_id,))
         with db.cursor() as cur:
             cur.execute("UPDATE artists SET auto_update=%s WHERE id=%s", (enabled, artist_id))
         db.commit(); db.close()
+        if art and bool(art["auto_update"]) != bool(enabled):
+            modlog.record("artist.auto_update", f"«{art['artist_name']}»: {'увімкнено' if enabled else 'вимкнено'}",
+                          {"artist_id": artist_id, "before": int(bool(art["auto_update"]))})
         return jsonify({"ok": True, "auto_update": bool(enabled)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -264,23 +269,28 @@ def api_artist_pool_names(artist_id):
 
 
 @bp.route("/api/downloads/<int:download_id>/set-page", methods=["POST"])
-@admin_required
+@moderator_required
 def api_download_set_page(download_id):
     """Проставляє номер сторінки (pool_order) для ОДНОГО конкретного файлу."""
     body  = flask_request.get_json(silent=True) or {}
     order = body.get("pool_order")
     try:
         db = get_db()
+        old = q(db, """SELECT fp.pool_order, fp.subfolder, f.name FROM furry_posts fp
+                       JOIN files f ON f.id = fp.file_id WHERE fp.file_id=%s""", (download_id,))
         with db.cursor() as cur:
             cur.execute("UPDATE furry_posts SET pool_order=%s WHERE file_id=%s", (order, download_id))
         db.commit(); db.close()
+        if old and old["pool_order"] != order:
+            modlog.record("pool.set_page", f"«{old['name']}» у «{old['subfolder']}»: стор. {old['pool_order']} → {order}",
+                          {"orders": [{"file_id": download_id, "pool_order": old["pool_order"]}]})
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 @bp.route("/api/artists/<int:artist_id>/pool-assign", methods=["POST"])
-@admin_required
+@moderator_required
 def api_artist_pool_assign(artist_id):
     """
     Переносить обрані роботи (уже наявні в архіві, у цього ж автора) у
@@ -300,10 +310,13 @@ def api_artist_pool_assign(artist_id):
             db.close()
             return jsonify({"error": "Автора не знайдено"}), 404
         placeholders = ",".join(["%s"] * len(download_ids))
-        rows = qq(db, f"""SELECT f.id, f.name AS filename, fp.subfolder
+        rows = qq(db, f"""SELECT f.id, f.name AS filename, fp.subfolder, fp.pool_order
                           FROM furry_posts fp JOIN files f ON f.id = fp.file_id
                           WHERE f.id IN ({placeholders}) AND fp.artist_id=%s""",
                   download_ids + [artist_id])
+        # як було до переносу — для відміни з журналу модераторів
+        before_rows = [{"file_id": r["id"], "subfolder": r["subfolder"], "pool_order": r["pool_order"]}
+                       for r in rows]
 
         storage = get_storage()
 
@@ -332,22 +345,29 @@ def api_artist_pool_assign(artist_id):
             resync_rel_path(db, download_ids)
             # Одразу проставляємо очерговість — за природнім порядком назви,
             # щоб не лишати porожнім/незрозумілим
-            cur.execute("""SELECT f.id, f.name AS filename
+            cur.execute("""SELECT f.id, f.name AS filename, fp.pool_order
                            FROM furry_posts fp JOIN files f ON f.id = fp.file_id
                            WHERE fp.artist_id=%s AND fp.subfolder=%s""",
                         (artist_id, pool_name))
             pool_files = cur.fetchall()
+            # сторінки, що вже були в пулі, теж перенумеруються — запамʼятовуємо
+            moved_ids = {int(i) for i in download_ids}
+            prev_orders = [{"file_id": r["id"], "pool_order": r["pool_order"]}
+                           for r in pool_files if r["id"] not in moved_ids]
             pool_files.sort(key=lambda r: _natural_sort_key(r["filename"]))
             for order, r in enumerate(pool_files, start=1):
                 cur.execute("UPDATE furry_posts SET pool_order=%s WHERE file_id=%s", (order, r["id"]))
         db.commit(); db.close()
+        modlog.record("pool.assign", f"{len(before_rows)} файл(ів) → пул «{pool_name}»",
+                      {"artist_id": artist_id, "pool_name": pool_name, "files": before_rows,
+                       "prev_pool_orders": prev_orders})
         return jsonify({"ok": True, "moved": moved, "failed": failed})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 @bp.route("/api/artists/<int:artist_id>/resort-pool", methods=["POST"])
-@admin_required
+@moderator_required
 def api_artist_resort_pool(artist_id):
     """
     Пересортовує вже наявний pool за природнім порядком назви файлу —
@@ -361,15 +381,17 @@ def api_artist_resort_pool(artist_id):
     try:
         db = get_db()
         with db.cursor() as cur:
-            cur.execute("""SELECT f.id, f.name AS filename
+            cur.execute("""SELECT f.id, f.name AS filename, fp.pool_order
                            FROM furry_posts fp JOIN files f ON f.id = fp.file_id
                            WHERE fp.artist_id=%s AND fp.subfolder=%s""",
                         (artist_id, subfolder))
             files = cur.fetchall()
+            before = [{"file_id": r["id"], "pool_order": r["pool_order"]} for r in files]
             files.sort(key=lambda r: _natural_sort_key(r["filename"]))
             for order, r in enumerate(files, start=1):
                 cur.execute("UPDATE furry_posts SET pool_order=%s WHERE file_id=%s", (order, r["id"]))
         db.commit(); db.close()
+        modlog.record("pool.resort", f"пул «{subfolder}» ({len(files)} стор.)", {"orders": before})
         return jsonify({"ok": True, "count": len(files)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500

@@ -6,7 +6,8 @@ import base64, mimetypes, os
 from flask import Blueprint, jsonify, request as flask_request
 
 
-from core.auth import admin_required, get_user_nc_config, get_user_settings, current_user_id, login_required
+from core.auth import admin_required, current_role, get_user_nc_config, get_user_settings, current_user_id, login_required, moderator_required
+from core import modlog
 from core.db import get_db, q, qq
 from core.imgcache import _IMG_CACHE_DIR
 from core.nextcloud import get_file_nc_real_path, get_nc_db, nc_share_url
@@ -143,7 +144,12 @@ def _store_new(db, row, *, artist_id, folder, sub, order):
             # автору кажемо «вже є», інакше архіватор качав би пост знову
             _reject(cur, row["artist_id"], row["post_id"], row["page_num"], row["md5_hash"], "replaced")
         cur.execute("DELETE FROM pending_duplicates WHERE id=%s", (row["id"],))
-    return rel
+    return rel, fid
+
+
+def _snap(row) -> dict:
+    """Рядок черги як був — щоб відміна з журналу повернула його."""
+    return {k: v for k, v in dict(row).items() if k not in ("folder_name",)}
 
 
 def approve_pending(pending_id) -> dict:
@@ -159,12 +165,14 @@ def approve_pending(pending_id) -> dict:
         rel = _rel(row["folder_name"], sub, row["filename"])
         if get_storage().exists(rel):
             raise PendingError(f"У «{rel.rsplit('/', 1)[0] or 'корені'}» уже є файл «{row['filename']}»")
-        _store_new(db, row, artist_id=row["artist_id"], folder=row["folder_name"],
-                   sub=sub, order=row.get("pool_order"))
+        snap = _snap(row)
+        _rel_new, fid = _store_new(db, row, artist_id=row["artist_id"], folder=row["folder_name"],
+                                   sub=sub, order=row.get("pool_order"))
         db.commit()
         try: os.remove(row["local_path"])
         except Exception: pass
-        return {"ok": True, "filename": row["filename"], "pool": sub}
+        return {"ok": True, "filename": row["filename"], "pool": sub,
+                "_undo": {"pending": snap, "file_id": fid, "inherited": False}}
     except Exception:
         db.rollback()
         raise
@@ -209,15 +217,17 @@ def replace_pending(pending_id, user_id=None) -> dict:
             if cur.fetchone():
                 raise PendingError("Цей пост уже є в архіві в того автора")
 
+        snap = _snap(row)
+        old_trash_id = None
         if old:
             # старий md5 — у відхилені, щоб скачування не підхопило його знову
             with db.cursor() as cur:
                 _reject(cur, old["artist_id"], old["post_id"], old["page_num"], old["md5_hash"], "replaced")
             db.commit()
-            trash_file(old["id"], user_id)                 # 1. старий — у кошик
+            old_trash_id = trash_file(old["id"], user_id)  # 1. старий — у кошик
 
         try:
-            _store_new(db, row, artist_id=artist_id, folder=folder, sub=sub, order=order)  # 2. новий
+            _rel_new, fid = _store_new(db, row, artist_id=artist_id, folder=folder, sub=sub, order=order)  # 2. новий
             db.commit()
         except PendingError as e:
             db.rollback()
@@ -226,7 +236,11 @@ def replace_pending(pending_id, user_id=None) -> dict:
         except Exception: pass
         return {"ok": True, "filename": row["filename"],
                 "replaced": old["name"] if old else None,
-                "pool": sub, "pool_order": order if sub else None}
+                "pool": sub, "pool_order": order if sub else None,
+                "_undo": {"pending": snap, "file_id": fid, "inherited": artist_id != row["artist_id"],
+                          "old_trash_id": old_trash_id,
+                          "old_reject": ({"artist_id": old["artist_id"], "post_id": old["post_id"],
+                                          "page_num": old["page_num"]} if old else None)}}
     except Exception:
         db.rollback()
         raise
@@ -252,6 +266,7 @@ def apply_pool_priority(log=print) -> tuple:
     for pid in ids:
         try:
             r = replace_pending(pid)
+            r.pop("_undo", None)
             done += 1
             log(f"  ⇄ pool: {r['replaced'] or '—'} → {r['filename']} («{r['pool']}» #{r['pool_order']})")
         except Exception as e:
@@ -270,7 +285,7 @@ def apply_pool_priority(log=print) -> tuple:
 
 
 @bp.route("/api/pending")
-@admin_required
+@moderator_required
 def api_pending():
     """
     Черга на перевірку, сторінками.
@@ -330,7 +345,7 @@ def _get_image_info(filepath: str) -> dict:
 
 
 @bp.route("/api/pending/<int:pending_id>/preview/<which>")
-@admin_required
+@moderator_required
 def api_pending_preview(pending_id, which):
     """
     Що показати в картці «На перевірку»: посилання на файл і мініатюру,
@@ -421,7 +436,7 @@ def _pending_new_path(pending_id):
 
 
 @bp.route("/api/pending/<int:pending_id>/file/new")
-@admin_required
+@moderator_required
 def api_pending_file_new(pending_id):
     """Сам новий файл — з підтримкою Range, щоб відео перемотувалось."""
     from flask import send_file
@@ -435,7 +450,7 @@ def api_pending_file_new(pending_id):
 
 
 @bp.route("/api/pending/<int:pending_id>/thumb/new")
-@admin_required
+@moderator_required
 def api_pending_thumb_new(pending_id):
     """Мініатюра нового файлу (кадр для відео) — тими ж засобами, що й у каталозі."""
     from flask import send_file
@@ -462,11 +477,15 @@ def api_pending_thumb_new(pending_id):
 
 
 @bp.route("/api/pending/<int:pending_id>/replace", methods=["POST"])
-@admin_required
+@moderator_required
 def api_pending_replace(pending_id):
     """«Замінити старий» — див. replace_pending: з успадкуванням pool і сторінки."""
     try:
-        return jsonify(replace_pending(pending_id, current_user_id()))
+        res = replace_pending(pending_id, current_user_id())
+        undo = res.pop("_undo", None)
+        if undo:
+            modlog.record("pending.replace", f"«{res.get('replaced') or '—'}» → «{res['filename']}»", undo)
+        return jsonify(res)
     except PendingError as e:
         return jsonify({"error": str(e)}), 404 if str(e) == "not found" else 400
     except Exception as e:
@@ -474,11 +493,15 @@ def api_pending_replace(pending_id):
 
 
 @bp.route("/api/pending/<int:pending_id>/approve", methods=["POST"])
-@admin_required
+@moderator_required
 def api_pending_approve(pending_id):
     """«Зберегти новий»: не дублікат — у теку автора, у свій pool, якщо є."""
     try:
-        return jsonify(approve_pending(pending_id))
+        res = approve_pending(pending_id)
+        undo = res.pop("_undo", None)
+        if undo:
+            modlog.record("pending.approve", f"«{res['filename']}»", undo)
+        return jsonify(res)
     except PendingError as e:
         return jsonify({"error": str(e)}), 404 if str(e) == "not found" else 400
     except Exception as e:
@@ -486,7 +509,7 @@ def api_pending_approve(pending_id):
 
 
 @bp.route("/api/pending/<int:pending_id>/reject", methods=["POST"])
-@admin_required
+@moderator_required
 def api_pending_reject(pending_id):
     """Відхиляє файл — зберігає в rejected_duplicates щоб не кидало знову."""
     try:
@@ -499,15 +522,31 @@ def api_pending_reject(pending_id):
         if not row:
             db.close()
             return jsonify({"error": "not found"}), 404
-        try:
-            lp = row["local_path"]
-            if lp and os.path.exists(lp): os.remove(lp)
-        except: pass
+        lp = row["local_path"]
+        kept = None
+        if current_role() == "moderator" and lp and os.path.exists(lp):
+            # Модератор: файл не стираємо одразу, а відкладаємо — щоб адмін міг
+            # відмінити рішення з журналу. Відкладене прибирається через 14 днів.
+            _purge_undo_dir()
+            os.makedirs(UNDO_DIR, exist_ok=True)
+            kept = os.path.join(UNDO_DIR, f"{pending_id}__{os.path.basename(lp)}")
+            try:
+                shutil.move(lp, kept)
+            except Exception:
+                kept = None
+        if not kept:
+            try:
+                if lp and os.path.exists(lp): os.remove(lp)
+            except Exception: pass
+        snap = _snap(row)
         with db.cursor() as cur:
             _reject(cur, row["artist_id"], row["post_id"], row["page_num"], row["md5_hash"], "manual")
             cur.execute("DELETE FROM pending_duplicates WHERE id=%s", (pending_id,))
         db.commit()
         db.close()
+        if kept:
+            modlog.record("pending.reject", f"«{row['filename']}» ≈ «{row['matched_filename']}»",
+                          {"pending": snap, "kept": kept})
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -539,7 +578,7 @@ def api_pending_reject_all():
 
 
 @bp.route("/api/pending/distances")
-@admin_required
+@moderator_required
 def api_pending_distances():
     """
     Розподіл черги за відстанню pHash. Потрібен, щоб перед масовим
@@ -689,7 +728,7 @@ def api_artists_duplicate_scan_list(artist_id):
 
 
 @bp.route("/api/duplicate-scan/<int:result_id>/resolve", methods=["POST"])
-@admin_required
+@moderator_required
 def api_duplicate_scan_resolve(result_id):
     """Вирішує знайдену пару: видалити один з двох файлів (реально, з
     диску й БД — той самий механізм, що й звичайне видалення файлу),
@@ -698,17 +737,20 @@ def api_duplicate_scan_resolve(result_id):
     action = body.get("action")  # 'delete_a' | 'delete_b' | 'dismiss'
     try:
         db  = get_db()
-        row = q(db, "SELECT download_id_a, download_id_b FROM duplicate_scan_results WHERE id=%s", (result_id,))
+        row = q(db, "SELECT * FROM duplicate_scan_results WHERE id=%s", (result_id,))
         if not row:
             db.close()
             return jsonify({"error": "Пару не знайдено"}), 404
+        undo = {"result": {k: row[k] for k in ("artist_id", "download_id_a", "download_id_b", "hamming_distance")}}
 
         if action in ("delete_a", "delete_b"):
             target_id = row["download_id_a"] if action == "delete_a" else row["download_id_b"]
             # У кошик: і файл, і запис. Раніше тут стирався лише файл, а запис
             # лишався — у галереї висіла картка без файлу.
             try:
-                trash_file(target_id, current_user_id())
+                f = get_file(target_id)
+                undo["trash_id"] = trash_file(target_id, current_user_id())
+                undo["name"] = f["name"] if f else f"#{target_id}"
             except TrashError as e:
                 db.close()
                 return jsonify({"error": str(e)}), 404
@@ -723,6 +765,7 @@ def api_duplicate_scan_resolve(result_id):
                     INSERT IGNORE INTO duplicate_ignore_pairs (download_id_a, download_id_b)
                     VALUES (%s,%s)
                 """, (id_a, id_b))
+            undo["dismiss"] = [id_a, id_b]
 
         else:
             db.close()
@@ -731,9 +774,155 @@ def api_duplicate_scan_resolve(result_id):
         with db.cursor() as cur:
             cur.execute("DELETE FROM duplicate_scan_results WHERE id=%s", (result_id,))
         db.commit(); db.close()
+        modlog.record("dupscan.resolve",
+                      f"у кошик «{undo['name']}»" if "trash_id" in undo else "«не дублікат»", undo)
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# ── Відміна рішень модератора (журнал ядра) ──────────────────────────
+
+import shutil
+import time as _time
+
+UNDO_DIR = os.path.join(PENDING_DIR, "_undo")
+UNDO_KEEP_DAYS = 14
+
+
+def _purge_undo_dir():
+    """Відкладені «Дублікат» модераторів старші за 14 днів — стерти."""
+    if not os.path.isdir(UNDO_DIR):
+        return
+    limit = _time.time() - UNDO_KEEP_DAYS * 86400
+    for name in os.listdir(UNDO_DIR):
+        p = os.path.join(UNDO_DIR, name)
+        try:
+            if os.path.isfile(p) and os.path.getmtime(p) < limit:
+                os.remove(p)
+        except OSError:
+            pass
+
+
+def _reinsert_pending(snap):
+    db = get_db()
+    cols = [k for k in snap if k not in ("folder_name", "created_at")]
+    with db.cursor() as cur:
+        cur.execute("SELECT 1 FROM pending_duplicates WHERE id=%s", (snap.get("id"),))
+        if cur.fetchone():
+            cols.remove("id")
+        cur.execute("SELECT 1 FROM pending_duplicates WHERE artist_id=%s AND post_id=%s AND page_num<=>%s",
+                    (snap["artist_id"], snap["post_id"], snap.get("page_num")))
+        if cur.fetchone():
+            raise modlog.UndoError("Цей пост знову в черзі «На перевірку»")
+        cur.execute(f"INSERT INTO pending_duplicates ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))})",
+                    [snap[c] for c in cols])
+    db.commit()
+
+
+def _file_back_to_queue(fid, local):
+    """Збережений файл → назад у теку черги; запис з архіву прибрати повністю."""
+    from core.files_api import purge_trash
+    f = get_file(fid)
+    if not f:
+        raise modlog.UndoError("Цього файлу в архіві вже немає — можливо, його вже видалили")
+    os.makedirs(os.path.dirname(local) or PENDING_DIR, exist_ok=True)
+    if os.path.exists(local):
+        base, ext = os.path.splitext(local)
+        local = f"{base}_{fid}{ext}"
+    if not get_storage().download(f["rel_path"], local):
+        raise modlog.UndoError("Не вдалося забрати файл зі сховища")
+    purge_trash(trash_file(fid))
+    return local
+
+
+def _drop_reject(artist_id, post_id, page_num, reason=None):
+    db = get_db()
+    with db.cursor() as cur:
+        sql = "DELETE FROM rejected_duplicates WHERE artist_id=%s AND post_id=%s AND page_num<=>%s"
+        args = [artist_id, post_id, page_num]
+        cur.execute(sql, args)
+    db.commit()
+
+
+def _undo_approve(p):
+    snap = dict(p["pending"])
+    snap["local_path"] = _file_back_to_queue(p["file_id"], snap["local_path"])
+    if p.get("inherited"):
+        _drop_reject(snap["artist_id"], snap["post_id"], snap.get("page_num"))
+    _reinsert_pending(snap)
+    return "файл знову в черзі «На перевірку»"
+
+
+def _undo_replace(p):
+    note = _undo_approve(p)
+    if p.get("old_reject"):
+        o = p["old_reject"]
+        _drop_reject(o["artist_id"], o["post_id"], o.get("page_num"))
+    if p.get("old_trash_id"):
+        from core.files_api import restore_trash
+        try:
+            restore_trash(p["old_trash_id"])
+        except TrashError as e:
+            return f"{note}; старий файл не відновлено: {e}"
+    return f"{note}; старий файл повернуто"
+
+
+def _undo_reject(p):
+    snap = dict(p["pending"])
+    kept = p.get("kept")
+    if not kept or not os.path.exists(kept):
+        raise modlog.UndoError("Відкладений файл уже стерто (минуло понад 14 днів)")
+    os.makedirs(os.path.dirname(snap["local_path"]) or PENDING_DIR, exist_ok=True)
+    target = snap["local_path"]
+    if os.path.exists(target):
+        base, ext = os.path.splitext(target)
+        target = f"{base}_{snap['id']}{ext}"
+    shutil.move(kept, target)
+    snap["local_path"] = target
+    _drop_reject(snap["artist_id"], snap["post_id"], snap.get("page_num"))
+    try:
+        _reinsert_pending(snap)
+    except Exception:
+        shutil.move(target, kept)
+        raise
+    return "файл знову в черзі «На перевірку»"
+
+
+def _undo_dupscan(p):
+    from core.files_api import restore_trash
+    note = ""
+    if p.get("trash_id"):
+        try:
+            restore_trash(p["trash_id"])
+            note = "файл відновлено з кошика"
+        except TrashError as e:
+            raise modlog.UndoError(str(e))
+    db = get_db()
+    with db.cursor() as cur:
+        if p.get("dismiss"):
+            cur.execute("DELETE FROM duplicate_ignore_pairs WHERE download_id_a=%s AND download_id_b=%s",
+                        tuple(p["dismiss"]))
+            note = "пару знову буде запропоновано"
+        r = p["result"]
+        cur.execute("SELECT COUNT(*) AS n FROM files WHERE id IN (%s,%s)", (r["download_id_a"], r["download_id_b"]))
+        if cur.fetchone()["n"] == 2:
+            cur.execute("""INSERT IGNORE INTO duplicate_scan_results
+                           (artist_id, download_id_a, download_id_b, hamming_distance) VALUES (%s,%s,%s,%s)""",
+                        (r["artist_id"], r["download_id_a"], r["download_id_b"], r["hamming_distance"]))
+    db.commit()
+    return note
+
+
+def register_undo():
+    modlog.register("pending.approve", _undo_approve,  "«Зберегти новий»")
+    modlog.register("pending.replace", _undo_replace,  "«Замінити старий»")
+    modlog.register("pending.reject",  _undo_reject,   "«Дублікат»")
+    modlog.register("dupscan.resolve", _undo_dupscan,  "Вирішив пару дублікатів")
+    try:
+        _purge_undo_dir()
+    except Exception:
+        pass
 
 
 def _recover_pending_file(row: dict, user_id: int | None = None) -> str | None:

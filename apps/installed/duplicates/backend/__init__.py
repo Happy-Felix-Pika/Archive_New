@@ -76,6 +76,7 @@ def _after_archiver(payload=None):
 
 def register(core):
     duplicates._core = core
+    duplicates.register_undo()       # журнал модераторів: як відміняти рішення в черзі
     core.api.add_routes(duplicates.bp, at_root=True)
     # Довгий пошук по всьому архіву — фонова задача ядра
     core.jobs.register("scan-all", duplicates._scan_whole_archive)

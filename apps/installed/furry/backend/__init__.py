@@ -272,6 +272,107 @@ def _on_file_created(payload):
         pass
 
 
+# ── Відміна дій модератора (журнал ядра) ─────────────────────────────
+
+def _state_restore(payload):
+    """Відмінили переміщення — повертаємо автора, пул і номер сторінки."""
+    data = (payload.get("snapshot") or {}).get("furry")
+    if not data:
+        return
+    with payload["db"].cursor() as cur:
+        cur.execute("""UPDATE furry_posts SET artist_id=%s, subfolder=%s, pool_order=%s
+                       WHERE file_id=%s""",
+                    (data["artist_id"], data.get("subfolder"), data.get("pool_order"), payload["file_id"]))
+    try:
+        pools._invalidate_pools_cache()
+    except Exception:
+        pass
+
+
+def _undo_auto_update(p):
+    from core.db import get_db
+    db = get_db()
+    with db.cursor() as cur:
+        cur.execute("UPDATE artists SET auto_update=%s WHERE id=%s", (p["before"], p["artist_id"]))
+    db.commit()
+
+
+def _undo_orders(p):
+    from core.db import get_db
+    db = get_db()
+    with db.cursor() as cur:
+        for o in p.get("orders") or []:
+            cur.execute("UPDATE furry_posts SET pool_order=%s WHERE file_id=%s", (o["pool_order"], o["file_id"]))
+    db.commit()
+    pools._invalidate_pools_cache()
+
+
+def _undo_pool_assign(p):
+    """Повернути файли з пулу туди, де вони були (тека, пул, сторінка)."""
+    from core.db import get_db, q
+    from core.modlog import UndoError
+    from core.storage_api import get_storage
+    db, st = get_db(), get_storage()
+    art = q(db, "SELECT folder_name FROM artists WHERE id=%s", (p["artist_id"],))
+    if not art:
+        raise UndoError("Автора вже немає")
+    prefix = "" if art["folder_name"] == "_root" else f"{art['folder_name']}/"
+    ids, errors = [], []
+    for f in p.get("files") or []:
+        row = q(db, "SELECT name, rel_path FROM files WHERE id=%s", (f["file_id"],))
+        if not row:
+            errors.append(f"#{f['file_id']}: файлу вже немає")
+            continue
+        dst = prefix + (f"{f['subfolder']}/" if f.get("subfolder") else "") + row["name"]
+        if row["rel_path"] != dst:
+            if st.exists(dst):
+                errors.append(f"{row['name']}: на старому місці вже щось лежить")
+                continue
+            if not st.move(row["rel_path"], dst):
+                errors.append(f"{row['name']}: не вдалося перемістити")
+                continue
+        with db.cursor() as cur:
+            cur.execute("UPDATE furry_posts SET subfolder=%s, pool_order=%s WHERE file_id=%s",
+                        (f.get("subfolder"), f.get("pool_order"), f["file_id"]))
+        ids.append(f["file_id"])
+    library.resync_rel_path(db, ids)
+    with db.cursor() as cur:
+        for o in p.get("prev_pool_orders") or []:
+            cur.execute("UPDATE furry_posts SET pool_order=%s WHERE file_id=%s", (o["pool_order"], o["file_id"]))
+    db.commit()
+    pools._invalidate_pools_cache()
+    if errors and not ids:
+        raise UndoError("; ".join(errors[:5]))
+    return f"повернуто {len(ids)}" + (f", не вдалося: {'; '.join(errors[:5])}" if errors else "")
+
+
+def _undo_archiver_run(p):
+    """Прибрати в кошик усе, що цей запуск скачав для автора."""
+    from core.db import get_db, qq
+    from core.files_api import TrashError, trash_file
+    from core.modlog import UndoError
+    if not p.get("finished_at"):
+        if runner._active_process and runner._active_process.poll() is None:
+            raise UndoError("Архіватор ще працює — зупини його або дочекайся кінця")
+        raise UndoError("Невідомо, коли запуск закінчився (сервер перезапускали?) — прибери файли вручну")
+    db = get_db()
+    name = p["artist"]
+    rows = qq(db, """SELECT f.id FROM files f
+                     JOIN furry_posts fp ON fp.file_id = f.id
+                     JOIN artists a ON a.id = fp.artist_id
+                     WHERE (a.folder_name=%s OR a.artist_name=%s)
+                       AND f.created_at >= %s AND f.created_at <= %s""",
+              (f"@{name}", name, p["started_at"], p["finished_at"]))
+    n = 0
+    for r in rows:
+        try:
+            trash_file(r["id"])
+            n += 1
+        except TrashError:
+            pass
+    return f"у кошик: {n} файл(ів), скачаних цим запуском"
+
+
 def register(core):
     for module in MODULES:
         core.api.add_routes(module.bp, at_root=True)
@@ -292,6 +393,14 @@ def register(core):
     core.events.add_filter("file.move_check", _move_check)
     core.events.on("file.moved", _on_file_moved)
     core.events.add_filter("folder.delete_check", _folder_delete_check)
+    # журнал модераторів: відміна дій furry і повернення стану при відміні переміщення
+    core.events.on("file.state_restore", _state_restore)
+    from core import modlog
+    modlog.register("artist.auto_update", _undo_auto_update, "Автооновлення автора")
+    modlog.register("pool.set_page",      _undo_orders,       "Змінив сторінку в пулі")
+    modlog.register("pool.resort",        _undo_orders,       "Пересортував пул")
+    modlog.register("pool.assign",        _undo_pool_assign,  "Переніс у пул")
+    modlog.register("archiver.run",       _undo_archiver_run, "Запустив архіватор")
 
     # Кеш серій і нічний планувальник — турбота застосунку, не ядра.
     try:

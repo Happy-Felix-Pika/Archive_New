@@ -27,7 +27,11 @@
       "icon": "◉",
       "order": 20,
       "page_id": "artists",
-      "admin_only": true
+      "admin_only": true,
+      "roles": [
+        "admin",
+        "moderator"
+      ]
     },
     {
       "id": "runner",
@@ -39,7 +43,11 @@
       "icon": "▶",
       "order": 21,
       "page_id": "runner",
-      "admin_only": true
+      "admin_only": true,
+      "roles": [
+        "admin",
+        "moderator"
+      ]
     }
   ],
   "pages": [],

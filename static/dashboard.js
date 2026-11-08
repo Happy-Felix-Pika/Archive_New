@@ -14,7 +14,7 @@ const I18N = {
     'nav.catalog':'Каталог', 'nav.live':'Онлайн', 'nav.config':'Конфіг', 'nav.codes':'Коди допуску', 'nav.chat':'Чат', 'nav.apps':'Застосунки', 'nav.trash':'Кошик',
     'page.overview':'Огляд', 'page.artists':'Автори', 'page.artist-detail':'Деталі автора',
     'page.recent':'Останні файли', 'page.runner':'Запуск', 'page.pending':'На перевірку',
-    'page.gallery':'Арти 🖼', 'page.config':'Конфігурація', 'page.access-codes':'Коди допуску', 'page.apps':'Застосунки', 'page.trash':'Кошик',
+    'page.gallery':'Арти 🖼', 'page.config':'Конфігурація', 'page.access-codes':'Коди допуску', 'page.apps':'Застосунки', 'page.trash':'Кошик', 'page.modlog':'Журнал модераторів',
     'page.catalog':'Каталог 📁', 'page.live':'Онлайн 🌐',
     'auth.title':'ARCHIVE', 'auth.dbsub':'Підключення до бази даних',
     'auth.dbtext':"Дашборд ще не підключений до MariaDB/MySQL. Вкажи дані для підключення — вони будуть збережені на сервері і використані для всього подальшого.",
@@ -148,7 +148,7 @@ const I18N = {
     'nav.catalog':'Catalog', 'nav.live':'Live', 'nav.config':'Config', 'nav.codes':'Access codes', 'nav.chat':'Chat', 'nav.apps':'Apps', 'nav.trash':'Trash',
     'page.overview':'Overview', 'page.artists':'Artists', 'page.artist-detail':'Artist details',
     'page.recent':'Recent files', 'page.runner':'Run', 'page.pending':'Review',
-    'page.gallery':'Gallery 🖼', 'page.config':'Configuration', 'page.access-codes':'Access codes', 'page.apps':'Apps', 'page.trash':'Trash',
+    'page.gallery':'Gallery 🖼', 'page.config':'Configuration', 'page.access-codes':'Access codes', 'page.apps':'Apps', 'page.trash':'Trash', 'page.modlog':'Moderator log',
     'page.catalog':'Catalog 📁', 'page.live':'Live 🌐',
     'auth.title':'ARCHIVE', 'auth.dbsub':'Database connection',
     'auth.dbtext':"The dashboard isn't connected to MariaDB/MySQL yet. Enter connection details — they'll be saved on the server and used from now on.",
@@ -353,6 +353,7 @@ function refreshCurrent() {
   else if (currentPage === 'live')      { liveLoadStatus(); liveCheckBookmark(); }
   else if (currentPage === 'apps')      { if (typeof loadAppsPage === 'function') loadAppsPage(); }
   else if (currentPage === 'trash')     { loadTrashPage(); }
+  else if (currentPage === 'modlog')    { modlogLoad(0); }
   else if (currentPage.startsWith('app-')) { if (typeof appsOpenPage === 'function') appsOpenPage(currentPage); }
 }
 
@@ -543,7 +544,7 @@ async function loadArtists() {
     <td>${a.pending_count > 0 ? `<span class="c-red">⏳ ${a.pending_count}</span>` : '<span style="color:var(--muted)">—</span>'}</td>
     <td style="color:var(--muted)">${fmtDate(a.last_download)}</td>
     <td style="text-align:center" title="Авто-оновлення щодня"><input type="checkbox" data-auto-update-id="${a.id}" ${a.auto_update ? 'checked' : ''} style="cursor:pointer;width:16px;height:16px"></td>
-    <td><span class="catalog-crumb" data-merge-id="${a.id}" data-merge-name="${esc(a.artist_name)}" title="Об'єднати з іншим автором">🔗</span>
+    <td data-admin><span class="catalog-crumb" data-merge-id="${a.id}" data-merge-name="${esc(a.artist_name)}" title="Об'єднати з іншим автором">🔗</span>
         <span class="catalog-crumb" data-forget-id="${a.id}" data-forget-name="${esc(a.artist_name)}" title="Прибрати з БД, файли лишити на диску (для помилково проіндексованих папок)" style="margin-left:6px">🧹</span></td>
   </tr>`).join('') || `<tr><td colspan="10" class="empty-row">${t('empty.artists')}</td></tr>`;
 }
@@ -909,6 +910,7 @@ function pendingSetTab(tab) {
     b.classList.toggle('active', b.dataset.tab === tab));
   document.getElementById('pending-list').style.display      = tab === 'files' ? '' : 'none';
   document.getElementById('duplicates-list').style.display   = tab === 'duplicates' ? '' : 'none';
+  document.getElementById('tagsugg-list').style.display      = tab === 'tags' ? '' : 'none';
   document.getElementById('btn-reject-all').style.display    = tab === 'files' ? '' : 'none';
   const nearBtn = document.getElementById('btn-reject-near');
   if (nearBtn) nearBtn.style.display = (tab === 'files') ? '' : 'none';
@@ -922,7 +924,60 @@ function pendingSetTab(tab) {
 
 function pendingRefreshCurrentTab() {
   if (_pendingTab === 'duplicates') loadDuplicatesTab();
+  else if (_pendingTab === 'tags') loadTagSuggestions();
   else loadPending();
+  tagSuggUpdateCount();
+}
+
+// ── Пропозиції тегів (вкладка «🏷 Теги») ─────────────────────────────────
+const TAGSUGG_VERB = { add: '➕ додати', remove: '➖ прибрати', delete_tag: '🗑 видалити тег з архіву' };
+
+async function tagSuggUpdateCount() {
+  const el = document.getElementById('tagsugg-count');
+  if (!el || !canModerate()) return;
+  try {
+    const d = await fetch(`${API}/api/tag-suggestions/count`).then(r => r.json());
+    el.textContent = d.count ? `(${d.count})` : '';
+  } catch {}
+}
+
+async function loadTagSuggestions() {
+  const box = document.getElementById('tagsugg-list');
+  box.innerHTML = `<div class="muted" style="padding:16px">${t('common.loading')}</div>`;
+  let items = [];
+  try { items = (await fetch(`${API}/api/tag-suggestions`).then(r => r.json())).items || []; }
+  catch { box.innerHTML = `<div class="muted">${t('catalog.error')}</div>`; return; }
+  document.getElementById('pending-count').textContent = items.length ? `${items.length} пропозицій` : '';
+  if (!items.length) { box.innerHTML = '<div class="muted" style="padding:16px">Пропозицій немає.</div>'; return; }
+  box.innerHTML = `<div class="table-wrap"><table>
+    <thead><tr><th></th><th>Пропозиція</th><th>Файл</th><th>Хто</th><th></th></tr></thead>
+    <tbody>${items.map(s => {
+      const isImg = s.file_id && ['png','jpg','jpeg','gif','webp'].includes((s.file_ext||'').toLowerCase());
+      return `<tr id="tagsugg-${s.id}">
+        <td style="width:64px">${isImg ? `<img src="${API}/api/gallery/stream/${s.file_id}" loading="lazy" style="width:56px;height:56px;object-fit:cover;border-radius:6px;cursor:zoom-in" onclick="galOpenFullscreen(this.src)">` : ''}</td>
+        <td>${TAGSUGG_VERB[s.action] || s.action} <b>${esc(s.tag_name)}</b>
+            ${s.action === 'delete_tag' ? `<div class="muted" style="font-size:11px">стоїть на ${s.tag_usage||0} файл(ах)</div>` : ''}</td>
+        <td style="font-family:var(--mono);font-size:12px">${s.file_id ? esc(s.file_name || ('#' + s.file_id)) : '—'}</td>
+        <td style="font-size:12px">${esc(s.by)}<div class="muted" style="font-size:11px">${fmtDate(s.created_at)}</div></td>
+        <td style="white-space:nowrap;text-align:right">
+          ${s.can_decide
+            ? `<button class="btn btn-approve btn-sm" onclick="tagSuggDecide(${s.id}, 'accept')">✓ Прийняти</button>
+               <button class="btn btn-reject btn-sm" onclick="tagSuggDecide(${s.id}, 'reject')">✕ Відхилити</button>`
+            : '<span class="muted" style="font-size:11px">вирішує адмін</span>'}
+        </td></tr>`;
+    }).join('')}</tbody></table></div>`;
+}
+
+async function tagSuggDecide(id, verdict) {
+  try {
+    const r = await fetch(`${API}/api/tag-suggestions/${id}/${verdict}`, { method: 'POST' });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { toast(d.error || t('toast.error'), 'err'); return; }
+    document.getElementById(`tagsugg-${id}`)?.remove();
+    toast(verdict === 'accept' ? 'Прийнято' : 'Відхилено', 'ok');
+    tagSuggUpdateCount();
+    galLoadAllTags();
+  } catch { toast('Помилка мережі', 'err'); }
 }
 
 let _dupTabAllRows = [];
@@ -2194,10 +2249,10 @@ async function galleryShow(idx) {
         <span class="gallery-filename" title="${esc(d.filename)}">${esc(d.filename)}</span>
         ${isVideo?`<span class="gallery-info-hint">${t('gal.videohint')}</span>`:''}
         <span class="gallery-info-actions">
-          ${_currentUser?.is_admin ? `<span class="catalog-crumb" onclick="galShowMetaEdit(${id})" title="${t('gal.edit')}">✎</span>` : ''}
+          ${canModerate() ? `<span class="catalog-crumb" onclick="galShowMetaEdit(${id})" title="${t('gal.edit')}">✎</span>` : ''}
           <span data-zone="file.actions" data-file_id="${id}"></span>
           ${_currentUser?.is_admin ? `<span class="catalog-crumb" onclick="galKeyAccess(${id})" title="Доступ для зовнішніх ключів">🔓</span>` : ''}
-          ${_currentUser?.is_admin ? `<span class="catalog-crumb" style="color:var(--red)" onclick="galDeleteFile(${id})" title="${t('gal.delete')}">🗑</span>` : ''}
+          ${canModerate() ? `<span class="catalog-crumb" style="color:var(--red)" onclick="galDeleteFile(${id})" title="${t('gal.delete')}">🗑</span>` : ''}
         </span>
       </div>
       ${d.subfolder ? `<div class="pool-progress-badge" data-pool="${esc(d.subfolder)}" data-artist-id="${d.artist_id}" data-artist-name="${esc(d.artist)}" title="${t('gal.filterbypool')}">
@@ -2218,6 +2273,7 @@ async function galleryShow(idx) {
     <div class="gallery-nav prev" onclick="galleryGo(-1)" style="position:absolute;left:-64px;top:calc(50% - 60px)">‹</div>
     <div class="gallery-nav next" onclick="galleryGo(1)"  style="position:absolute;right:-64px;top:calc(50% - 60px)">›</div>
   </div>`;
+  if ((d.tag_suggestions || []).length) galRefreshFileTags(id);   // показати пропозиції тегів
   if (isFlash) {
     try {
       window.RufflePlayer = window.RufflePlayer || {};
@@ -2399,6 +2455,15 @@ async function galAddTagToFile(downloadId, name, color) {
     const tag = await fetch(`${API}/api/download/${downloadId}/tags/add`,{
       method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})
     }).then(r=>r.json());
+    if (tag.error) { toast(`✗ ${tag.error}`, 'err'); return; }
+    if (tag.suggested) {
+      // користувач лише пропонує — модератор вирішить
+      const m = _galMeta[downloadId];
+      if (m) { m.tag_suggestions = m.tag_suggestions || []; if (!m.tag_suggestions.find(x => x.id === tag.suggestion.id)) m.tag_suggestions.push(tag.suggestion); }
+      galRefreshFileTags(downloadId);
+      toast(`Запропоновано «${name}» — модератор вирішить`, 'ok');
+      return;
+    }
     if (_galMeta[downloadId]) {
       _galMeta[downloadId].tags = _galMeta[downloadId].tags||[];
       if (!_galMeta[downloadId].tags.find(t=>t.id===tag.id)) _galMeta[downloadId].tags.push(tag);
@@ -2412,7 +2477,15 @@ async function galAddTagToFile(downloadId, name, color) {
 async function galRemoveTag(downloadId, tagId, el) {
   el.closest('.tag-inline').style.opacity='.3';
   try {
-    await fetch(`${API}/api/download/${downloadId}/tags/${tagId}`,{method:'DELETE'});
+    const d = await fetch(`${API}/api/download/${downloadId}/tags/${tagId}`,{method:'DELETE'}).then(r => r.json());
+    if (d.error) { toast(`✗ ${d.error}`, 'err'); el.closest('.tag-inline').style.opacity='1'; return; }
+    if (d.suggested) {
+      const m = _galMeta[downloadId];
+      if (m) { m.tag_suggestions = m.tag_suggestions || []; if (!m.tag_suggestions.find(x => x.id === d.suggestion.id)) m.tag_suggestions.push(d.suggestion); }
+      galRefreshFileTags(downloadId);
+      toast('Запропоновано прибрати тег — модератор вирішить', 'ok');
+      return;
+    }
     if (_galMeta[downloadId]?.tags) _galMeta[downloadId].tags=_galMeta[downloadId].tags.filter(t=>t.id!==tagId);
     galRefreshFileTags(downloadId);
     toast(t('toast.tagdeleted'),'ok');
@@ -2434,7 +2507,27 @@ function galRefreshFileTags(downloadId) {
       ).join('')}</div>
     </div>`
   ).join('');
-  container.innerHTML = rgroupHtml + `<span class="tag-chip" style="background:transparent;color:var(--muted);border-color:var(--border)" onclick="galShowInlineTagInput(${downloadId})">+ ${t('gal.tag')}</span>`;
+  // Невирішені пропозиції — пунктиром; свою можна відкликати кліком
+  const sugg = (d.tag_suggestions || []).filter(s => s.action === 'add' || s.action === 'remove');
+  const myId = _currentUser?.user_id;
+  const suggHtml = sugg.length ? `<div class="tag-group" style="text-align:center">
+      <div class="tag-group-label">Запропоновано</div>
+      <div class="tag-group-chips" style="justify-content:center">${sugg.map(s =>
+        `<span class="tag-inline tag-suggested" title="${s.suggested_by === myId ? 'Твоя пропозиція — клік, щоб відкликати' : 'Чекає рішення модератора'}"
+               ${s.suggested_by === myId ? `onclick="galWithdrawSuggestion(${downloadId}, ${s.id})"` : ''}>${s.action === 'add' ? '+' : '−'} ${esc(s.tag_name)}</span>`
+      ).join('')}</div></div>` : '';
+  container.innerHTML = rgroupHtml + suggHtml + `<span class="tag-chip" style="background:transparent;color:var(--muted);border-color:var(--border)" onclick="galShowInlineTagInput(${downloadId})">+ ${canModerate() ? t('gal.tag') : 'запропонувати тег'}</span>`;
+}
+
+async function galWithdrawSuggestion(downloadId, sid) {
+  try {
+    const r = await fetch(`${API}/api/tag-suggestions/${sid}`, { method: 'DELETE' });
+    if (!r.ok) { toast((await r.json()).error || t('toast.error'), 'err'); return; }
+    const m = _galMeta[downloadId];
+    if (m) m.tag_suggestions = (m.tag_suggestions || []).filter(x => x.id !== sid);
+    galRefreshFileTags(downloadId);
+    toast('Пропозицію відкликано', 'ok');
+  } catch { toast('Помилка мережі', 'err'); }
 }
 
 function galManageTags() { document.getElementById('tag-modal').style.display='flex'; galRenderAllTagsList(); }
@@ -2518,7 +2611,7 @@ function galRenderAllTagsList() {
         <div style="display:inline-flex;align-items:center;gap:6px;background:var(--surface2);border-radius:8px;padding:4px 10px">
           <span style="font-family:var(--mono);font-size:12px">${esc(t.name)}</span>
           <span style="font-size:10px;color:var(--muted);font-family:var(--mono)">${t.usage_count||0}×</span>
-          <button onclick="deleteTag(${t.id})" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:13px;padding:0;line-height:1">✕</button>
+          <button data-mod onclick="deleteTag(${t.id})" title="${isAdminRole() ? 'Видалити тег з архіву' : 'Запропонувати видалити (вирішує адмін)'}" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:13px;padding:0;line-height:1">✕</button>
         </div>`).join('')}
       </div>
     </div>`).join('');
@@ -2528,15 +2621,20 @@ async function createTag() {
   const name     = document.getElementById('new-tag-name').value.trim().toLowerCase();
   const category = document.getElementById('new-tag-cat').value;
   if (!name) return;
-  await fetch(`${API}/api/tags`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,category})});
+  const r = await fetch(`${API}/api/tags`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,category})}).then(x => x.json());
+  if (r.error) { toast(r.error, 'err'); return; }
   document.getElementById('new-tag-name').value='';
   await galLoadAllTags();
   toast(`${t('gal.tagcreated')} «${name}»`,'ok');
 }
 
 async function deleteTag(id) {
-  if (!confirm(t('confirm.deletetag'))) return;
-  await fetch(`${API}/api/tags/${id}`,{method:'DELETE'});
+  const msg = isAdminRole() ? t('confirm.deletetag')
+    : 'Запропонувати адміну видалити цей тег з архіву (з усіх файлів)?';
+  if (!confirm(msg)) return;
+  const r = await fetch(`${API}/api/tags/${id}`,{method:'DELETE'}).then(x => x.json()).catch(() => ({}));
+  if (r.error) { toast(r.error, 'err'); return; }
+  if (r.suggested) { toast('Запропоновано — вирішить адмін', 'ok'); return; }
   await galLoadAllTags();
   toast(t('toast.tagdeleted'),'ok');
 }
@@ -3519,7 +3617,11 @@ async function loadUsersFull() {
       <tr>
         <td style="font-weight:500">${esc(u.display_name || '—')}</td>
         <td style="color:var(--muted)">${esc(u.email)}</td>
-        <td>${u.is_admin ? '<span class="badge badge-e621">адмін</span>' : '<span style="color:var(--muted)">юзер</span>'}</td>
+        <td>${u.id === _currentUser?.user_id
+              ? `<span class="badge badge-e621">${ROLE_LABELS[u.role] || u.role}</span> <span class="muted" style="font-size:11px">(ти)</span>`
+              : `<select class="role-select" onchange="setUserRole(${u.id}, this)" data-prev="${u.role}">
+                   ${['user','moderator','admin'].map(r => `<option value="${r}" ${u.role === r ? 'selected' : ''}>${ROLE_LABELS[r]}</option>`).join('')}
+                 </select>`}</td>
         <td style="color:var(--muted)">${fmtDate(u.created_at)}</td>
         <td style="color:var(--muted)">${u.last_login_at ? fmtDate(u.last_login_at) : '— ще не заходив —'}</td>
         <td>${u.id !== _currentUser?.user_id ? `<span class="catalog-crumb" style="color:var(--red)" onclick="deleteUserAccount(${u.id}, '${esc(u.display_name || u.email)}')" title="Видалити обліковий запис">🗑</span>` : ''}</td>
@@ -3527,6 +3629,79 @@ async function loadUsersFull() {
   } catch {
     tbody.innerHTML = `<tr><td colspan="6" class="empty-row">${t('catalog.error')}</td></tr>`;
   }
+}
+
+const ROLE_LABELS = { user: 'користувач', moderator: 'модератор', admin: 'адмін' };
+
+async function setUserRole(userId, sel) {
+  const role = sel.value, prev = sel.dataset.prev;
+  const warn = role === 'admin' ? '\n\nАдмін може все: налаштування, користувачі, остаточне видалення.' :
+               role === 'moderator' ? '\n\nМодератор: завантаження, переміщення, кошик (без остаточного видалення), теги, черга «На перевірку». Усе пишеться в журнал.' : '';
+  if (!confirm(`Змінити роль на «${ROLE_LABELS[role]}»?${warn}`)) { sel.value = prev; return; }
+  try {
+    const r = await fetch(`${API}/api/users/${userId}/role`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ role })
+    }).then(x => x.json());
+    if (r.error) { toast(r.error, 'err'); sel.value = prev; return; }
+    sel.dataset.prev = role;
+    toast(`Роль: ${ROLE_LABELS[role]}`, 'ok');
+  } catch { toast('Помилка мережі', 'err'); sel.value = prev; }
+}
+
+// ── Журнал модераторів ────────────────────────────────────────────────────
+const MODLOG_PAGE = 100;
+let _modlogOffset = 0;
+
+async function modlogLoad(offset = 0) {
+  _modlogOffset = offset;
+  const box = document.getElementById('modlog-list');
+  if (!box) return;
+  if (!offset) box.innerHTML = `<div class="muted">${t('common.loading')}</div>`;
+  const params = new URLSearchParams({ limit: MODLOG_PAGE, offset });
+  const uid = document.getElementById('modlog-user').value;
+  if (uid) params.set('user_id', uid);
+  if (document.getElementById('modlog-active').checked) params.set('active', '1');
+  let d;
+  try { d = await fetch(`${API}/api/modlog?${params}`).then(r => r.json()); }
+  catch { box.innerHTML = `<div class="muted">${t('catalog.error')}</div>`; return; }
+  if (d.error) { box.innerHTML = `<div class="muted">${esc(d.error)}</div>`; return; }
+  const sel = document.getElementById('modlog-user');
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">усі модератори</option>' +
+    (d.moderators || []).map(m => `<option value="${m.id}" ${String(m.id) === cur ? 'selected' : ''}>${esc(m.name)}</option>`).join('');
+  document.getElementById('modlog-summary').textContent = `записів: ${d.total}`;
+  const rows = (d.items || []).map(e => `
+    <div class="modlog-row${e.undone_at ? ' undone' : ''}" id="modlog-${e.id}">
+      <div class="modlog-when">${fmtDate(e.created_at)}</div>
+      <div class="modlog-main">
+        <div class="modlog-what"><b>${esc(e.user)}</b> · ${esc(e.label)}</div>
+        <div class="modlog-detail">${esc(e.summary || '')}</div>
+        ${e.undone_at ? `<div class="modlog-detail" style="color:var(--green)">↩ відмінено ${fmtDate(e.undone_at)}${e.undone_by ? ' · ' + esc(e.undone_by) : ''}</div>` : ''}
+        ${e.undo_error && !e.undone_at ? `<div class="modlog-detail" style="color:var(--red)">✗ ${esc(e.undo_error)}</div>` : ''}
+      </div>
+      <div>${!e.undone_at && e.undoable
+        ? `<button class="btn btn-ghost btn-sm" onclick="modlogUndo(${e.id})">↩ Відмінити</button>`
+        : (!e.undoable ? '<span class="muted" style="font-size:11px">лише запис</span>' : '')}</div>
+    </div>`).join('');
+  const more = d.total > offset + MODLOG_PAGE
+    ? `<div style="text-align:center;padding:12px"><button class="btn" onclick="modlogLoad(${offset + MODLOG_PAGE})">↓ Ще</button></div>` : '';
+  if (offset) {
+    document.getElementById('modlog-more')?.remove();
+    box.insertAdjacentHTML('beforeend', rows + (more ? `<div id="modlog-more">${more}</div>` : ''));
+  } else {
+    box.innerHTML = (rows || '<div class="muted">Модератори ще нічого не робили.</div>') + (more ? `<div id="modlog-more">${more}</div>` : '');
+  }
+}
+
+async function modlogUndo(id) {
+  if (!confirm('Відмінити цю дію?')) return;
+  try {
+    const r = await fetch(`${API}/api/modlog/${id}/undo`, { method: 'POST' });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { toast(d.error || t('toast.error'), 'err'); modlogLoad(0); return; }
+    toast(`Відмінено${d.note ? ': ' + d.note : ''}`, 'ok');
+    modlogLoad(0);
+  } catch { toast('Помилка мережі', 'err'); }
 }
 
 async function deleteUserAccount(userId, name) {
@@ -3797,7 +3972,7 @@ async function liveSearch(page = 1) {
   const grid = document.getElementById('live-grid');
   grid.innerHTML = `<div style="opacity:.6">${t('common.loading')}</div>`;
   document.getElementById('live-download-btn').style.display =
-    (_currentUser?.is_admin && liveGetCurrentArtist()) ? '' : 'none';
+    (canModerate() && liveGetCurrentArtist()) ? '' : 'none';
 
   // id поля = ім'я параметра. Ядро не перелічує поля поіменно —
   // бере те, що оголосило джерело.
@@ -4116,7 +4291,7 @@ function liveShowItem(idx) {
     </div>
     <div style="display:flex;gap:8px;justify-content:center;margin-top:10px">
       <button class="btn btn-ghost" onclick="liveBackToResults()">← ${t('live.backtoresults')}</button>
-      ${_currentUser?.is_admin ? `<button class="btn btn-primary" onclick="liveDownloadArtistFromViewer()">⬇ ${t('live.downloadthisartist')}</button>` : ''}
+      ${canModerate() ? `<button class="btn btn-primary" onclick="liveDownloadArtistFromViewer()">⬇ ${t('live.downloadthisartist')}</button>` : ''}
     </div>
     <div class="gallery-nav prev" onclick="liveGo(-1)" style="position:absolute;left:-64px;top:calc(50% - 60px)">‹</div>
     <div class="gallery-nav next" onclick="liveGo(1)"  style="position:absolute;right:-64px;top:calc(50% - 60px)">›</div>
@@ -4566,7 +4741,7 @@ function catalogRender() {
 
     if (item.type === 'folder') {
       const isExcluded = isRoot && _catalogExcluded.includes(item.name);
-      const excludeBtn = (isRoot && _catalogSource === 'local')
+      const excludeBtn = (isRoot && _catalogSource === 'local' && isAdminRole())
         ? `<span class="catalog-exclude-toggle" data-folder="${esc(item.name)}" data-excluded="${isExcluded?1:0}"
              title="${isExcluded ? 'Не сканується в Арти — клік, щоб знову включити' : 'Виключити з Арти/синхронізації (напр. особисті файли)'}"
              style="position:absolute;top:6px;right:6px;font-size:14px;cursor:pointer;opacity:${isExcluded?1:0.35}">${isExcluded ? '🚫' : '👁'}</span>`
@@ -4746,7 +4921,7 @@ function catalogOpenFile(url, clickedExt) {
 const _catalogSelected = new Set();   // імена файлів у поточній теці
 
 function _catalogCanEdit() {
-  return _catalogSource === 'local' && !!_currentUser?.is_admin;
+  return _catalogSource === 'local' && canModerate();
 }
 
 function _catalogJoin(name) {
@@ -5052,7 +5227,7 @@ async function catalogOverlayInfo(box) {
   if (!el) return;
   if (!box?.isCatalog || _catalogSource !== 'local') { el.style.display = 'none'; el.innerHTML = ''; return; }
   const token = ++_overlayInfoToken;
-  const isAdmin = !!_currentUser?.is_admin;
+  const isAdmin = canModerate();
   const delBtn = isAdmin
     ? `<span class="catalog-crumb" style="color:var(--red)" title="${t('gal.delete')}" onclick="catalogOverlayDelete()">🗑</span>` : '';
   const moveBtn = isAdmin
@@ -5137,6 +5312,16 @@ document.addEventListener('visibilitychange', () => {
 // ── Auth & App Init ───────────────────────────────────────────────────────
 
 let _currentUser = null;
+
+// Ролі: user / moderator / admin. Модератор — завантаження, переміщення,
+// видалення в кошик, теги, черга «На перевірку»; без остаточного видалення,
+// масових дій і налаштувань.
+function userRole() {
+  if (!_currentUser) return 'user';
+  return _currentUser.role || (_currentUser.is_admin ? 'admin' : 'user');
+}
+function canModerate() { return ['moderator', 'admin'].includes(userRole()); }
+function isAdminRole() { return userRole() === 'admin'; }
 
 // Перехоплюємо fetch глобально — якщо сесія злетіла (401) посеред роботи,
 // повертаємо користувача на екран логіну замість показу битих даних.
@@ -5262,12 +5447,17 @@ async function showAppShell() {
   }
 
   // Вкладки: звичайний користувач бачить тільки "Арти", адмін — усе + "Коди допуску"
-  const isAdmin = !!(_currentUser && _currentUser.is_admin);
+  const isAdmin = isAdminRole();
+  document.body.dataset.role = userRole();           // CSS ховає data-admin / data-mod
   document.querySelectorAll('.nav-item[data-admin-only]').forEach(el => {
     el.style.display = isAdmin ? '' : 'none';
   });
+  document.querySelectorAll('.nav-item[data-mod-only]').forEach(el => {
+    el.style.display = canModerate() ? '' : 'none';
+  });
   const uploadBtn = document.getElementById('gal-upload-btn');
-  if (uploadBtn) uploadBtn.style.display = isAdmin ? '' : 'none';
+  if (uploadBtn) uploadBtn.style.display = canModerate() ? '' : 'none';
+  if (canModerate()) { tagSuggUpdateCount(); setInterval(tagSuggUpdateCount, 60000); }
 
   // Каталог тепер потрібен незалежно від типу сховища — там же живе
   // виключення папок зі сканування (особисті файли поруч з архівом),
@@ -5710,7 +5900,7 @@ function _trashCard(x) {
       </div>
       <div class="trash-actions">
         ${x.missing ? '' : `<button class="btn btn-sm" onclick="trashRestore(${x.id})">↩ Відновити</button>`}
-        <button class="btn btn-sm btn-danger" onclick="trashPurge(${x.id})">${x.missing ? 'Прибрати запис' : 'Видалити назавжди'}</button>
+        <button class="btn btn-sm btn-danger" data-admin onclick="trashPurge(${x.id})">${x.missing ? 'Прибрати запис' : 'Видалити назавжди'}</button>
       </div>
     </div>`;
 }

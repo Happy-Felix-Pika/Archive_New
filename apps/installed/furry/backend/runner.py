@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from flask import Blueprint, Response, jsonify, request as flask_request
 
 
-from core.auth import admin_required, get_user_settings
+from core.auth import admin_required, current_role, get_user_settings, moderator_required
 from core.auth import current_user_id, login_required
 from core.jobs import (cancel_job, create_job, fail_job, finish_job,
                        list_jobs, update_progress)
@@ -22,6 +22,7 @@ bp = Blueprint("runner", __name__)
 
 
 _active_process: subprocess.Popen | None = None
+_modlog_entry = {}          # job_id -> запис у журналі модераторів (щоб дописати кінець)
 _process_lock:   threading.Lock        = threading.Lock()
 
 
@@ -94,6 +95,20 @@ def _stream_process(proc, job_id=None):
                 update_progress(job_id, message=stripped)
     proc.wait()
     _push_log(f"[{datetime.now().strftime('%H:%M:%S')}] ── Завершено (код {proc.returncode}) ──")
+    # запуск модератора: час кінця — щоб відміна знала, що саме він скачав
+    entry = _modlog_entry.pop(job_id, None) if job_id else None
+    if entry:
+        try:
+            from core import modlog
+            from core.db import _connect
+            c = _connect()
+            with c.cursor() as cur:
+                cur.execute("SELECT NOW() AS t")
+                t = cur.fetchone()["t"]
+            c.close()
+            modlog.patch_payload(entry, finished_at=t.isoformat(sep=" "))
+        except Exception as e:
+            _push_log(f"  ⚠ журнал модераторів: {e}")
     if job_id:
         if proc.returncode == 0:
             finish_job(job_id, {"код": proc.returncode, "останній рядок": last_line[:300]})
@@ -109,14 +124,27 @@ def _stream_process(proc, job_id=None):
     except Exception as e:
         _push_log(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠ Обробка після архіватора: {e}")
 
+# Що модератор може запускати: лише одного автора — скачати, знайти його
+# дублікати, перевірити пули. Повні проходи, синхронізація, очищення,
+# міграції — лише адмін.
+_MOD_FLAGS = {"artist", "find_duplicates", "recheck_pools", "subfolder", "dry_run"}
+_ADMIN_FLAGS = {"migrate", "migrate_tags", "sync_all", "cleanup", "cleanup_dry", "backfill_sizes"}
+
+
 @bp.route("/api/run", methods=["POST"])
-@admin_required
+@moderator_required
 def api_run():
     global _active_process
     with _process_lock:
         if _active_process and _active_process.poll() is None:
             return jsonify({"error": "Архиватор вже запущено"}), 409
         body  = flask_request.get_json(silent=True) or {}
+        role  = current_role()
+        if role != "admin":
+            if not (body.get("artist") or "").strip():
+                return jsonify({"error": "Модератор запускає архіватор лише для одного автора"}), 403
+            if any(body.get(k) for k in _ADMIN_FLAGS):
+                return jsonify({"error": "Синхронізація, очищення й міграції — лише для адміна"}), 403
         flags = ["--user-id", "1"]
         if body.get("dry_run"):      flags.append("--dry-run")
         if body.get("migrate"):      flags.append("--migrate")
@@ -145,6 +173,19 @@ def api_run():
             )
             _active_process = proc
             job_id = create_job("furry.run", {"flags": flags}, user_id=current_user_id())
+            if role == "moderator":
+                from core import modlog
+                from core.db import get_db, q
+                started = q(get_db(), "SELECT NOW() AS t")["t"]
+                what = ("перевірка пулів" if body.get("recheck_pools") else
+                        "пошук дублікатів" if body.get("find_duplicates") else "скачування")
+                entry = modlog.record("archiver.run", f"{what}: «{body['artist']}»",
+                                      {"artist": str(body["artist"]).strip().lstrip("@"),
+                                       "started_at": started.isoformat(sep=" "), "job_id": job_id,
+                                       "kind": what},
+                                      undoable=not body.get("dry_run") and not body.get("find_duplicates"))
+                if entry:
+                    _modlog_entry[job_id] = entry
             threading.Thread(target=_stream_process, args=(proc, job_id), daemon=True).start()
             return jsonify({"ok": True, "pid": proc.pid, "job_id": job_id})
         except Exception as e:
@@ -161,7 +202,7 @@ def api_stop():
         return jsonify({"ok": True})
 
 @bp.route("/api/status")
-@admin_required
+@moderator_required
 def api_status():
     with _process_lock:
         running = bool(_active_process and _active_process.poll() is None)
@@ -180,7 +221,7 @@ def api_logs_clear():
     return jsonify({"ok": True})
 
 @bp.route("/api/logs/stream")
-@admin_required
+@moderator_required
 def api_logs_stream():
     def generate():
         try:

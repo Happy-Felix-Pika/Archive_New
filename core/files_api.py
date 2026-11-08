@@ -254,10 +254,10 @@ def trash_folder(rel_path, user_id=None) -> dict:
     if not storage.exists(rel_path):
         raise TrashError("Теку не знайдено")
 
-    done, errors = 0, []
+    done, errors, ids = 0, [], []
     for f in storage.walk_files(rel_path):
         try:
-            trash_path(f, user_id)
+            ids.append((f, trash_path(f, user_id)))
             done += 1
         except Exception as e:
             errors.append({"path": f, "error": str(e)})
@@ -266,7 +266,7 @@ def trash_folder(rel_path, user_id=None) -> dict:
         removed = storage.remove_empty_dir(rel_path)
         if not removed:
             errors.append({"path": rel_path, "error": "Файли в кошику, але саму теку прибрати не вдалося"})
-    return {"trashed": done, "folder_removed": removed, "errors": errors}
+    return {"trashed": done, "folder_removed": removed, "errors": errors, "trash_ids": ids}
 
 
 # ═════════════════════════════════════════════════════════════════════

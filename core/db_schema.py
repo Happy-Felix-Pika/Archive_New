@@ -14,6 +14,42 @@ from core.db import get_db
 # ── Migrate / ensure tables exist ─────────────────────────────────────────
 
 ENSURE_TABLES_SQL = [
+    # Журнал дій модераторів: що зроблено, ким, і що потрібно, щоб це
+    # відмінити (payload). Адмін бачить журнал і відміняє одним кліком.
+    """CREATE TABLE IF NOT EXISTS mod_actions (
+        id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+        user_id     INT NOT NULL,
+        action      VARCHAR(40) NOT NULL,
+        summary     VARCHAR(500),
+        payload     LONGTEXT,
+        undoable    TINYINT(1) NOT NULL DEFAULT 1,
+        created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+        undone_at   DATETIME NULL,
+        undone_by   INT NULL,
+        undo_error  VARCHAR(500) NULL,
+        INDEX idx_created (created_at),
+        INDEX idx_user (user_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+
+    # Пропозиції тегів: користувач пропонує додати/прибрати тег у файла,
+    # модератор — видалити тег з архіву взагалі. Вирішують модератор/адмін
+    # (видалення тегу цілком — лише адмін).
+    """CREATE TABLE IF NOT EXISTS tag_suggestions (
+        id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+        action       VARCHAR(16) NOT NULL,
+        file_id      BIGINT NULL,
+        tag_id       INT NULL,
+        tag_name     VARCHAR(100) NOT NULL,
+        category     VARCHAR(20) NOT NULL DEFAULT 'other',
+        suggested_by INT NOT NULL,
+        status       VARCHAR(16) NOT NULL DEFAULT 'pending',
+        decided_by   INT NULL,
+        decided_at   DATETIME NULL,
+        created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_status (status),
+        INDEX idx_file (file_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+
     
     # downloads більше немає: файл живе у files, а прив'язка до автора
     # й поста — у furry_posts. Обидві створює міграція 001.
@@ -454,6 +490,18 @@ def ensure_tables():
                 cur.execute("ALTER TABLE users ADD COLUMN storage_mode ENUM('own','shared') DEFAULT 'shared'")
                 cur.execute("ALTER TABLE users ADD COLUMN settings_json TEXT")
                 print("  ✓ Додано колонки users.storage_mode, users.settings_json")
+
+            # ── users.role: user / moderator / admin ─────────────────────────
+            # is_admin лишається (його читає багато коду) і завжди дорівнює
+            # role='admin' — їх синхронізує зміна ролі.
+            cur.execute("""
+                SELECT COUNT(*) AS c FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND COLUMN_NAME = 'role'
+            """)
+            if cur.fetchone()['c'] == 0:
+                cur.execute("ALTER TABLE users ADD COLUMN role VARCHAR(16) NOT NULL DEFAULT 'user'")
+                cur.execute("UPDATE users SET role='admin' WHERE is_admin=1")
+                print("  ✓ Додано колонку users.role")
 
         db.commit()
         db.close()

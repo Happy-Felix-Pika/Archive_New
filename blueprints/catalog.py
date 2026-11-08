@@ -6,7 +6,7 @@ import mimetypes, os
 from flask import Blueprint, Response, jsonify, request as flask_request, send_file
 
 
-from core.auth import admin_required, current_user_id, get_user_nc_config, get_user_settings, is_current_user_admin, merge_user_settings
+from core.auth import admin_required, moderator_required, current_user_id, get_user_nc_config, get_user_settings, is_current_user_admin, merge_user_settings
 from core.db import get_db, qq
 from core.imgcache import _IMG_CACHE_DIR
 from core.storage_api import StorageError, get_storage
@@ -222,27 +222,32 @@ def _catalog_paths(body) -> list | None:
 
 
 @bp.route("/api/catalog/delete", methods=["POST"])
-@admin_required
+@moderator_required
 def api_catalog_delete():
     """Файли з каталогу — у кошик (з бази теж: тегі, автор, улюблене зберігаються у знімку)."""
     from core.files_api import TrashError, trash_path
     paths = _catalog_paths(flask_request.get_json(silent=True) or {})
     if not paths:
         return jsonify({"error": "Не вказано файли"}), 400
-    done, errors = [], []
+    done, errors, items = [], [], []
     for p in paths:
         try:
-            trash_path(p, current_user_id())
+            tid = trash_path(p, current_user_id())
             done.append(p)
+            items.append({"path": p, "trash_id": tid})
         except TrashError as e:
             errors.append({"path": p, "error": str(e)})
         except Exception as e:
             errors.append({"path": p, "error": str(e)})
+    if items:
+        from core import modlog
+        names = ", ".join(i["path"].rsplit("/", 1)[-1] for i in items[:3]) + ("…" if len(items) > 3 else "")
+        modlog.record("file.trash", f"{len(items)} файл(ів): {names}", {"items": items})
     return jsonify({"ok": not errors, "done": done, "errors": errors})
 
 
 @bp.route("/api/catalog/mkdir", methods=["POST"])
-@admin_required
+@moderator_required
 def api_catalog_mkdir():
     """Нова тека в каталозі (можна одразу вкладену: «Документи/2026»)."""
     from blueprints.upload import _safe_folder
@@ -256,6 +261,8 @@ def api_catalog_mkdir():
             return jsonify({"error": f"«{rel}» уже існує"}), 409
         if not st.mkdir(rel):
             return jsonify({"error": "Не вдалося створити теку"}), 500
+        from core import modlog
+        modlog.record("folder.create", rel, {"path": rel})
         return jsonify({"ok": True, "path": rel})
     except StorageError as e:
         return jsonify({"error": str(e)}), 400
@@ -264,7 +271,7 @@ def api_catalog_mkdir():
 
 
 @bp.route("/api/catalog/delete-folder", methods=["POST"])
-@admin_required
+@moderator_required
 def api_catalog_delete_folder():
     """
     Видалити теку: усі файли з неї (і з підтек) — у кошик, потім порожня тека.
@@ -287,6 +294,12 @@ def api_catalog_delete_folder():
                 return jsonify({"error": " ".join(problems)}), 409
             return jsonify({"ok": True, "files": len(st.walk_files(rel))})
         res = trash_folder(rel, current_user_id())
+        if res.get("trash_ids") or res.get("folder_removed"):
+            from core import modlog
+            modlog.record("folder.trash", f"{rel} ({res['trashed']} файл(ів))",
+                          {"folder": rel, "items": [{"path": p, "trash_id": t}
+                                                    for p, t in res.get("trash_ids", [])]})
+        res.pop("trash_ids", None)
         return jsonify({"ok": not res["errors"], **res})
     except TrashError as e:
         return jsonify({"error": str(e)}), 409
@@ -297,7 +310,7 @@ def api_catalog_delete_folder():
 
 
 @bp.route("/api/catalog/move", methods=["POST"])
-@admin_required
+@moderator_required
 def api_catalog_move():
     """Перемістити файли в іншу теку — і в сховищі, і в базі (files.rel_path)."""
     from core.files_api import MoveError, move_path
@@ -308,14 +321,29 @@ def api_catalog_move():
         return jsonify({"error": "Не вказано файли"}), 400
     if dest is None:
         return jsonify({"error": "Недопустима тека призначення"}), 400
-    done, errors = [], []
+    from core import events, modlog
+    from core.files_api import find_file_by_path
+    done, errors, items = [], [], []
     for p in paths:
         try:
-            done.append({"from": p, "to": move_path(p, dest)})
+            # знімок даних застосунків (автор, пул, сторінка) — щоб відміна
+            # повернула їх, а не лише сам файл
+            snap, fid = None, None
+            row = find_file_by_path(p)
+            if row:
+                fid = row["id"]
+                db = get_db()
+                snap = events.apply_filters("file.trash", {}, file_id=fid, db=db) or {}
+            to = move_path(p, dest)
+            done.append({"from": p, "to": to})
+            if to != p:
+                items.append({"from": p, "to": to, "file_id": fid, "snapshot": snap})
         except MoveError as e:
             errors.append({"path": p, "error": str(e)})
         except Exception as e:
             errors.append({"path": p, "error": str(e)})
+    if items:
+        modlog.record("file.move", f"{len(items)} файл(ів) → {dest or 'корінь'}", {"items": items})
     return jsonify({"ok": not errors, "done": done, "errors": errors})
 
 
