@@ -17,7 +17,7 @@ def current_user():
         return None
     try:
         db = get_db()
-        user = q(db, "SELECT id, email, display_name, is_admin, setup_done FROM users WHERE id=%s", (uid,))
+        user = q(db, "SELECT id, email, display_name, is_admin, setup_done, role FROM users WHERE id=%s", (uid,))
         db.close()
         return user
     except Exception:
@@ -60,6 +60,53 @@ def admin_required(f):
             return jsonify({"error": str(e)}), 500
         if not user or not user.get("is_admin"):
             return jsonify({"error": "Потрібні права адміністратора"}), 403
+        return f(*args, **kwargs)
+    return wrapper
+
+
+# ── Ролі ──────────────────────────────────────────────────────────────────
+#
+#   user       — перегляд, улюблене, «Онлайн», чат; теги лише ПРОПОНУЄ.
+#   moderator  — завантаження, переміщення, видалення в кошик, теги, черга
+#                «На перевірку» (по одній парі), пули, запуск архіватора для
+#                одного автора. Не стирає назавжди, не має масових дій і
+#                налаштувань. Усе, що він робить, пишеться в журнал (core.modlog).
+#   admin      — усе.
+
+ROLES = ("user", "moderator", "admin")
+
+
+def current_role() -> str:
+    """Роль поточного користувача ('user' без сесії теж)."""
+    uid = session.get("user_id")
+    if not uid:
+        return "user"
+    try:
+        db = get_db()
+        u = q(db, "SELECT is_admin, role FROM users WHERE id=%s", (uid,))
+        db.close()
+    except Exception:
+        return "user"
+    if not u:
+        return "user"
+    if u.get("is_admin"):
+        return "admin"
+    return u.get("role") if u.get("role") in ROLES else "user"
+
+
+def is_current_user_moderator() -> bool:
+    """Модератор АБО адмін — тобто може модерувати."""
+    return current_role() in ("moderator", "admin")
+
+
+def moderator_required(f):
+    """Декоратор: модератор або адмін, інакше 403."""
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if not session.get("user_id"):
+            return jsonify({"error": "Потрібна авторизація"}), 401
+        if current_role() not in ("moderator", "admin"):
+            return jsonify({"error": "Потрібні права модератора"}), 403
         return f(*args, **kwargs)
     return wrapper
 

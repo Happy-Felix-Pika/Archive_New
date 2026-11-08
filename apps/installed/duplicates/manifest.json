@@ -27,7 +27,11 @@
       "icon": "⏳",
       "order": 25,
       "page_id": "pending",
-      "admin_only": true
+      "admin_only": true,
+      "roles": [
+        "admin",
+        "moderator"
+      ]
     }
   ],
   "pages": [],

@@ -5,6 +5,7 @@ import time
 from flask import Blueprint, jsonify, request as flask_request
 
 
+from core.auth import moderator_required
 from core.db import get_db, qq
 
 bp = Blueprint("tags", __name__)
@@ -60,34 +61,87 @@ def api_tags_list():
 
 @bp.route("/api/tags", methods=["POST"])
 def api_tags_create():
-    body     = flask_request.get_json(silent=True) or {}
-    name     = (body.get("name") or "").strip().lower()[:100]
-    category = body.get("category") or "other"
-    if name not in ("character","species","general","other"):
-        category = "other"
-    if not name:
-        return jsonify({"error": "name required"}), 400
+    """Новий тег (без файлу) — модератор або адмін. Користувач пропонує теги
+    до конкретних файлів."""
+    from core.auth import current_role
+    from core.tagops import TagError, create_tag
+    if current_role() == "user":
+        return jsonify({"error": "Тег можна лише запропонувати — до конкретного файлу"}), 403
+    body = flask_request.get_json(silent=True) or {}
     try:
-        db = get_db()
-        with db.cursor() as cur:
-            cur.execute("INSERT IGNORE INTO tags (name, category) VALUES (%s,%s)", (name, category))
-            cur.execute("SELECT id, name, category FROM tags WHERE name=%s", (name,))
-            tag = cur.fetchone()
-        db.commit(); db.close()
-        _invalidate_tags_cache()
-        return jsonify(tag)
+        return jsonify(create_tag(body.get("name"), body.get("category") or "other"))
+    except TagError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 @bp.route("/api/tags/<int:tag_id>", methods=["DELETE"])
 def api_tags_delete(tag_id):
+    """
+    Видалити тег з архіву цілком (з усіх файлів одразу) — лише адмін.
+    Модератор це пропонує: пропозиція чекає на адміна.
+    """
+    from core.auth import current_role, current_user_id
+    from core.tagops import TagError, delete_tag, suggest
+    role = current_role()
     try:
-        db = get_db()
-        with db.cursor() as cur:
-            cur.execute("DELETE FROM tags WHERE id=%s", (tag_id,))
-        db.commit(); db.close()
-        _invalidate_tags_cache()
-        return jsonify({"ok": True})
+        if role == "admin":
+            delete_tag(tag_id)
+            return jsonify({"ok": True})
+        if role == "moderator":
+            s = suggest("delete_tag", current_user_id(), tag_id=tag_id)
+            return jsonify({"ok": True, "suggested": True, "suggestion": s})
+        return jsonify({"error": "Видаляти теги може лише адмін"}), 403
+    except TagError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# ── Пропозиції тегів ─────────────────────────────────────────────────
+
+@bp.route("/api/tag-suggestions")
+@moderator_required
+def api_tag_suggestions_list():
+    from core.auth import current_role
+    from core.tagops import list_pending
+    is_admin = current_role() == "admin"
+    items = list_pending()
+    for s in items:
+        s["can_decide"] = is_admin or s["action"] != "delete_tag"
+    return jsonify({"items": items})
+
+
+@bp.route("/api/tag-suggestions/count")
+@moderator_required
+def api_tag_suggestions_count():
+    from core.auth import current_role
+    from core.tagops import pending_count
+    return jsonify({"count": pending_count(include_delete_tag=current_role() == "admin")})
+
+
+@bp.route("/api/tag-suggestions/<int:sid>/<verdict>", methods=["POST"])
+@moderator_required
+def api_tag_suggestions_decide(sid, verdict):
+    from core.auth import current_role, current_user_id
+    from core.tagops import TagError, decide
+    if verdict not in ("accept", "reject"):
+        return jsonify({"error": "accept або reject"}), 400
+    try:
+        decide(sid, verdict == "accept", current_user_id(), current_role())
+        return jsonify({"ok": True})
+    except TagError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/api/tag-suggestions/<int:sid>", methods=["DELETE"])
+def api_tag_suggestions_withdraw(sid):
+    """Відкликати свою пропозицію, поки її не вирішили."""
+    from core.auth import current_user_id
+    from core.tagops import withdraw
+    if not withdraw(sid, current_user_id()):
+        return jsonify({"error": "Пропозицію не знайдено або її вже вирішено"}), 404
+    return jsonify({"ok": True})

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Archive</title>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/dashboard.css?v=54">
+<link rel="stylesheet" href="/static/dashboard.css?v=55">
 <script src="https://unpkg.com/@ruffle-rs/ruffle"></script>
 </head>
 <body>
@@ -186,7 +186,8 @@
     <div class="nav-item" data-page="catalog"><span class="nav-icon">📁</span> <span data-i18n="nav.catalog">Каталог</span></div>
     <div class="nav-item" data-page="config" data-admin-only="1"><span class="nav-icon">⚙</span> <span data-i18n="nav.config">Конфіг</span></div>    <div class="nav-item" data-page="access-codes" data-admin-only="1"><span class="nav-icon">🔑</span> <span data-i18n="nav.codes">Коди допуску</span></div>
     <div class="nav-item" data-page="apps" data-admin-only="1"><span class="nav-icon">🧩</span> <span data-i18n="nav.apps">Застосунки</span></div>
-    <div class="nav-item" data-page="trash" data-admin-only="1"><span class="nav-icon">🗑</span> <span data-i18n="nav.trash">Кошик</span></div>
+    <div class="nav-item" data-page="modlog" data-admin-only="1"><span class="nav-icon">📜</span> <span>Журнал модераторів</span></div>
+    <div class="nav-item" data-page="trash" data-mod-only="1"><span class="nav-icon">🗑</span> <span data-i18n="nav.trash">Кошик</span></div>
   </nav>
   <div class="sidebar-bottom">
     <div style="display:flex;gap:6px;margin-bottom:10px">
@@ -273,12 +274,12 @@
           <button class="filter-btn active" data-sort="files" onclick="artistsSetSort('files')">По файлах</button>
           <button class="filter-btn" data-sort="size" onclick="artistsSetSort('size')">По вазі</button>
         </div>
-        <button class="btn btn-ghost btn-sm" onclick="artistsBulkAutoUpdate(true)" title="Увімкнути авто-оновлення для всіх">⏰ Обрати всіх</button>
-        <button class="btn btn-ghost btn-sm" onclick="artistsBulkAutoUpdate(false)" title="Вимкнути авто-оновлення для всіх">⏰ Зняти всіх</button>
+        <button class="btn btn-ghost btn-sm" data-admin onclick="artistsBulkAutoUpdate(true)" title="Увімкнути авто-оновлення для всіх">⏰ Обрати всіх</button>
+        <button class="btn btn-ghost btn-sm" data-admin onclick="artistsBulkAutoUpdate(false)" title="Вимкнути авто-оновлення для всіх">⏰ Зняти всіх</button>
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th data-i18n="th.artist">Автор</th><th data-i18n="th.folder">Папка</th><th>E621</th><th>Inkbunny</th><th data-i18n="th.total">Всього</th><th>Вага</th><th data-i18n="th.pending">На пер.</th><th data-i18n="th.last">Останнє</th><th title="Авто-оновлення щодня">⏰</th><th></th></tr></thead>
+          <thead><tr><th data-i18n="th.artist">Автор</th><th data-i18n="th.folder">Папка</th><th>E621</th><th>Inkbunny</th><th data-i18n="th.total">Всього</th><th>Вага</th><th data-i18n="th.pending">На пер.</th><th data-i18n="th.last">Останнє</th><th title="Авто-оновлення щодня">⏰</th><th data-admin></th></tr></thead>
           <tbody id="artists-tbody"></tbody>
         </table>
       </div>
@@ -313,15 +314,15 @@
     <!-- RUNNER -->
     <div class="page" id="page-runner">
       <div class="run-controls mb-4">
-        <button class="btn btn-primary" id="btn-run"     onclick="runArchiver(false,false)" data-i18n="btn.run">▶ Запустити</button>
-        <button class="btn btn-ghost"   id="btn-dry"     onclick="runArchiver(true,false)" data-i18n="btn.dry">▷ Dry Run</button>
-        <button class="btn btn-ghost"   id="btn-sync"          onclick="runSync()" data-i18n="btn.sync">🔄 Синхронізація</button>
-        <button class="btn btn-ghost"   id="btn-migrate-tags" onclick="runMigrateTags()" data-i18n="btn.migratetags">🏷 Міграція тегів</button>
-        <button class="btn btn-ghost"   id="btn-find-dup"     onclick="runFindDuplicates()" data-i18n="btn.finddup">🔍 Дублікати (усі автори)</button>
-        <button class="btn btn-ghost"   id="btn-backfill-sizes" onclick="runBackfillSizes()" data-i18n="btn.backfillsizes">⚖ Довантажити вагу</button>
-        <button class="btn btn-danger"  id="btn-cleanup"      onclick="runCleanup(false)" data-i18n="btn.cleanup">🗑 Cleanup БД</button>
-        <button class="btn btn-danger"  id="btn-stop"    onclick="stopArchiver()" data-i18n="btn.stop">■ Стоп</button>
-        <button class="btn btn-ghost"   onclick="clearLog()" data-i18n="btn.clearlog">✕ Очистити лог</button>
+        <button class="btn btn-primary" data-admin id="btn-run"     onclick="runArchiver(false,false)" data-i18n="btn.run">▶ Запустити</button>
+        <button class="btn btn-ghost"   data-admin id="btn-dry"     onclick="runArchiver(true,false)" data-i18n="btn.dry">▷ Dry Run</button>
+        <button class="btn btn-ghost"   data-admin id="btn-sync"          onclick="runSync()" data-i18n="btn.sync">🔄 Синхронізація</button>
+        <button class="btn btn-ghost"   data-admin id="btn-migrate-tags" onclick="runMigrateTags()" data-i18n="btn.migratetags">🏷 Міграція тегів</button>
+        <button class="btn btn-ghost"   data-admin id="btn-find-dup"     onclick="runFindDuplicates()" data-i18n="btn.finddup">🔍 Дублікати (усі автори)</button>
+        <button class="btn btn-ghost"   data-admin id="btn-backfill-sizes" onclick="runBackfillSizes()" data-i18n="btn.backfillsizes">⚖ Довантажити вагу</button>
+        <button class="btn btn-danger"  data-admin id="btn-cleanup"      onclick="runCleanup(false)" data-i18n="btn.cleanup">🗑 Cleanup БД</button>
+        <button class="btn btn-danger"  data-admin id="btn-stop"    onclick="stopArchiver()" data-i18n="btn.stop">■ Стоп</button>
+        <button class="btn btn-ghost" data-admin onclick="clearLog()" data-i18n="btn.clearlog">✕ Очистити лог</button>
       </div>
       <div class="terminal" id="log-terminal">
         <div class="log-line" style="color:var(--muted)" data-i18n="label.waiting">Очікування запуску…</div>
@@ -398,7 +399,7 @@
           <div style="font-weight:600;font-size:14px" data-i18n="gal.tagmanage">Управління тегами</div>
           <button class="btn btn-ghost btn-sm" onclick="document.getElementById('tag-modal').style.display='none'">✕</button>
         </div>
-        <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">
+        <div data-mod style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">
           <input id="new-tag-name" data-i18n-ph="gal.tagname" placeholder="Назва тегу" style="flex:1;min-width:120px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:13px;color:var(--text);outline:none">
           <select id="new-tag-cat" style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-family:var(--mono);font-size:12px;color:var(--text);outline:none">
             <option value="character" data-i18n="gal.character">Персонаж</option>
@@ -633,17 +634,19 @@
         <div class="filter-toggle" id="pending-tab-toggle">
           <button class="filter-btn active" data-tab="files" onclick="pendingSetTab('files')" data-i18n="pending.tabfiles">📄 Файли</button>
           <button class="filter-btn" data-tab="duplicates" onclick="pendingSetTab('duplicates')" data-i18n="pending.tabdup">🔍 Дублікати</button>
+          <button class="filter-btn" data-tab="tags" onclick="pendingSetTab('tags')">🏷 Теги <span id="tagsugg-count"></span></button>
         </div>
         <button class="btn btn-ghost" onclick="pendingRefreshCurrentTab()" data-i18n="btn.refresh">↻ Оновити</button>
-        <button class="btn btn-sm" id="btn-reject-near" onclick="rejectNearDuplicates()" style="display:none">⚡ Відхилити близькі</button>
-        <button class="btn btn-danger btn-sm" id="btn-reject-all" onclick="rejectAll()" style="display:none" data-i18n="pending.rejectall">✕ Відхилити всі</button>
-        <button class="btn btn-danger btn-sm" id="btn-clear-dup" onclick="dupTabClearAll()" style="display:none" data-i18n="pending.clearalldup">🗑 Очистити список</button>
-        <button class="btn btn-sm" id="btn-scan-all" onclick="dupScanWholeArchive()" style="display:none">🔎 Шукати по всьому архіву</button>
-        <button class="btn btn-sm" id="btn-auto-resolve" onclick="dupAutoResolve()" style="display:none">⚡ Розібрати оптом</button>
+        <button class="btn btn-sm" data-admin id="btn-reject-near" onclick="rejectNearDuplicates()" style="display:none">⚡ Відхилити близькі</button>
+        <button class="btn btn-danger btn-sm" data-admin id="btn-reject-all" onclick="rejectAll()" style="display:none" data-i18n="pending.rejectall">✕ Відхилити всі</button>
+        <button class="btn btn-danger btn-sm" data-admin id="btn-clear-dup" onclick="dupTabClearAll()" style="display:none" data-i18n="pending.clearalldup">🗑 Очистити список</button>
+        <button class="btn btn-sm" data-admin id="btn-scan-all" onclick="dupScanWholeArchive()" style="display:none">🔎 Шукати по всьому архіву</button>
+        <button class="btn btn-sm" data-admin id="btn-auto-resolve" onclick="dupAutoResolve()" style="display:none">⚡ Розібрати оптом</button>
         <span class="pending-counter" id="pending-count"></span>
       </div>
       <div id="pending-list"></div>
       <div id="duplicates-list" style="display:none"></div>
+      <div id="tagsugg-list" style="display:none"></div>
     </div>
 
     <!-- CONFIG -->
@@ -777,12 +780,30 @@
       </div>
     </div>
 
+    <div class="page" id="page-modlog">
+      <div class="card">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px">
+          <div style="font-weight:600">Журнал модераторів</div>
+          <select id="modlog-user" onchange="modlogLoad(0)" style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-family:var(--mono);font-size:12px">
+            <option value="">усі модератори</option>
+          </select>
+          <label style="font-size:12px"><input type="checkbox" id="modlog-active" onchange="modlogLoad(0)"> лише не відмінені</label>
+          <span id="modlog-summary" class="muted" style="font-size:12px;margin-left:auto"></span>
+        </div>
+        <div class="muted" style="font-size:12px;margin-bottom:12px">
+          Усе, що роблять модератори. «↩ Відмінити» повертає як було: файл — з кошика на місце, переміщене — назад,
+          теги, пули й рішення в черзі «На перевірку» — до попереднього стану.
+        </div>
+        <div id="modlog-list"></div>
+      </div>
+    </div>
+
     <div class="page" id="page-trash">
       <div class="card">
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px">
           <div style="font-weight:600">Кошик</div>
           <div class="muted" id="trash-summary" style="font-size:12px"></div>
-          <button class="btn btn-sm btn-danger" id="btn-trash-empty" onclick="trashEmpty()" style="margin-left:auto;display:none">Очистити кошик</button>
+          <button class="btn btn-sm btn-danger" data-admin id="btn-trash-empty" onclick="trashEmpty()" style="margin-left:auto;display:none">Очистити кошик</button>
         </div>
         <div class="muted" style="font-size:12px;margin-bottom:12px">
           Видалені файли лежать тут, доки їх не прибрати назавжди. Відновлення повертає файл
@@ -950,7 +971,7 @@
 
 </div><!-- /#app-shell -->
 
-<script src="/static/dashboard.js?v=68"></script>
+<script src="/static/dashboard.js?v=69"></script>
 <script src="/static/apps.js?v=6"></script>
 
 </body>

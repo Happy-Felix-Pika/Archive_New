@@ -482,7 +482,9 @@ def channels_list():
     me = _uid()
     for r in rows:
         r["mine"] = r["user_id"] == me
-    return jsonify({"items": rows, "is_admin": _is_admin()})
+    from core.auth import current_role
+    return jsonify({"items": rows, "is_admin": _is_admin(),
+                    "can_run": current_role() in ("moderator", "admin")})
 
 
 @bp.route("/channels", methods=["POST"])

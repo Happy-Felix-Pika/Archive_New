@@ -290,7 +290,7 @@ class AppManager:
 
     # ── інтерфейс ────────────────────────────────────────────
 
-    def ui(self, lang="uk", is_admin=False) -> dict:
+    def ui(self, lang="uk", is_admin=False, role=None) -> dict:
         """Пункти меню й сторінки увімкнених застосунків — з маніфестів."""
         menu, pages = [], []
         for aid, a in self.apps.items():
@@ -298,7 +298,13 @@ class AppManager:
                 continue
             m = a["manifest"]
             for item in m.get("menu", []):
-                if item.get("admin_only") and not is_admin:
+                # "roles": ["admin","moderator"] — кому видно пункт; без нього
+                # діє старе admin_only (лише адмін)
+                role = role or ("admin" if is_admin else "user")
+                if item.get("roles"):
+                    if role not in item["roles"]:
+                        continue
+                elif item.get("admin_only") and not is_admin:
                     continue
                 label = item.get("label")
                 if isinstance(label, dict):

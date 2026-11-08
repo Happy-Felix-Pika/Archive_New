@@ -107,6 +107,11 @@ def create_app() -> Flask:
     from core.db import close_shared_db
     app.teardown_appcontext(close_shared_db)
 
+    # Журнал модераторів: що з дій ядра вміє відмінятись
+    from core import modlog_core, tagops
+    modlog_core.register_all()
+    tagops.register_undo()
+
     import importlib
     for name in BLUEPRINT_MODULES:
         mod = importlib.import_module(f"blueprints.{name}")

@@ -16,7 +16,8 @@ import re
 from flask import Blueprint, jsonify, request as flask_request
 
 from core import events, media
-from core.auth import admin_required
+from core.auth import moderator_required
+from core import modlog
 from core.db import get_db
 from core.storage_api import get_storage
 
@@ -50,7 +51,7 @@ def _safe_folder(folder: str) -> str | None:
 
 
 @bp.route("/api/upload", methods=["POST"])
-@admin_required
+@moderator_required
 def api_upload_file():
     f = flask_request.files.get("file")
     if not f or not f.filename:
@@ -121,6 +122,9 @@ def api_upload_file():
             _invalidate_tags_cache()
         except Exception:
             pass
+
+        modlog.record("file.upload", f"«{filename}» → {folder or 'корінь'}",
+                      {"file_id": file_id, "rel_path": rel_path})
 
         # download_id — стара назва поля, фронтенд на неї розраховує
         return jsonify({"ok": True, "id": file_id, "download_id": file_id,

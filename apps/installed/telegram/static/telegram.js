@@ -8,6 +8,7 @@ const TG_API = '/api/apps/telegram';
 let _tgRoot = null;
 let _tgArtists = [];
 let _tgIsAdmin = false;
+let _tgCanRun = false;
 
 function _tgEsc(s) { return (typeof esc === 'function') ? esc(s) : String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function _tgToast(m, k) { if (typeof toast === 'function') toast(m, k); else alert(m); }
@@ -407,6 +408,7 @@ async function tgLoadChannels() {
   catch (e) { el.innerHTML = `<div style="color:var(--red)">${_tgEsc(e.message)}</div>`; return; }
   _tgChannels = d.items || [];
   _tgIsAdmin = !!d.is_admin;
+  _tgCanRun = !!d.can_run;
   tgRenderChips();
   if (!_tgChannels.length) {
     el.innerHTML = '<div class="muted">Каналів ще немає.</div>';
@@ -431,7 +433,7 @@ async function tgLoadChannels() {
         </td>
         <td style="white-space:nowrap;text-align:right">
           ${c.mine ? `<button class="btn btn-ghost btn-sm" title="Переглянути канал у вкладці «Онлайн»" onclick="tgView(${c.id})">👁</button>` : ''}
-          ${_tgIsAdmin ? `<button class="btn btn-ghost btn-sm" title="Скачати нове зараз" onclick="tgCheckNow(${c.id})">▶</button>` : ''}
+          ${_tgCanRun ? `<button class="btn btn-ghost btn-sm" title="Скачати нове зараз" onclick="tgCheckNow(${c.id})">▶</button>` : ''}
           <button class="btn btn-ghost btn-sm" title="Налаштування" onclick="tgEdit(${c.id})">✎</button>
           <button class="btn btn-ghost btn-sm" style="color:var(--red)" title="Відвʼязати" onclick="tgDelete(${c.id})">🗑</button>
         </td>

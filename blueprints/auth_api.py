@@ -85,7 +85,7 @@ def api_auth_login():
 
     try:
         db   = get_db()
-        user = q(db, "SELECT id, password_hash, is_admin, setup_done FROM users WHERE email=%s", (email,))
+        user = q(db, "SELECT id, password_hash, is_admin, setup_done, role FROM users WHERE email=%s", (email,))
         if not user or not check_password_hash(user["password_hash"], pwd):
             db.close()
             return jsonify({"error": "Невірний email або пароль"}), 401
@@ -99,6 +99,7 @@ def api_auth_login():
         session["user_id"] = user["id"]
         return jsonify({"ok": True, "user_id": user["id"],
                         "is_admin": bool(user["is_admin"]),
+                        "role": "admin" if user["is_admin"] else (user.get("role") or "user"),
                         "setup_done": bool(user["setup_done"])})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -122,6 +123,7 @@ def api_auth_me():
         "email":         user["email"],
         "display_name":  user["display_name"],
         "is_admin":      bool(user["is_admin"]),
+        "role":          "admin" if user["is_admin"] else (user.get("role") or "user"),
         "setup_done":    bool(user["setup_done"]),
     })
 

@@ -35,7 +35,8 @@ def api_app_disable(app_id):
 def api_apps_ui():
     """Меню й сторінки для фронтенду — інтерфейс будується з цього."""
     lang = (flask_request.args.get("lang") or "uk")[:5]
-    return jsonify(manager.ui(lang=lang, is_admin=is_current_user_admin()))
+    from core.auth import current_role
+    return jsonify(manager.ui(lang=lang, is_admin=is_current_user_admin(), role=current_role()))
 
 
 @bp.route("/apps/<app_id>/<path:filename>")

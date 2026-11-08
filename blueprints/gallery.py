@@ -188,6 +188,13 @@ def api_gallery_meta(download_id):
             "stream_url":  f"/api/gallery/stream/{download_id}",
             "tags":        list(tags),
         }
+        # Невирішені пропозиції тегів: користувач бачить свої, модератор — усі
+        try:
+            from core.auth import is_current_user_moderator
+            from core.tagops import for_file
+            data["tag_suggestions"] = for_file(download_id, None if is_current_user_moderator() else user_id)
+        except Exception:
+            data["tag_suggestions"] = []
         data = events.apply_filters("file.meta", data, file_id=download_id, db=db)
         db.close()
         return jsonify(data)
