@@ -1,0 +1,12 @@
+{
+ "_about": "English для застосунку e621: українська фраза з коду → переклад.",
+ "API-ключ (Профіль → API Access)": "API key (Profile → API Access)",
+ "Pool {0} не знайдено на e621 (можливо видалений)": "Pool {0} not found on e621 (maybe deleted)",
+ "Виключити теги": "Exclude tags",
+ "Джерело e621 для вкладки «Онлайн»: пошук, серії, улюблене": "e621 source for the «Online» tab: search, series, favorites",
+ "Не вдалося звернутись до e621": "Failed to reach e621",
+ "Не вказано юзернейм e621": "e621 username not specified",
+ "Теги e621 (rating:safe order:score": "e621 tags (rating:safe order:score",
+ "чиєсь улюблене (юзернейм)": "someone's favorites (username)",
+ "юзернейм e621": "e621 username"
+}

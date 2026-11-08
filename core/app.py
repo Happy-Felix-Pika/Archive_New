@@ -103,6 +103,17 @@ def create_app() -> Flask:
                     {"Content-Type": "text/plain; charset=utf-8"})
         return send_from_directory(BASE_DIR, "dashboard.html")
 
+    @app.route("/i18n.js")
+    def i18n_bundle():
+        """Переклади ядра й застосунків одним скриптом (див. core/i18n.py)."""
+        from flask import Response
+        from core.i18n import bundle_js
+        js, etag = bundle_js()
+        if flask_request.if_none_match.contains(etag):
+            return Response(status=304, headers={"ETag": f'"{etag}"'})
+        return Response(js, mimetype="application/javascript",
+                        headers={"ETag": f'"{etag}"', "Cache-Control": "no-cache"})
+
     # спільне з'єднання з базою живе рівно стільки, скільки сам запит
     from core.db import close_shared_db
     app.teardown_appcontext(close_shared_db)

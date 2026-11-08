@@ -16,6 +16,7 @@ COPY main.py dashboard.html furry_archiver.py migrate_production.py ./
 COPY core/        ./core/
 COPY blueprints/  ./blueprints/
 COPY static/      ./static/
+COPY locales/     ./locales/
 COPY migrations/  ./migrations/
 
 # застосунки (furry, дублікати, чат, онлайн, e621, inkbunny)

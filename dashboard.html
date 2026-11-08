@@ -744,7 +744,7 @@
 
       <div id="chat-thread-view" style="display:none">
         <div class="back-btn" onclick="chatBackToList()">← Назад до розмов</div>
-        <div style="font-weight:600;font-size:15px;margin-bottom:12px" id="chat-thread-title"></div>
+        <div style="font-weight:600;font-size:15px;margin-bottom:12px" id="chat-thread-title" data-no-i18n></div>
         <div id="chat-thread-messages" style="display:flex;flex-direction:column;gap:8px;max-height:60vh;overflow-y:auto;padding:4px;margin-bottom:12px"></div>
         <div style="display:flex;gap:8px">
           <input type="text" id="chat-input" placeholder="Повідомлення…" onkeydown="if(event.key==='Enter')chatSendMessage()"
@@ -971,7 +971,9 @@
 
 </div><!-- /#app-shell -->
 
-<script src="/static/dashboard.js?v=70"></script>
+<script src="/i18n.js"></script>
+<script src="/static/i18n.js?v=1"></script>
+<script src="/static/dashboard.js?v=71"></script>
 <script src="/static/apps.js?v=6"></script>
 
 </body>
