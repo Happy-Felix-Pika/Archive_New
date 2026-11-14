@@ -316,6 +316,8 @@ def ensure_tables():
             if HAS_FURRY:
                 _ensure_index('furry_posts', 'idx_post_id2', 'post_id')
             _ensure_index('download_tags', 'idx_tag_id', 'tag_id')
+            # «за добу» на «Огляді» — без індексу це прохід усією таблицею
+            _ensure_index('files', 'idx_created', 'created_at')
 
             # Заднім числом виправляємо вже наявні записи "На перевірку",
             # у яких matched_folder_name порожній (створені до виправлення

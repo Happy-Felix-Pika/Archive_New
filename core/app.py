@@ -2,6 +2,7 @@
 
 import logging
 import os
+import time
 
 from flask import Flask, jsonify, request as flask_request, send_from_directory, session
 from flask_cors import CORS
@@ -73,6 +74,21 @@ def create_app() -> Flask:
         PERMANENT_SESSION_LIFETIME=60 * 60 * 24 * 30,  # 30 днів
     )
     CORS(app, supports_credentials=True)
+
+    # Повільні запити — у лог, щоб було видно, що саме гальмує
+    # (SSE-потік логів живе довго за задумом — його не рахуємо).
+    @app.before_request
+    def _t_start():
+        flask_request._t0 = time.monotonic()
+
+    @app.after_request
+    def _t_log(resp):
+        t0 = getattr(flask_request, "_t0", None)
+        if t0 is not None and not resp.is_streamed:
+            dt = time.monotonic() - t0
+            if dt >= 1.0:
+                print(f"  ⏱ Повільний запит: {flask_request.method} {flask_request.path} — {dt:.1f} с")
+        return resp
 
     @app.before_request
     def _require_auth():

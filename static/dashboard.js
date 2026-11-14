@@ -5183,6 +5183,13 @@ async function showAppShell() {
   document.getElementById('setup-screen').style.display  = 'none';
   document.getElementById('app-shell').style.display     = 'flex';
 
+  // Вхід пройшов — отже, база відповідає (сервер щойно читав з неї
+  // користувача). Не чекаємо на важку статистику «Огляду», щоб це показати.
+  const dbDot = document.getElementById('db-dot'), dbLabel = document.getElementById('db-label');
+  if (dbDot && dbLabel && !dbDot.classList.contains('offline')) {
+    dbDot.className = 'db-dot online'; dbLabel.textContent = 'MariaDB online';
+  }
+
   const label = document.getElementById('current-user-label');
   if (label && _currentUser) {
     label.textContent = _currentUser.email || _currentUser.display_name || '';
