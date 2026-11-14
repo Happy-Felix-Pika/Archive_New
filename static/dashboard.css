@@ -537,3 +537,31 @@ body[data-role="moderator"] [data-admin] { display:none !important; }
 .modlog-what{font-size:13px}
 .modlog-detail{font-size:12px;color:var(--muted);word-break:break-word}
 .badge-owner{background:rgba(251,191,36,.18);color:var(--yellow)}
+
+/* ── Телефон ──────────────────────────────────────────────────────────
+   Те, що на вузькому екрані вилазило за край або обрізалось. */
+@media (max-width: 860px) {
+  /* меню — прокручується, щоб низ (мови, вихід) завжди був досяжним */
+  .sidebar{overflow-y:auto;height:100dvh;padding-top:calc(24px + env(safe-area-inset-top));padding-bottom:calc(16px + env(safe-area-inset-bottom))}
+  /* картки «Огляду» (Топ авторів тощо) не розпирають сітку */
+  .overview-grid > *, .overview-grid .card{min-width:0}
+  /* вкладки-перемикачі: переносяться на новий рядок, а не обрізаються */
+  .filter-toggle{flex-wrap:wrap}
+  /* «На перевірку»: кнопки рішень переносяться, а не ховаються за край */
+  .review-header-actions{flex-wrap:wrap;flex-shrink:1}
+  .review-side{padding:14px;min-width:0}
+  /* верхня панель: залишаємо лише крапку стану, текст займав пів рядка */
+  #proc-label{display:none}
+  .topbar{padding-top:calc(12px + env(safe-area-inset-top))}
+  /* поля вводу 16px — інакше iPhone збільшує сторінку при фокусі */
+  input, select, textarea{font-size:16px}
+}
+@media (max-width: 600px) {
+  /* новий і збережений файл — один під одним, а не впритул поруч */
+  .review-body{grid-template-columns:1fr}
+  .review-side:first-child{border-right:none;border-bottom:1px solid var(--border)}
+}
+/* запущений як застосунок (з головного екрана) — без браузерних смуг */
+@media (display-mode: standalone) {
+  body{overscroll-behavior-y:none}
+}

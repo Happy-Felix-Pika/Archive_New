@@ -119,6 +119,53 @@ def create_app() -> Flask:
                     {"Content-Type": "text/plain; charset=utf-8"})
         return send_from_directory(BASE_DIR, "dashboard.html")
 
+    # ── Встановлення як застосунок (PWA) ─────────────────────────────
+    @app.route("/manifest.webmanifest")
+    def pwa_manifest():
+        """Опис застосунку для «Встановити» / «На головний екран»: назва —
+        та сама, що в Конфігу (Назва архіву)."""
+        from flask import Response
+        import json as _json
+        from core.config import load_config
+        try:
+            title = ((load_config().get("ui") or {}).get("title") or "Archive").strip()
+        except Exception:
+            title = "Archive"
+        data = {
+            "name": title,
+            "short_name": title[:12],
+            "id": "/",
+            "start_url": "/",
+            "scope": "/",
+            "display": "standalone",
+            "background_color": "#0d0f14",
+            "theme_color": "#0d0f14",
+            "icons": [
+                {"src": "/static/icons/icon-192.png", "sizes": "192x192", "type": "image/png"},
+                {"src": "/static/icons/icon-512.png", "sizes": "512x512", "type": "image/png"},
+                {"src": "/static/icons/maskable-512.png", "sizes": "512x512", "type": "image/png",
+                 "purpose": "maskable"},
+            ],
+        }
+        return Response(_json.dumps(data, ensure_ascii=False), mimetype="application/manifest+json",
+                        headers={"Cache-Control": "no-cache"})
+
+    @app.route("/sw.js")
+    def pwa_service_worker():
+        """Service worker має лежати в корені сайту, щоб діяти на весь архів."""
+        resp = send_from_directory(os.path.join(BASE_DIR, "static"), "sw.js")
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
+    @app.route("/offline.html")
+    def pwa_offline():
+        return send_from_directory(os.path.join(BASE_DIR, "static"), "offline.html")
+
+    @app.route("/favicon.ico")
+    def favicon():
+        return send_from_directory(os.path.join(BASE_DIR, "static", "icons"), "favicon-32.png",
+                                   mimetype="image/png")
+
     @app.route("/i18n.js")
     def i18n_bundle():
         """Переклади ядра й застосунків одним скриптом (див. core/i18n.py)."""

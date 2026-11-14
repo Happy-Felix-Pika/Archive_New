@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0d0f14">
+<title>Archive</title>
+<style>
+  :root { --bg:#0d0f14; --surface:#13161e; --border:#252a38; --accent:#7c6af7; --text:#e2e8f0; --muted:#64748b; }
+  * { box-sizing:border-box; margin:0; padding:0 }
+  body { background:var(--bg); color:var(--text); font-family:system-ui,-apple-system,'Segoe UI',sans-serif;
+         min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px }
+  .box { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:28px 24px;
+         max-width:360px; width:100%; text-align:center }
+  img { width:72px; height:72px; margin-bottom:16px }
+  h1 { font-size:18px; margin-bottom:8px }
+  p { color:var(--muted); font-size:14px; line-height:1.5; margin-bottom:20px }
+  button { background:var(--accent); color:#fff; border:none; border-radius:8px; padding:11px 22px;
+           font-size:15px; cursor:pointer; width:100% }
+</style>
+</head>
+<body>
+  <div class="box">
+    <img src="/static/icons/icon-192.png" alt="">
+    <h1 id="h">Немає зв'язку з архівом</h1>
+    <p id="p">Перевір інтернет. Якщо він є — можливо, сервер архіву зараз перезапускається.</p>
+    <button id="b" onclick="location.reload()">Спробувати ще раз</button>
+  </div>
+<script>
+  // словників тут немає (вони приходять із сервера, а його не чути) — тож лише англійська вручну
+  try {
+    if ((localStorage.getItem('lang') || 'uk') === 'en') {
+      document.getElementById('h').textContent = 'No connection to the archive';
+      document.getElementById('p').textContent = "Check your internet. If it's fine, the archive server may be restarting.";
+      document.getElementById('b').textContent = 'Try again';
+    }
+  } catch (e) {}
+</script>
+</body>
+</html>

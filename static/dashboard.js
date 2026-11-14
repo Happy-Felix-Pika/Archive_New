@@ -5603,6 +5603,14 @@ async function applyBranding() {
 }
 document.addEventListener('DOMContentLoaded', applyBranding);
 
+// Встановлення як застосунок: без service worker браузер не пропонує
+// «Встановити» / «На головний екран». Сам він нічого не кешує (static/sw.js).
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(e => console.warn('service worker:', e));
+  });
+}
+
 
 // ── Кошик ─────────────────────────────────────────────────────────────
 // Видалені файли потрапляють сюди, а не зникають одразу. Звідси їх можна
