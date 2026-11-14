@@ -1,6 +1,8 @@
 """Статистика архіву"""
 
 
+import time
+
 from flask import Blueprint, jsonify
 
 
@@ -10,6 +12,11 @@ from core.db import get_db, q, qq
 from core.nextcloud import get_nc_db
 
 bp = Blueprint("stats", __name__)
+
+# «Огляд» оновлюється кожні 20 с у кожного відкритого адміна, а числа там
+# змінюються повільно — рахуємо не частіше, ніж раз на _CACHE_TTL секунд.
+_CACHE_TTL = 15
+_cache = {"at": 0.0, "data": None}
 
 
 @bp.route("/api/stats")
@@ -27,6 +34,9 @@ def api_stats():
     blocks — більші блоки (таблиці) того ж вигляду:
         {"id": "...", "title": {...}, "rows": [{"label":..,"value":..}, ...]}
     """
+    now = time.monotonic()
+    if _cache["data"] is not None and now - _cache["at"] < _CACHE_TTL:
+        return jsonify(_cache["data"])
     db = None
     try:
         db = get_db()
@@ -44,6 +54,7 @@ def api_stats():
             "blocks":     [],
         }
         data = events.apply_filters("stats.overview", data, db=db) or data
+        _cache.update(at=time.monotonic(), data=data)
         return jsonify(data)
     except Exception as e:
         return jsonify({"db_status": "offline", "error": str(e),
