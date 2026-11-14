@@ -148,4 +148,10 @@ def create_app() -> Flask:
     from core.app_manager import manager
     manager.load_all(app)
 
+    # Важкі зведення (автори, «Огляд») — рахуються на старті у фоні й
+    # оновлюються після змін, сторінки отримують готове (core/warmcache.py)
+    from core import warmcache
+    warmcache.install(app)
+    warmcache.start_all()
+
     return app
