@@ -10,6 +10,7 @@ from blueprints.tags import _invalidate_tags_cache
 from core.auth import admin_required, moderator_required, get_user_nc_config
 from core import modlog
 from core.db import get_db, q, qq
+from core.warmcache import WarmCache
 from .library import resync_rel_path
 from core.storage_api import get_storage
 from core.storage import get_storage_mode, local_file_path
@@ -19,11 +20,7 @@ bp = Blueprint("artists", __name__)
 
 # ── Artists ───────────────────────────────────────────────────────────────
 
-@bp.route("/api/artists")
-@moderator_required
-def api_artists():
-    f = flask_request.args.get("filter", "all")
-    tag_ids = flask_request.args.getlist("tag_id")
+def _artist_rows(db, f="all", tag_ids=(), sort="files"):
     IMAGE_EXTS = ('png','jpg','jpeg','gif','webp')
     VIDEO_EXTS = ('webm','mp4')
     # Умова «файл підходить під фільтр» — рахуємо нею, а не відсіюємо рядки:
@@ -47,41 +44,58 @@ def api_artists():
         """
         tag_args = [int(t) for t in tag_ids] + [len(tag_ids)]
 
-    sort = flask_request.args.get("sort", "files")  # files | size
     order_col = "total_size" if sort == "size" else "total_files"
 
+    # Один прохід по всіх постах з групуванням за автором. Раніше на
+    # КОЖНОГО автора було шість окремих підзапитів — на великій
+    # бібліотеці це секунди (вкладка «Автори» й пошук по авторах
+    # чекали саме на це).
+    rows = qq(db, f"""
+        SELECT a.id, a.folder_name, a.artist_name, a.created_at, a.auto_update,
+               s.total_files, s.e621_files, s.ib_files, s.last_download, s.total_size,
+               (SELECT COUNT(*) FROM pending_duplicates p WHERE p.artist_id=a.id) AS pending_count
+        FROM artists a
+        JOIN (SELECT fp.artist_id,
+                     SUM({match}) AS total_files,
+                     SUM({match} AND fp.source='e621') AS e621_files,
+                     SUM({match} AND fp.source='inkbunny') AS ib_files,
+                     MAX(fp.downloaded_at) AS last_download,
+                     COALESCE(SUM(IF({match}, f2.size_bytes, 0)),0) AS total_size
+              FROM furry_posts fp JOIN files f2 ON f2.id = fp.file_id
+              GROUP BY fp.artist_id) s ON s.artist_id = a.id
+        WHERE s.total_files > 0 {tag_where}
+        ORDER BY {order_col} DESC, a.id
+    """, tag_args)
+    for r in rows:
+        if r["created_at"]:    r["created_at"]    = r["created_at"].isoformat()
+        if r["last_download"]: r["last_download"]  = r["last_download"].isoformat()
+        r["total_files"]   = int(r["total_files"]   or 0)
+        r["e621_files"]    = int(r["e621_files"]    or 0)
+        r["ib_files"]      = int(r["ib_files"]      or 0)
+        r["pending_count"] = int(r["pending_count"] or 0)
+        r["total_size"]    = int(r["total_size"]    or 0)
+    return rows
+
+
+# Основний вигляд (усі файли, без тегів) — найчастіший: вкладка «Автори» і
+# пошук по авторах. Рахується на старті й оновлюється у фоні після змін
+# (core/warmcache.py), тож відкривається миттєво.
+artists_cache = WarmCache("artists", _artist_rows)
+
+
+@bp.route("/api/artists")
+@moderator_required
+def api_artists():
+    f = flask_request.args.get("filter", "all")
+    tag_ids = flask_request.args.getlist("tag_id")
+    sort = flask_request.args.get("sort", "files")  # files | size
     try:
-        db = get_db()
-        # Один прохід по всіх постах з групуванням за автором. Раніше на
-        # КОЖНОГО автора було шість окремих підзапитів — на великій
-        # бібліотеці це секунди (вкладка «Автори» й пошук по авторах
-        # чекали саме на це).
-        rows = qq(db, f"""
-            SELECT a.id, a.folder_name, a.artist_name, a.created_at, a.auto_update,
-                   s.total_files, s.e621_files, s.ib_files, s.last_download, s.total_size,
-                   (SELECT COUNT(*) FROM pending_duplicates p WHERE p.artist_id=a.id) AS pending_count
-            FROM artists a
-            JOIN (SELECT fp.artist_id,
-                         SUM({match}) AS total_files,
-                         SUM({match} AND fp.source='e621') AS e621_files,
-                         SUM({match} AND fp.source='inkbunny') AS ib_files,
-                         MAX(fp.downloaded_at) AS last_download,
-                         COALESCE(SUM(IF({match}, f2.size_bytes, 0)),0) AS total_size
-                  FROM furry_posts fp JOIN files f2 ON f2.id = fp.file_id
-                  GROUP BY fp.artist_id) s ON s.artist_id = a.id
-            WHERE s.total_files > 0 {tag_where}
-            ORDER BY {order_col} DESC, a.id
-        """, tag_args)
-        db.close()
-        for r in rows:
-            if r["created_at"]:    r["created_at"]    = r["created_at"].isoformat()
-            if r["last_download"]: r["last_download"]  = r["last_download"].isoformat()
-            r["total_files"]   = int(r["total_files"]   or 0)
-            r["e621_files"]    = int(r["e621_files"]    or 0)
-            r["ib_files"]      = int(r["ib_files"]      or 0)
-            r["pending_count"] = int(r["pending_count"] or 0)
-            r["total_size"]    = int(r["total_size"]    or 0)
-        return jsonify(rows)
+        if f == "all" and not tag_ids:
+            rows = artists_cache.get()
+            if sort == "size":
+                rows = sorted(rows, key=lambda r: (-r["total_size"], r["id"]))
+            return jsonify(rows)
+        return jsonify(_artist_rows(get_db(), f, tag_ids, sort))
     except Exception as e:
         return jsonify({"error": str(e)}), 503
 
