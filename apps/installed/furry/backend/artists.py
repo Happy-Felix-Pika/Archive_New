@@ -26,9 +26,11 @@ def api_artists():
     tag_ids = flask_request.args.getlist("tag_id")
     IMAGE_EXTS = ('png','jpg','jpeg','gif','webp')
     VIDEO_EXTS = ('webm','mp4')
-    if f == "image":   ext_filter = f"AND f2.ext IN {IMAGE_EXTS}"
-    elif f == "video": ext_filter = f"AND f2.ext IN {VIDEO_EXTS}"
-    else:              ext_filter = ""
+    # Умова «файл підходить під фільтр» — рахуємо нею, а не відсіюємо рядки:
+    # «останнє скачування» показується по всіх файлах автора, як і раніше.
+    if f == "image":   match = f"f2.ext IN {IMAGE_EXTS}"
+    elif f == "video": match = f"f2.ext IN {VIDEO_EXTS}"
+    else:              match = "1"
 
     tag_where = ""
     tag_args  = []
@@ -50,18 +52,25 @@ def api_artists():
 
     try:
         db = get_db()
+        # Один прохід по всіх постах з групуванням за автором. Раніше на
+        # КОЖНОГО автора було шість окремих підзапитів — на великій
+        # бібліотеці це секунди (вкладка «Автори» й пошук по авторах
+        # чекали саме на це).
         rows = qq(db, f"""
             SELECT a.id, a.folder_name, a.artist_name, a.created_at, a.auto_update,
-                   (SELECT COUNT(*) FROM furry_posts fp JOIN files f2 ON f2.id=fp.file_id WHERE fp.artist_id=a.id {ext_filter}) AS total_files,
-                   (SELECT COUNT(*) FROM furry_posts fp JOIN files f2 ON f2.id=fp.file_id WHERE fp.artist_id=a.id AND fp.source='e621' {ext_filter}) AS e621_files,
-                   (SELECT COUNT(*) FROM furry_posts fp JOIN files f2 ON f2.id=fp.file_id WHERE fp.artist_id=a.id AND fp.source='inkbunny' {ext_filter}) AS ib_files,
-                   (SELECT MAX(fp.downloaded_at) FROM furry_posts fp WHERE fp.artist_id=a.id) AS last_download,
-                   (SELECT COUNT(*) FROM pending_duplicates p WHERE p.artist_id=a.id) AS pending_count,
-                   (SELECT COALESCE(SUM(f2.size_bytes),0) FROM furry_posts fp JOIN files f2 ON f2.id=fp.file_id WHERE fp.artist_id=a.id {ext_filter}) AS total_size
+                   s.total_files, s.e621_files, s.ib_files, s.last_download, s.total_size,
+                   (SELECT COUNT(*) FROM pending_duplicates p WHERE p.artist_id=a.id) AS pending_count
             FROM artists a
-            WHERE 1=1 {tag_where}
-            HAVING total_files > 0
-            ORDER BY {order_col} DESC
+            JOIN (SELECT fp.artist_id,
+                         SUM({match}) AS total_files,
+                         SUM({match} AND fp.source='e621') AS e621_files,
+                         SUM({match} AND fp.source='inkbunny') AS ib_files,
+                         MAX(fp.downloaded_at) AS last_download,
+                         COALESCE(SUM(IF({match}, f2.size_bytes, 0)),0) AS total_size
+                  FROM furry_posts fp JOIN files f2 ON f2.id = fp.file_id
+                  GROUP BY fp.artist_id) s ON s.artist_id = a.id
+            WHERE s.total_files > 0 {tag_where}
+            ORDER BY {order_col} DESC, a.id
         """, tag_args)
         db.close()
         for r in rows:
@@ -71,6 +80,7 @@ def api_artists():
             r["e621_files"]    = int(r["e621_files"]    or 0)
             r["ib_files"]      = int(r["ib_files"]      or 0)
             r["pending_count"] = int(r["pending_count"] or 0)
+            r["total_size"]    = int(r["total_size"]    or 0)
         return jsonify(rows)
     except Exception as e:
         return jsonify({"error": str(e)}), 503
