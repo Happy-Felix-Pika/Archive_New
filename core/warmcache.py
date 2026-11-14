@@ -10,6 +10,8 @@
     подія file.*) позначаються застарілими й за мить перераховуються у
     фоні; якщо сторінку відкрили раніше, ніж фон устиг — рахується одразу,
     тож після власної дії людина завжди бачить свіжі числа;
+  * поки йде низка змін (розбір дублікатів — десятки кліків за хвилину),
+    фон рахує не частіше ніж раз на 10 с і ніколи не два підрахунки разом;
   * раз на хвилину перераховуються самі — так підхоплюється те, що зробив
     архіватор (він окремий процес і подій сюди не шле). Коли архівом
     ніхто не користується, — рідше, щоб не навантажувати базу дарма.
@@ -31,6 +33,7 @@ from core.db import _connect
 _ALL = []
 _ACTIVE_FOR = 15 * 60       # стільки після останнього перегляду оновлюємо щохвилини
 _IDLE_INTERVAL = 10 * 60    # коли ніхто не дивиться — раз на 10 хв
+_MIN_GAP = 10               # фоновий перерахунок після змін — не частіше
 
 
 class WarmCache:
@@ -43,14 +46,23 @@ class WarmCache:
         self._lock = threading.Lock()
         self._wake = threading.Event()
         self._last_get = 0.0
+        self._last_done = 0.0
+        self.computes = 0            # скільки разів рахувалось (для перевірки)
         self._thread = None
         _ALL.append(self)
 
     # ── читання ──────────────────────────────────────────────────────
     def get(self):
         self._last_get = time.monotonic()
-        if self._data is None or self._dirty:
+        if self._data is None:
             self.refresh()
+        elif self._dirty:
+            if self._lock.locked():
+                # фон саме рахує — чекаємо на нього, а не запускаємо ще один
+                with self._lock:
+                    pass
+            else:
+                self.refresh()
         return self._data
 
     def peek(self):
@@ -79,6 +91,8 @@ class WarmCache:
                 except Exception:
                     pass
             self._data = data
+            self.computes += 1
+            self._last_done = time.monotonic()
 
     def invalidate(self):
         self._dirty = True
@@ -104,6 +118,14 @@ class WarmCache:
                 self._wake.clear()
                 if not self._dirty:
                     continue
+                # Швидке клацання (напр. розбір дублікатів — десятки дій за
+                # хвилину): рахуємо не частіше ніж раз на _MIN_GAP секунд.
+                # Зміни за цей час лише ставлять позначку, а останній
+                # перерахунок після паузи все одно відбудеться.
+                wait = _MIN_GAP - (time.monotonic() - self._last_done)
+                if wait > 0:
+                    time.sleep(wait)
+                    self._wake.clear()
             try:
                 self.refresh(force=True)
             except Exception:
