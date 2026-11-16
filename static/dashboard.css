@@ -571,3 +571,5 @@ body[data-role="moderator"] [data-admin] { display:none !important; }
 .user-group-head:hover td{background:var(--border)}
 .user-group-chevron{display:inline-block;transition:transform .15s;margin-right:4px}
 .user-group-head.closed .user-group-chevron{transform:rotate(-90deg)}
+.reg-code{font-family:var(--mono);font-size:12px;color:var(--accent2);background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:2px 7px;white-space:nowrap}
+span.reg-code[onclick]{cursor:pointer}
