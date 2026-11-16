@@ -1361,5 +1361,12 @@
  "{0} · 🔗 + пул «{1}»": "{0} · 🔗 + pool «{1}»",
  "{0}» не втратить цю сторінку: збережений файл додасться й у цей пул, без копії": "{0}» won't lose this page: the saved file will be added to this pool too, without a copy",
  "Новий файл — сторінка пулу {0} на сайті. «{1}» не втратить цю сторінку: збережений файл додасться й у цей пул, без копії": "New file — pool page {0} on the site. «{1}» won't lose this page: the saved file will be added to this pool too, without a copy",
- "лежить в іншому пулі, сюди привʼязаний": "stored in another pool, linked here"
+ "лежить в іншому пулі, сюди привʼязаний": "stored in another pool, linked here",
+ "Адміни": "Admins",
+ "Модератори": "Moderators",
+ "Перевірити пули ВСІХ авторів": "Check pools of ALL artists",
+ "Наявні файли розкладуться по пулах, а роботи, що входять у кілька пулів, додадуться й у решту (без копій). Нічого не скачується й не видаляється. На великому архіві це довго — кожного автора треба спитати в e621/Inkbunny": "Existing files will be sorted into pools, and works that belong to several pools will be added to the rest too (without copies). Nothing is downloaded or deleted. On a large archive this takes a while — every artist has to be looked up on e621/Inkbunny",
+ "Перевірка пулів почалась": "Pool check started",
+ "Пули (усі автори)": "Pools (all artists)",
+ "Розкласти наявні файли по пулах і додати роботи в усі їхні пули (нічого не скачує)": "Sort existing files into pools and add works to all their pools (downloads nothing)"
 }

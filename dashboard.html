@@ -13,7 +13,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/dashboard.css?v=57">
+<link rel="stylesheet" href="/static/dashboard.css?v=58">
 <script src="https://unpkg.com/@ruffle-rs/ruffle"></script>
 </head>
 <body>
@@ -328,6 +328,7 @@
         <button class="btn btn-ghost"   data-admin id="btn-migrate-tags" onclick="runMigrateTags()" data-i18n="btn.migratetags">🏷 Міграція тегів</button>
         <button class="btn btn-ghost"   data-admin id="btn-find-dup"     onclick="runFindDuplicates()" data-i18n="btn.finddup">🔍 Дублікати (усі автори)</button>
         <button class="btn btn-ghost"   data-admin id="btn-backfill-sizes" onclick="runBackfillSizes()" data-i18n="btn.backfillsizes">⚖ Довантажити вагу</button>
+        <button class="btn btn-ghost"   data-admin id="btn-recheck-pools-all" onclick="runRecheckPoolsAll()" title="Розкласти наявні файли по пулах і додати роботи в усі їхні пули (нічого не скачує)">🔄 Пули (усі автори)</button>
         <button class="btn btn-danger"  data-admin id="btn-cleanup"      onclick="runCleanup(false)" data-i18n="btn.cleanup">🗑 Cleanup БД</button>
         <button class="btn btn-danger"  data-admin id="btn-stop"    onclick="stopArchiver()" data-i18n="btn.stop">■ Стоп</button>
         <button class="btn btn-ghost" data-admin onclick="clearLog()" data-i18n="btn.clearlog">✕ Очистити лог</button>
@@ -981,7 +982,7 @@
 
 <script src="/i18n.js"></script>
 <script src="/static/i18n.js?v=1"></script>
-<script src="/static/dashboard.js?v=74"></script>
+<script src="/static/dashboard.js?v=75"></script>
 <script src="/static/apps.js?v=6"></script>
 
 </body>
