@@ -55,9 +55,30 @@ def _file_meta(data, file_id, db, **_):
         "subfolder":  row["subfolder"],
         "pool_order": row["pool_order"],
         "pool_total": row["pool_total"] if row["subfolder"] else None,
+        "pools":      _file_pools(db, file_id),
         "share_url":  share_url,
     })
     return data
+
+
+def _file_pools(db, file_id):
+    """
+    Усі пули, у яких є цей файл: «рідний» (тека, де він лежить) і додаткові
+    (furry_pool_links). Для кожного — номер сторінки й скільки сторінок
+    у пулі загалом.
+    """
+    with db.cursor() as cur:
+        cur.execute(f"""
+            SELECT m.pool_name AS name, m.pool_order AS `order`, m.linked, m.artist_id,
+                   (SELECT COUNT(*) FROM {pools.POOL_MEMBERS} m2
+                     WHERE m2.artist_id = m.artist_id AND m2.pool_name = m.pool_name) AS total
+            FROM {pools.POOL_MEMBERS} m
+            WHERE m.file_id = %s
+            ORDER BY m.linked, m.pool_name
+        """, (file_id,))
+        rows = cur.fetchall()
+    return [{"name": r["name"], "order": r["order"], "total": int(r["total"] or 0),
+             "linked": bool(r["linked"]), "artist_id": r["artist_id"]} for r in rows]
 
 
 def _snapshot_for_trash(snap, file_id, db, **_):
@@ -67,6 +88,12 @@ def _snapshot_for_trash(snap, file_id, db, **_):
         row = cur.fetchone()
     if row:
         snap["furry"] = {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in row.items()}
+        with db.cursor() as cur:
+            cur.execute("""SELECT artist_id, pool_name, pool_order, source
+                           FROM furry_pool_links WHERE file_id=%s""", (file_id,))
+            links = cur.fetchall()
+        if links:
+            snap["furry"]["pool_links"] = links
     return snap
 
 
@@ -110,6 +137,12 @@ def _restore_from_trash(payload):
                     (payload["file_id"], data["artist_id"], data["post_id"], data.get("source"),
                      data.get("post_url"), data.get("page_num"), data.get("subfolder"),
                      data.get("pool_order"), data.get("downloaded_at")))
+        for l in data.get("pool_links") or []:
+            cur.execute("SELECT 1 FROM artists WHERE id=%s", (l["artist_id"],))
+            if cur.fetchone():
+                cur.execute("""INSERT IGNORE INTO furry_pool_links
+                               (file_id, artist_id, pool_name, pool_order, source) VALUES (%s,%s,%s,%s,%s)""",
+                            (payload["file_id"], l["artist_id"], l["pool_name"], l.get("pool_order"), l.get("source")))
 
 
 def _overview_stats(data, db, **_):
@@ -219,6 +252,17 @@ def _on_file_moved(payload):
                            artist_id=%s, subfolder=%s
                        WHERE file_id=%s""",
                     (artist_id, sub, artist_id, sub, payload["file_id"]))
+        if sub:
+            # тепер файл лежить у теці цього пулу — додаткова привʼязка зайва,
+            # але її номер сторінки беремо, якщо свого ще немає
+            cur.execute("SELECT pool_order FROM furry_pool_links WHERE file_id=%s AND pool_name=%s",
+                        (payload["file_id"], sub))
+            link = cur.fetchone()
+            if link:
+                cur.execute("UPDATE furry_posts SET pool_order=COALESCE(pool_order,%s) WHERE file_id=%s",
+                            (link["pool_order"], payload["file_id"]))
+                cur.execute("DELETE FROM furry_pool_links WHERE file_id=%s AND pool_name=%s",
+                            (payload["file_id"], sub))
     try:
         pools._invalidate_pools_cache()
     except Exception:
@@ -302,7 +346,7 @@ def _undo_orders(p):
     db = get_db()
     with db.cursor() as cur:
         for o in p.get("orders") or []:
-            cur.execute("UPDATE furry_posts SET pool_order=%s WHERE file_id=%s", (o["pool_order"], o["file_id"]))
+            pools.set_order(cur, o["file_id"], o["pool_order"], o.get("pool"))
     db.commit()
     pools._invalidate_pools_cache()
 
@@ -338,7 +382,12 @@ def _undo_pool_assign(p):
     library.resync_rel_path(db, ids)
     with db.cursor() as cur:
         for o in p.get("prev_pool_orders") or []:
-            cur.execute("UPDATE furry_posts SET pool_order=%s WHERE file_id=%s", (o["pool_order"], o["file_id"]))
+            pools.set_order(cur, o["file_id"], o["pool_order"], o.get("pool"))
+        # привʼязки, які прибрав перенос (файл став «рідним» у цьому пулі)
+        for l in p.get("removed_links") or []:
+            cur.execute("""INSERT IGNORE INTO furry_pool_links
+                           (file_id, artist_id, pool_name, pool_order, source) VALUES (%s,%s,%s,%s,%s)""",
+                        (l["file_id"], l["artist_id"], l["pool_name"], l.get("pool_order"), l.get("source")))
     db.commit()
     pools._invalidate_pools_cache()
     if errors and not ids:

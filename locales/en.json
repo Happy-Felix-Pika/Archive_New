@@ -1357,5 +1357,9 @@
  "🗑 Cleanup БД": "🗑 Cleanup DB",
  "🗑 Очистити список": "🗑 Clear list",
  "«{0}» у «{1}»": "«{0}» in «{1}»",
- "у": "in"
+ "у": "in",
+ "{0} · 🔗 + пул «{1}»": "{0} · 🔗 + pool «{1}»",
+ "{0}» не втратить цю сторінку: збережений файл додасться й у цей пул, без копії": "{0}» won't lose this page: the saved file will be added to this pool too, without a copy",
+ "Новий файл — сторінка пулу {0} на сайті. «{1}» не втратить цю сторінку: збережений файл додасться й у цей пул, без копії": "New file — pool page {0} on the site. «{1}» won't lose this page: the saved file will be added to this pool too, without a copy",
+ "лежить в іншому пулі, сюди привʼязаний": "stored in another pool, linked here"
 }

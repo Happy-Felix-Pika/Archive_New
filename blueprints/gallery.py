@@ -40,6 +40,12 @@ def _gallery_ids_query(f, artist_id, subfolder, tag_ids, hide_tag_ids, favorites
     elif f == "flash": exts = FLASH_EXTS
     else:              exts = IMAGE_EXTS + VIDEO_EXTS
 
+    # Без застосунку furry таблиці furry_posts немає — тоді галерея просто
+    # показує файли, без фільтрів за автором і серією.
+    has_furry = table_exists(name="furry_posts")   # відповідь кешується
+    if not has_furry:
+        artist_id, subfolder = None, None
+
     placeholders = ",".join(["%s"] * len(exts))
     args = list(exts)
     # Основа — таблиця ядра. furry_posts приєднуємо НЕОБОВ'ЯЗКОВО:
@@ -74,8 +80,11 @@ def _gallery_ids_query(f, artist_id, subfolder, tag_ids, hide_tag_ids, favorites
         args.append(int(artist_id))
 
     if subfolder:
-        where.append("fp.subfolder = %s")
-        args.append(subfolder)
+        # пул — це і файли в його теці, і ті, що привʼязані до нього
+        # додатково (та сама робота в кількох пулах, furry_pool_links)
+        where.append("(fp.subfolder = %s OR EXISTS (SELECT 1 FROM furry_pool_links pl "
+                     "WHERE pl.file_id = f.id AND pl.pool_name = %s))")
+        args.extend([subfolder, subfolder])
 
     if favorites_only:
         where.append("EXISTS (SELECT 1 FROM user_favorites uf WHERE uf.user_id=%s AND uf.download_id=f.id)")
@@ -89,22 +98,25 @@ def _gallery_ids_query(f, artist_id, subfolder, tag_ids, hide_tag_ids, favorites
         where.append("NOT EXISTS (SELECT 1 FROM download_tags dt WHERE dt.download_id=f.id AND dt.tag_id=%s)")
         args.append(int(tid))
 
-    order_by = "fp.pool_order ASC, f.id ASC" if subfolder else "f.id ASC"
+    order_args = []
+    if subfolder:
+        # номер сторінки — свій у кожному пулі
+        order_by = ("COALESCE(IF(fp.subfolder = %s, fp.pool_order, NULL), "
+                    "(SELECT pl.pool_order FROM furry_pool_links pl "
+                    "WHERE pl.file_id = f.id AND pl.pool_name = %s LIMIT 1)) ASC, f.id ASC")
+        order_args = [subfolder, subfolder]
+    else:
+        order_by = "f.id ASC"
     select_cols = "f.id, fp.post_id" if include_post_id else "f.id"
-    # Без застосунку furry таблиці furry_posts немає — тоді галерея просто
-    # показує файли, без фільтрів за автором і серією.
-    has_furry = table_exists(name="furry_posts")   # відповідь кешується
     if has_furry:
         joins = "LEFT JOIN furry_posts fp ON fp.file_id = f.id " + join_artists
     else:
         joins = ""
-        where = [w for w in where if "fp." not in w]
-        order_by = order_by.replace("fp.pool_order ASC, ", "")
         select_cols = select_cols.replace(", fp.post_id", ", NULL AS post_id")
     sql = f"SELECT {select_cols} FROM files f {joins} WHERE {' AND '.join(where)} ORDER BY {order_by}"
     try:
         db   = get_db()
-        rows = qq(db, sql, args)
+        rows = qq(db, sql, args + order_args)
         db.close()
         if include_post_id:
             items = [{"id": r["id"], "post_id": r["post_id"]} for r in rows]

@@ -59,5 +59,7 @@
  "файл знову в черзі «На перевірку»": "file is back in the «For review» queue",
  "файлов с хешем": "files with hash",
  "читаю знайдені пари": "reading found pairs",
- "шукаю точні копії": "looking for exact copies"
+ "шукаю точні копії": "looking for exact copies",
+ "пул «{0}»": "pool «{0}»",
+ "«{0}» ≈ «{1}» (+ пул «{2}»)": "«{0}» ≈ «{1}» (+ pool «{2}»)"
 }
