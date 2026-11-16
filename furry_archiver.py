@@ -2234,6 +2234,41 @@ class FurryArchiver:
                 self._tg_mark(b['id'], error=str(e))
         return new_files, skipped, pending
 
+    def recheck_pools_all(self):
+        """
+        «Пули (усі автори)»: для кожного автора з файлами з e621/Inkbunny —
+        наявні файли розкладаються по пулах, а роботи, що на сайті входять
+        у кілька пулів, привʼязуються й до решти. Нічого не скачується й не
+        видаляється (на відміну від перевірки одного автора, тут не
+        перекачуються автоматичні відмови — інакше це скачування всього
+        архіву заново).
+        """
+        print("\n" + "=" * 60)
+        print("  ПЕРЕВІРКА ПУЛІВ: усі автори")
+        print("=" * 60)
+        with self.db.cursor() as cur:
+            cur.execute("""SELECT a.id, a.folder_name,
+                                  SUM(fp.source='e621') AS n_e621, SUM(fp.source='inkbunny') AS n_ib
+                           FROM artists a JOIN furry_posts fp ON fp.artist_id = a.id
+                           WHERE fp.source IN ('e621','inkbunny')
+                           GROUP BY a.id, a.folder_name ORDER BY a.folder_name""")
+            artists = cur.fetchall()
+        total, changed = len(artists), 0
+        for i, a in enumerate(artists, 1):
+            print(f"[{i}/{total}] {a['folder_name']}")
+            n = 0
+            try:
+                if a['n_e621']:
+                    n += self._sync_check_pool_relocate(a['id'], a['folder_name'], full=True) or 0
+                if a['n_ib']:
+                    n += self._sync_check_pool_relocate_inkbunny(a['id'], a['folder_name'], full=True) or 0
+            except Exception as e:
+                print(f"    ✗ {a['folder_name']}: {e}")
+            self.db.commit()
+            changed += n
+        self.tracker.save()
+        print(f"\n✓ Готово: {total} авторів перевірено, змін у пулах: {changed}")
+
     def recheck_pools(self, artist_name: str):
         """
         «Перевірити пули» для одного автора:
@@ -4052,7 +4087,7 @@ def main():
     parser.add_argument('--artist',        type=str, default=None, help='Завантажити всю бібліотеку одного конкретного автора (створює папку якщо треба)')
     parser.add_argument('--auto-update',   action='store_true', help='Перевірити на нове ТІЛЬКИ авторів з увімкненим авто-оновленням (для щоденного планувальника)')
     parser.add_argument('--find-duplicates', action='store_true', help='Ретроактивний пошук дублікатів у вже наявній бібліотеці (обмежується --artist і/або --subfolder, якщо задані)')
-    parser.add_argument('--recheck-pools', action='store_true', help='Разом з --artist: перенести наявні файли в pool, забути автоматичні відмови й перекачати автора з перевагою сторінок pool')
+    parser.add_argument('--recheck-pools', action='store_true', help='Разом з --artist: перенести наявні файли в pool, забути автоматичні відмови й перекачати автора з перевагою сторінок pool. Без --artist — для всіх авторів лише розкласти файли по пулах і додати роботи в усі їхні пули (нічого не скачує)')
     parser.add_argument('--subfolder',     type=str, default=None, help='Обмежити --find-duplicates конкретним pool усередині автора')
     parser.add_argument('--backfill-sizes', action='store_true', help='Довантажити вагу (size_bytes) для файлів, скачаних до появи цього відстежування')
     parser.add_argument('--cleanup',       action='store_true', help='Видалити з БД записи файлів яких немає на Nextcloud')
@@ -4084,6 +4119,8 @@ def main():
             archiver.backfill_file_sizes()
         elif args.recheck_pools and args.artist:
             archiver.recheck_pools(args.artist)
+        elif args.recheck_pools:
+            archiver.recheck_pools_all()
         elif args.artist:
             archiver.run(dry_run=args.dry_run, artist_name=args.artist)
         elif args.auto_update:

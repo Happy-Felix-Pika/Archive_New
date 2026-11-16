@@ -867,17 +867,31 @@ let _pendingBusy   = false;
 
 // Пули файлу в картці перегляду. Одна робота може бути в кількох пулах
 // (furry_pool_links) — показуємо всі; той, що зараз гортаєш, — першим.
+function _galFilePools(d) {
+  return Array.isArray(d?.pools) && d.pools.length ? d.pools.slice()
+    : (d?.subfolder ? [{ name: d.subfolder, order: d.pool_order, total: d.pool_total, artist_id: d.artist_id }] : []);
+}
+
+// Куди веде P: не в пулі — у перший; уже в одному з пулів роботи — у наступний.
+function galNextPool(d) {
+  const pools = _galFilePools(d);
+  if (!pools.length) return null;
+  const cur = typeof _galSelectedPool !== 'undefined' ? _galSelectedPool : '';
+  const i = pools.findIndex(p => p.name === cur);
+  return pools[(i + 1) % pools.length];
+}
+
 function galPoolBadges(d) {
-  let pools = Array.isArray(d.pools) && d.pools.length ? d.pools.slice()
-    : (d.subfolder ? [{ name: d.subfolder, order: d.pool_order, total: d.pool_total, artist_id: d.artist_id }] : []);
+  const pools = _galFilePools(d);
   if (!pools.length) return '';
   const cur = typeof _galSelectedPool !== 'undefined' ? _galSelectedPool : '';
+  const nextName = galNextPool(d)?.name;
   pools.sort((a, b) => (b.name === cur) - (a.name === cur));
   return pools.map((p, i) => `<div class="pool-progress-badge" data-pool="${esc(p.name)}" data-artist-id="${p.artist_id || d.artist_id}" data-artist-name="${esc(d.artist)}" title="${t('gal.filterbypool')}">
         <i>${p.linked ? '🔗' : '📖'}</i>
         <span class="pool-progress-title">${esc(p.name)}</span>
         <div class="pool-progress-bar"><div class="pool-progress-fill" style="width:${p.total ? Math.min(100, Math.round(((p.order||1)/p.total)*100)) : 0}%"></div></div>
-        <span class="pool-progress-count">${t('gal.page')} ${p.order||'?'}${(p.order || 0) <= (p.total || 0) ? ` ${t('gal.of')} ${p.total}` : ''}${i === 0 ? ' <span style="opacity:.5">(P)</span>' : ''}</span>
+        <span class="pool-progress-count">${t('gal.page')} ${p.order||'?'}${(p.order || 0) <= (p.total || 0) ? ` ${t('gal.of')} ${p.total}` : ''}${p.name === nextName && (pools.length > 1 || p.name !== cur) ? ' <span style="opacity:.5">(P)</span>' : ''}</span>
       </div>`).join('');
 }
 
@@ -2497,8 +2511,9 @@ document.addEventListener('keydown', e => {
     e.preventDefault();
     const curId = _galIds[_galIdx];
     const meta  = _galMeta[curId];
-    const poolName = meta?.subfolder || meta?.pools?.[0]?.name;
-    if (poolName) { galEnterPool(poolName, meta.pools?.find(p => p.name === poolName)?.artist_id || meta.artist_id, meta.artist); return; }
+    // P — у пул; ще раз P — наступний пул цієї роботи (якщо їх кілька)
+    const next = galNextPool(meta);
+    if (next) { galEnterPool(next.name, next.artist_id || meta.artist_id, meta.artist); return; }
     // Раніше тут була мовчанка: ні пулу, ні пояснення. Якщо в картці
     // немає subfolder — файл не прив'язаний до поста (нема рядка в
     // furry_posts), і галерея просто не знає, до якого pool він
@@ -2654,6 +2669,22 @@ async function runFindDuplicates() {
   });
   if (r.ok) {
     toast('Сканування дублікатів почалось', 'ok');
+    showPage('runner');
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.page==='runner'));
+  } else {
+    const d = await r.json();
+    toast(d.error || t('toast.starterr'), 'err');
+  }
+}
+
+async function runRecheckPoolsAll() {
+  if (!confirm('Перевірити пули ВСІХ авторів?\n\nНаявні файли розкладуться по пулах, а роботи, що входять у кілька пулів, додадуться й у решту (без копій). Нічого не скачується й не видаляється. На великому архіві це довго — кожного автора треба спитати в e621/Inkbunny.')) return;
+  const r = await fetch(`${API}/api/run`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({recheck_pools: true})
+  });
+  if (r.ok) {
+    toast('Перевірка пулів почалась', 'ok');
     showPage('runner');
     document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.page==='runner'));
   } else {
@@ -3365,18 +3396,52 @@ async function loadUsersFull() {
       tbody.innerHTML = `<tr><td colspan="6" class="empty-row">—</td></tr>`;
       return;
     }
-    tbody.innerHTML = users.map(u => `
-      <tr>
+    // групами за роллю; кожну можна згорнути (запамʼятовується в браузері)
+    const groups = [
+      ['admin',     '👑 Адміни',     u => u.role === 'admin' || u.is_owner],
+      ['moderator', '🛡 Модератори', u => u.role === 'moderator' && !u.is_owner],
+      ['user',      '👤 Користувачі', u => u.role !== 'admin' && u.role !== 'moderator' && !u.is_owner],
+    ];
+    const collapsed = _usersCollapsed();
+    tbody.innerHTML = groups.map(([key, label, test]) => {
+      const list = users.filter(test);
+      if (!list.length) return '';
+      const closed = collapsed.includes(key);
+      return `<tr class="user-group-head${closed ? ' closed' : ''}" onclick="usersToggleGroup('${key}')">
+          <td colspan="6"><span class="user-group-chevron">▾</span> ${label} <span class="muted">(${list.length})</span></td>
+        </tr>` + list.map(u => _userRowHtml(u, key, closed)).join('');
+    }).join('');
+  } catch {
+    tbody.innerHTML = `<tr><td colspan="6" class="empty-row">${t('catalog.error')}</td></tr>`;
+  }
+}
+
+function _usersCollapsed() {
+  try { return JSON.parse(localStorage.getItem('users.collapsed') || '[]'); } catch { return []; }
+}
+
+function usersToggleGroup(key) {
+  const c = _usersCollapsed();
+  const i = c.indexOf(key);
+  if (i >= 0) c.splice(i, 1); else c.push(key);
+  try { localStorage.setItem('users.collapsed', JSON.stringify(c)); } catch {}
+  const closed = c.includes(key);
+  document.querySelectorAll(`#users-full-tbody tr[data-group="${key}"]`).forEach(tr => tr.style.display = closed ? 'none' : '');
+  document.querySelectorAll('#users-full-tbody .user-group-head').forEach(tr => {
+    if (tr.getAttribute('onclick') === `usersToggleGroup('${key}')`) tr.classList.toggle('closed', closed);
+  });
+}
+
+function _userRowHtml(u, group, closed) {
+    return `
+      <tr data-group="${group}"${closed ? ' style="display:none"' : ''}>
         <td style="font-weight:500">${esc(u.display_name || '—')}</td>
         <td style="color:var(--muted)">${esc(u.email)}</td>
         <td>${userRoleCell(u)}</td>
         <td style="color:var(--muted)">${fmtDate(u.created_at)}</td>
         <td style="color:var(--muted)">${u.last_login_at ? fmtDate(u.last_login_at) : '— ще не заходив —'}</td>
         <td>${u.id !== _currentUser?.user_id && !u.is_owner && (u.role !== 'admin' || _currentUser?.is_owner) ? `<span class="catalog-crumb" style="color:var(--red)" onclick="deleteUserAccount(${u.id}, '${esc(u.display_name || u.email)}')" title="Видалити обліковий запис">🗑</span>` : ''}</td>
-      </tr>`).join('');
-  } catch {
-    tbody.innerHTML = `<tr><td colspan="6" class="empty-row">${t('catalog.error')}</td></tr>`;
-  }
+      </tr>`;
 }
 
 const ROLE_LABELS = { user: 'користувач', moderator: 'модератор', admin: 'адмін' };
@@ -3409,6 +3474,7 @@ async function setUserRole(userId, sel) {
     if (r.error) { toast(r.error, 'err'); sel.value = prev; return; }
     sel.dataset.prev = role;
     toast(`Роль: ${ROLE_LABELS[role]}`, 'ok');
+    loadUsersFull();
   } catch { toast('Помилка мережі', 'err'); sel.value = prev; }
 }
 

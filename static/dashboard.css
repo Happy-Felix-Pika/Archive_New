@@ -565,3 +565,9 @@ body[data-role="moderator"] [data-admin] { display:none !important; }
 @media (display-mode: standalone) {
   body{overscroll-behavior-y:none}
 }
+
+/* Користувачі групами (Адміни / Модератори / Користувачі), що згортаються */
+.user-group-head td{background:var(--surface2);cursor:pointer;user-select:none;font-weight:600;font-size:12.5px;padding:9px 14px}
+.user-group-head:hover td{background:var(--border)}
+.user-group-chevron{display:inline-block;transition:transform .15s;margin-right:4px}
+.user-group-head.closed .user-group-chevron{transform:rotate(-90deg)}
