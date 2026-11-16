@@ -13,7 +13,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/dashboard.css?v=58">
+<link rel="stylesheet" href="/static/dashboard.css?v=59">
 <script src="https://unpkg.com/@ruffle-rs/ruffle"></script>
 </head>
 <body>
@@ -835,23 +835,9 @@
 
     <div class="page" id="page-access-codes">
       <div class="filter-toggle" id="codes-tab-toggle" style="margin-bottom:14px">
-        <button class="filter-btn active" data-codestab="reg" onclick="codesSetTab('reg')">🎫 Коди реєстрації</button>
+        <button class="filter-btn active" data-codestab="users" onclick="codesSetTab('users')">👥 Користувачі</button>
         <button class="filter-btn" data-codestab="keys" onclick="codesSetTab('keys')">🔑 Ключі мого архіву</button>
         <button class="filter-btn" data-codestab="external" onclick="codesSetTab('external')">🔗 Підключені архіви</button>
-        <button class="filter-btn" data-codestab="users" onclick="codesSetTab('users')">👥 Користувачі</button>
-      </div>
-
-      <div id="codes-tab-reg">
-        <div class="pending-toolbar">
-          <button class="btn btn-primary" onclick="generateAccessCode()" data-i18n="btn.create">+ Створити код</button>
-          <button class="btn btn-ghost" onclick="loadAccessCodes()" data-i18n="btn.refresh">↻ Оновити</button>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th data-i18n="access.code">Код</th><th data-i18n="access.created">Створено</th><th data-i18n="access.status">Статус</th><th data-i18n="access.usedby">Використав</th><th></th></tr></thead>
-            <tbody id="access-codes-tbody"></tbody>
-          </table>
-        </div>
       </div>
 
       <div id="codes-tab-keys" style="display:none">
@@ -886,13 +872,14 @@
         </div>
       </div>
 
-      <div id="codes-tab-users" style="display:none">
+      <div id="codes-tab-users">
         <div class="pending-toolbar">
+          <button class="btn btn-primary" onclick="generateAccessCode()" title="Код, за яким можна зареєструватись в архіві">+ Створити код</button>
           <button class="btn btn-ghost" onclick="loadUsersFull()" data-i18n="btn.refresh">↻ Оновити</button>
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Юзер</th><th>Email</th><th>Роль</th><th>Зареєстрований</th><th>Останній вхід</th><th></th></tr></thead>
+            <thead><tr><th>Юзер</th><th>Email</th><th>Код</th><th>Роль</th><th>Зареєстрований</th><th>Останній вхід</th><th></th></tr></thead>
             <tbody id="users-full-tbody"></tbody>
           </table>
         </div>
@@ -982,7 +969,7 @@
 
 <script src="/i18n.js"></script>
 <script src="/static/i18n.js?v=1"></script>
-<script src="/static/dashboard.js?v=75"></script>
+<script src="/static/dashboard.js?v=76"></script>
 <script src="/static/apps.js?v=6"></script>
 
 </body>

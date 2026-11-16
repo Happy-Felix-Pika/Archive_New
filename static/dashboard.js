@@ -77,7 +77,7 @@ function refreshCurrent() {
   else if (currentPage === 'pending')   { pendingRefreshCurrentTab(); }
   else if (currentPage === 'gallery')   { galPopulateSourceOptions(); }
   else if (currentPage === 'config')    loadConfig();
-  else if (currentPage === 'access-codes') { loadAccessCodes(); loadExternalKeys(); loadExternalArchives(); }
+  else if (currentPage === 'access-codes') { loadUsersFull(); loadExternalKeys(); loadExternalArchives(); }
   else if (currentPage === 'chat') { chatBackToList(); loadChatConversations(); }
   else if (currentPage === 'catalog')   { catalogPopulateSourceOptions(); catalogLoadExcluded(); catalogLoad(_catalogPath); }
   else if (currentPage === 'live')      { liveLoadStatus(); liveCheckBookmark(); }
@@ -3242,7 +3242,6 @@ async function saveConfig(e) {
 function codesSetTab(tab) {
   document.querySelectorAll('#codes-tab-toggle .filter-btn').forEach(b =>
     b.classList.toggle('active', b.dataset.codestab === tab));
-  document.getElementById('codes-tab-reg').style.display      = tab === 'reg' ? '' : 'none';
   document.getElementById('codes-tab-keys').style.display     = tab === 'keys' ? '' : 'none';
   document.getElementById('codes-tab-external').style.display = tab === 'external' ? '' : 'none';
   document.getElementById('codes-tab-users').style.display    = tab === 'users' ? '' : 'none';
@@ -3389,13 +3388,18 @@ function chatStartConversation() {
 
 async function loadUsersFull() {
   const tbody = document.getElementById('users-full-tbody');
-  tbody.innerHTML = `<tr><td colspan="6" class="empty-row">${t('common.loading')}</td></tr>`;
+  tbody.innerHTML = `<tr><td colspan="7" class="empty-row">${t('common.loading')}</td></tr>`;
   try {
-    const users = await fetch(`${API}/api/users/list-full`).then(r => r.json());
+    const [users, codes] = await Promise.all([
+      fetch(`${API}/api/users/list-full`).then(r => r.json()),
+      fetch(`${API}/api/access-codes`).then(r => r.json()).catch(() => []),
+    ]);
     if (!Array.isArray(users) || !users.length) {
-      tbody.innerHTML = `<tr><td colspan="6" class="empty-row">—</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="7" class="empty-row">—</td></tr>`;
       return;
     }
+    // вільні коди: ще ніхто не використав і не відкликано
+    const freeCodes = (Array.isArray(codes) ? codes : []).filter(c => !c.used_at && !c.is_revoked);
     // групами за роллю; кожну можна згорнути (запамʼятовується в браузері)
     const groups = [
       ['admin',     '👑 Адміни',     u => u.role === 'admin' || u.is_owner],
@@ -3408,12 +3412,37 @@ async function loadUsersFull() {
       if (!list.length) return '';
       const closed = collapsed.includes(key);
       return `<tr class="user-group-head${closed ? ' closed' : ''}" onclick="usersToggleGroup('${key}')">
-          <td colspan="6"><span class="user-group-chevron">▾</span> ${label} <span class="muted">(${list.length})</span></td>
+          <td colspan="7"><span class="user-group-chevron">▾</span> ${label} <span class="muted">(${list.length})</span></td>
         </tr>` + list.map(u => _userRowHtml(u, key, closed)).join('');
-    }).join('');
+    }).join('') + _freeCodesHtml(freeCodes, collapsed.includes('codes'));
   } catch {
-    tbody.innerHTML = `<tr><td colspan="6" class="empty-row">${t('catalog.error')}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" class="empty-row">${t('catalog.error')}</td></tr>`;
   }
+}
+
+// Коди реєстрації, якими ще ніхто не скористався, — окремою групою внизу.
+// Використаний код видно в рядку того, хто ним зареєструвався.
+function _freeCodesHtml(codes, closed) {
+  const head = `<tr class="user-group-head${closed ? ' closed' : ''}" onclick="usersToggleGroup('codes')">
+      <td colspan="7"><span class="user-group-chevron">▾</span> 🎟 Вільні коди <span class="muted">(${codes.length})</span></td>
+    </tr>`;
+  const hide = closed ? ' style="display:none"' : '';
+  if (!codes.length) return head + `<tr data-group="codes"${hide}><td colspan="7" class="empty-row">Вільних кодів немає — «+ Створити код» угорі</td></tr>`;
+  return head + codes.map(c => `
+      <tr data-group="codes"${hide}>
+        <td class="muted">—</td>
+        <td class="muted">—</td>
+        <td><span class="reg-code" onclick="copyAccessCode('${esc(c.code)}')" title="Скопіювати">${esc(c.code)} ⧉</span></td>
+        <td class="muted">вільний</td>
+        <td style="color:var(--muted)" title="Створено">${fmtDate(c.created_at)}</td>
+        <td class="muted">—</td>
+        <td><span class="catalog-crumb" style="color:var(--red)" onclick="revokeAccessCode(${c.id})" title="Відкликати цей код">🗑</span></td>
+      </tr>`).join('');
+}
+
+function copyAccessCode(code) {
+  try { navigator.clipboard.writeText(code); toast(`Скопійовано: ${code}`, 'ok'); }
+  catch { prompt('Код:', code); }
 }
 
 function _usersCollapsed() {
@@ -3437,6 +3466,7 @@ function _userRowHtml(u, group, closed) {
       <tr data-group="${group}"${closed ? ' style="display:none"' : ''}>
         <td style="font-weight:500">${esc(u.display_name || '—')}</td>
         <td style="color:var(--muted)">${esc(u.email)}</td>
+        <td>${u.reg_code ? `<span class="reg-code" title="Код, за яким зареєструвався">${esc(u.reg_code)}</span>` : '<span class="muted">—</span>'}</td>
         <td>${userRoleCell(u)}</td>
         <td style="color:var(--muted)">${fmtDate(u.created_at)}</td>
         <td style="color:var(--muted)">${u.last_login_at ? fmtDate(u.last_login_at) : '— ще не заходив —'}</td>
@@ -3546,31 +3576,8 @@ async function deleteUserAccount(userId, name) {
   }
 }
 
-async function loadAccessCodes() {
-  const tbody = document.getElementById('access-codes-tbody');
-  tbody.innerHTML = `<tr><td colspan="5" style="opacity:.6">${t('catalog.loading')}</td></tr>`;
-  try {
-    const rows = await fetch(`${API}/api/access-codes`).then(r => r.json());
-    if (!Array.isArray(rows) || rows.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="5" style="opacity:.6">${t('access.none')}</td></tr>`;
-      return;
-    }
-    tbody.innerHTML = rows.map(r => {
-      let status = t('access.active');
-      if (r.is_revoked)   status = t('access.revoked');
-      else if (r.used_at) status = t('access.used');
-      return `<tr>
-        <td style="font-family:var(--mono)">${esc(r.code)}</td>
-        <td>${fmtDate(r.created_at)}</td>
-        <td>${status}</td>
-        <td>${esc(r.used_by_email || '—')}</td>
-        <td>${!r.is_revoked ? `<button class="btn btn-danger btn-sm" onclick="revokeAccessCode(${r.id})">${t('access.revoke')}</button>` : ''}</td>
-      </tr>`;
-    }).join('');
-  } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="5" style="opacity:.6">${t('catalog.error')}</td></tr>`;
-  }
-}
+// Коди реєстрації тепер живуть у списку користувачів (Коди допуску → Користувачі)
+function loadAccessCodes() { return loadUsersFull(); }
 
 async function generateAccessCode() {
   try {
@@ -3578,7 +3585,11 @@ async function generateAccessCode() {
     const d = await r.json();
     if (!r.ok) { toast(d.error || t('toast.codecreateerr'), 'err'); return; }
     toast(`${t('toast.codecreated')}: ${d.code}`, 'ok');
-    loadAccessCodes();
+    try { navigator.clipboard.writeText(d.code); } catch {}
+    // новий код має бути видно — розгортаємо групу вільних кодів
+    const c = _usersCollapsed().filter(k => k !== 'codes');
+    try { localStorage.setItem('users.collapsed', JSON.stringify(c)); } catch {}
+    loadUsersFull();
   } catch (e) {
     toast(t('toast.codecreateerr'), 'err');
   }
@@ -3590,7 +3601,7 @@ async function revokeAccessCode(id) {
     const r = await fetch(`${API}/api/access-codes/${id}`, {method: 'DELETE'});
     if (!r.ok) { toast(t('toast.revokeerr'), 'err'); return; }
     toast(t('toast.coderevoked'), 'ok');
-    loadAccessCodes();
+    loadUsersFull();
   } catch (e) {
     toast(t('toast.revokeerr'), 'err');
   }

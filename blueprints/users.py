@@ -25,8 +25,10 @@ def api_users_list_full():
     """Повний список юзерів з датами — тільки для адміна."""
     db   = get_db()
     rows = qq(db, """
-        SELECT id, email, display_name, is_admin, role, created_at, last_login_at
-        FROM users ORDER BY id
+        SELECT u.id, u.email, u.display_name, u.is_admin, u.role, u.created_at, u.last_login_at,
+               (SELECT ac.code FROM access_codes ac WHERE ac.used_by = u.id
+                 ORDER BY ac.used_at DESC LIMIT 1) AS reg_code
+        FROM users u ORDER BY u.id
     """)
     db.close()
     for r in rows:
@@ -60,6 +62,8 @@ def api_users_delete(user_id):
                 db.close()
                 return jsonify({"error": "Не можна видалити останнього адміна"}), 400
         with db.cursor() as cur:
+            # код, яким людина зареєструвалась, іде разом з нею
+            cur.execute("DELETE FROM access_codes WHERE used_by=%s", (user_id,))
             cur.execute("DELETE FROM users WHERE id=%s", (user_id,))
         db.commit(); db.close()
         return jsonify({"ok": True, "removed": row["display_name"]})
