@@ -331,6 +331,26 @@ class DatabaseTracker:
             )
             return cur.fetchone()
 
+    def file_pool_names(self, file_id: int) -> set:
+        """Усі пули файлу: тека, де він лежить, і додаткові привʼязки."""
+        names = set()
+        with self.db.cursor() as cur:
+            cur.execute("SELECT subfolder FROM furry_posts WHERE file_id=%s", (file_id,))
+            row = cur.fetchone()
+            if row and row['subfolder']:
+                names.add(row['subfolder'])
+            try:
+                cur.execute("SELECT pool_name FROM furry_pool_links WHERE file_id=%s", (file_id,))
+                names.update(r['pool_name'] for r in cur.fetchall())
+            except pymysql.err.ProgrammingError:
+                pass
+        return names
+
+    def link_pools(self, file_id: int, artist_id: int, pools: list, source: str | None) -> int:
+        """Кілька привʼязок разом; повертає, скільки нових."""
+        return sum(1 for name, order in (pools or [])
+                   if self.add_pool_link(file_id, artist_id, name, order, source))
+
     def matched_file(self, artist_id: int, post_id: str, filename: str) -> dict | None:
         """
         Уже збережений файл, з яким збігся новий за pHash: id і чи лежить
@@ -527,6 +547,29 @@ class DatabaseTracker:
         # Зберігаємо теги якщо є і запис новий
         if tags and download_id:
             self._save_tags(download_id, tags)
+        return download_id
+
+    def add_pool_link(self, file_id: int, artist_id: int, pool_name: str, pool_order=None,
+                      source: str | None = None) -> bool:
+        """
+        Та сама робота ще й у цьому пулі: файл не копіюємо, а привʼязуємо
+        (furry_pool_links). Пул, у теці якого файл і так лежить, — пропускаємо.
+        """
+        if not file_id or not pool_name:
+            return False
+        with self.db.cursor() as cur:
+            cur.execute("SELECT subfolder FROM furry_posts WHERE file_id=%s", (file_id,))
+            row = cur.fetchone()
+            if not row or (row['subfolder'] or '') == pool_name:
+                return False
+            try:
+                cur.execute("""INSERT INTO furry_pool_links (file_id, artist_id, pool_name, pool_order, source)
+                               VALUES (%s,%s,%s,%s,%s)
+                               ON DUPLICATE KEY UPDATE pool_order = COALESCE(VALUES(pool_order), pool_order)""",
+                            (file_id, artist_id, pool_name, pool_order, source))
+            except pymysql.err.ProgrammingError:
+                return False          # таблиці ще немає (міграцію не застосовано)
+            return cur.rowcount == 1
 
     def _save_tags(self, download_id: int, tags: list | dict):
         """
@@ -1216,15 +1259,24 @@ class E621Downloader:
         вкладці "Арти" при фільтрі по pool файли йшли по черзі (як сторінки
         коміксу), а не в випадковому порядку.
 
-        Якщо пост належить одразу до кількох pool — береться перший.
+        Якщо пост належить одразу до кількох pool — тут перший (у його теку
+        ляже файл); решту дає _get_pools_info — вони стають привʼязками.
         Дані кешуються (id → {name, post_ids}), щоб не робити зайвий запит
         на кожен пост із того самого pool.
         """
-        pool_ids = post.get('pools') or []
-        if not pool_ids:
-            return None, None
-        pool_id = pool_ids[0]
+        pools = self._get_pools_info(post)
+        return pools[0] if pools else (None, None)
 
+    def _get_pools_info(self, post: dict) -> list:
+        """Усі пули поста: [(назва, номер сторінки), ...] у порядку e621."""
+        out = []
+        for pool_id in post.get('pools') or []:
+            name, order = self._pool_entry(pool_id, post.get('id'))
+            if name and name not in [n for n, _ in out]:
+                out.append((name, order))
+        return out
+
+    def _pool_entry(self, pool_id, post_id) -> tuple:
         if pool_id not in self._pool_name_cache:
             self._rate_limit()
             try:
@@ -1247,8 +1299,8 @@ class E621Downloader:
 
         info  = self._pool_name_cache[pool_id]
         order = None
-        if post.get('id') in info['post_ids']:
-            order = info['post_ids'].index(post['id']) + 1  # 1-based, зручніше для людини
+        if post_id in info['post_ids']:
+            order = info['post_ids'].index(post_id) + 1  # 1-based, зручніше для людини
         return info['name'], order
 
     def get_pool_posts(self, pool_id: int) -> tuple:
@@ -1308,7 +1360,8 @@ class E621Downloader:
             width, height = get_media_dimensions(content, file_ext)
             filename    = f"e621_{post['id']}.{file_ext}"
             filepath    = os.path.join(local_dir, filename)
-            pool_folder, pool_order = self._get_pool_info(post)
+            all_pools = self._get_pools_info(post)
+            pool_folder, pool_order = all_pools[0] if all_pools else (None, None)
             with open(filepath, 'wb') as f:
                 f.write(content)
             return {
@@ -1325,6 +1378,7 @@ class E621Downloader:
                 'page_num':    1,
                 'pool_folder': pool_folder,
                 'pool_order':  pool_order,
+                'extra_pools': all_pools[1:],
                 'tags':        self._extract_e621_tags(post),
             }
         except Exception as e:
@@ -1556,10 +1610,21 @@ class InkbunnyDownloader:
         pool_id з orderby=pool_order (один раз на pool, кешується), і
         визначаємо позицію конкретного поста в цьому впорядкованому списку.
         """
-        if not pools_list:
-            return None, None
-        pool_id   = pools_list[0].get('pool_id')
-        pool_name = pools_list[0].get('name', '') or f"pool_{pool_id}"
+        pools = self._get_pools_info(sub_id, pools_list)
+        return pools[0] if pools else (None, None)
+
+    def _get_pools_info(self, sub_id, pools_list: list) -> list:
+        """Усі пули роботи: [(назва, номер сторінки), ...]."""
+        out = []
+        for p in pools_list or []:
+            name, order = self._pool_entry(sub_id, p)
+            if name and name not in [n for n, _ in out]:
+                out.append((name, order))
+        return out
+
+    def _pool_entry(self, sub_id, pool: dict) -> tuple:
+        pool_id   = pool.get('pool_id')
+        pool_name = pool.get('name', '') or f"pool_{pool_id}"
         safe_name = re.sub(r'[\\/:*?"<>|]', '', pool_name).strip()[:100] or f"pool_{pool_id}"
 
         if pool_id not in self._pool_order_cache:
@@ -1648,7 +1713,8 @@ class InkbunnyDownloader:
         except Exception as e:
             print(f"    ⚠ Детали submission {sub_id}: {e}")
 
-        pool_folder, pool_order = self._get_pool_info(sub_id, submission.get('pools') or [])
+        all_pools = self._get_pools_info(sub_id, submission.get('pools') or [])
+        pool_folder, pool_order = all_pools[0] if all_pools else (None, None)
 
         files = submission.get('files', [])
         if not files:
@@ -1686,6 +1752,8 @@ class InkbunnyDownloader:
                     'page_num':  page_num,
                     'pool_folder': pool_folder,
                     'pool_order':  pool_order,
+                    # у кількох сторінок поста номер у пулі один — привʼязуємо лише першу
+                    'extra_pools': all_pools[1:] if page_num == 1 else [],
                 })
             except Exception as e:
                 print(f"    ✗ Inkbunny {sub_id} стр.{page_num}: {e}")
@@ -1869,6 +1937,8 @@ class FurryArchiver:
         # назвою pool всередині папки автора: @автор/НазваPool/файл.jpg
         pool_folder = result_file.get('pool_folder')
         pool_order  = result_file.get('pool_order')
+        # пост на сайті ще й в інших пулах — їх не копіюємо, а привʼязуємо
+        extra_pools = result_file.get('extra_pools') or []
         subfolder_prefix = f"{pool_folder}/" if pool_folder else ""
 
         if check_duplicates:
@@ -1878,8 +1948,17 @@ class FurryArchiver:
                 os.remove(fpath)
                 # Той самий файл уже є, але поза pool, а на сайті він — сторінка
                 # pool: переносимо наявний у pool, щоб у серії не було дірки.
+                pools_to_link = list(extra_pools)
                 if pool_folder and not same.get('subfolder'):
                     self._move_into_pool(artist_path, same, pool_folder, pool_order)
+                elif pool_folder and same.get('subfolder') != pool_folder:
+                    # уже лежить в іншому пулі — додаємо й у цей, без копії
+                    pools_to_link.insert(0, (pool_folder, pool_order))
+                if pools_to_link and not dry_run:
+                    n = self.tracker.link_pools(same['id'], artist_id, pools_to_link, source)
+                    if n:
+                        print(f"    🔗 {same['name']} — ще й у пулі "
+                              + ", ".join(f"«{nm}»" for nm, _ in pools_to_link) + " (без копії файлу)")
                 return 'md5_dup'
 
             # 1b. Раніше відхилений як дублікат — пропускаємо
@@ -1905,16 +1984,34 @@ class FurryArchiver:
                     old_pool = (matched or {}).get('subfolder')
                     near     = hamming_dist <= self.cross_source_threshold
                     pool_priority = bool(pool_folder and not old_pool and near)
+                    # у яких пулах збережений файл уже є (свій + привʼязки)
+                    matched_pools = self.tracker.file_pool_names(matched['id']) if matched else set()
+
+                    # Та сама робота з іншого сайту, але в ІНШОМУ пулі (на e621
+                    # в одному, на Inkbunny в іншому). Копія не потрібна:
+                    # збережений файл просто додається і в цей пул.
+                    if (secondary and near and matched and pool_folder and old_pool
+                            and pool_folder not in matched_pools):
+                        os.remove(fpath)
+                        if not dry_run:
+                            self.tracker.link_pools(matched['id'], matched_artist_id,
+                                                    [(pool_folder, pool_order)] + list(extra_pools), source)
+                            self.tracker.add_rejected(artist_id, post_id, md5, pnum)
+                        print(f"    🔗 {matched_filename} — та сама робота й у пулі «{pool_folder}»"
+                              f" (стор. {pool_order or '?'}), копію не зберігаю")
+                        return f'cross_dup:{matched_filename}:{hamming_dist}'
 
                     # Друге джерело і збіг впритул — це дзеркало тієї самої
                     # роботи. Відкидаємо одразу й запам'ятовуємо відмову —
                     # якщо тільки новий файл не потрібен якомусь pool:
                     #   * новий у pool, старий ні → замінимо старий (pool_priority);
                     #   * обидва в РІЗНИХ pool → на ручний розбір, хай вирішує людина.
-                    both_pools_differ = bool(pool_folder and old_pool and pool_folder != old_pool)
+                    both_pools_differ = bool(pool_folder and old_pool and pool_folder not in matched_pools)
                     if secondary and near and not pool_priority and not both_pools_differ:
                         os.remove(fpath)
                         self.tracker.add_rejected(artist_id, post_id, md5, pnum)
+                        if matched and extra_pools and not dry_run:
+                            self.tracker.link_pools(matched['id'], matched_artist_id, extra_pools, source)
                         return f'cross_dup:{matched_filename}:{hamming_dist}'
 
                     os.makedirs(PENDING_DIR, exist_ok=True)
@@ -1946,7 +2043,7 @@ class FurryArchiver:
 
         remote_path = f"{artist_path}{subfolder_prefix}{fname}"
         if self.nc_scanner.upload_file(fpath, remote_path):
-            self.tracker.add_download(
+            new_id = self.tracker.add_download(
                 artist_id=artist_id,
                 post_id=post_id,
                 source=source,
@@ -1963,6 +2060,8 @@ class FurryArchiver:
                 pool_order=pool_order,
                 size_bytes=size_bytes,
             )
+            if new_id and extra_pools:
+                self.tracker.link_pools(new_id, artist_id, extra_pools, source)
             os.remove(fpath)
             return 'uploaded'
         else:
@@ -2160,10 +2259,11 @@ class FurryArchiver:
         artist_id, folder_name = row['id'], row['folder_name']
 
         print("[1/3] Наявні файли → pool-підпапки")
-        moved = self._sync_check_pool_relocate(artist_id, folder_name) or 0
-        moved_ib = self._sync_check_pool_relocate_inkbunny(artist_id, folder_name) or 0
+        # full=True — і файли, що вже в пулі: шукаємо їхні додаткові пули
+        moved = self._sync_check_pool_relocate(artist_id, folder_name, full=True) or 0
+        moved_ib = self._sync_check_pool_relocate_inkbunny(artist_id, folder_name, full=True) or 0
         self.tracker.save()
-        print(f"    📦 перенесено в pool: e621 {moved}, Inkbunny {moved_ib}")
+        print(f"    📦 перенесено в pool / додано в інші пули: e621 {moved}, Inkbunny {moved_ib}")
 
         print("[2/3] Автоматичні відмови «вже є з іншого сайту»")
         cleared = self.tracker.clear_auto_rejected(artist_id)
@@ -3293,7 +3393,7 @@ class FurryArchiver:
             return
         self._sync_finish(by_folder, dry_run, via="локальний диск", compute_hashes=compute_hashes)
 
-    def _sync_check_pool_relocate(self, artist_id: int, folder_name: str) -> int:
+    def _sync_check_pool_relocate(self, artist_id: int, folder_name: str, full: bool = False) -> int:
         """
         Для вже наявних у БД файлів цього автора з джерелом e621, які ще не
         лежать у підпапці pool (subfolder IS NULL) — переносить у
@@ -3310,11 +3410,11 @@ class FurryArchiver:
             return 0
         with self.db.cursor() as cur:
             cur.execute("""
-                SELECT f.id, fp.post_id, f.name AS filename, fp.subfolder
+                SELECT f.id, fp.post_id, f.name AS filename, fp.subfolder, fp.pool_order
                 FROM furry_posts fp JOIN files f ON f.id = fp.file_id
                 WHERE artist_id=%s AND source='e621'
-                  AND (subfolder IS NULL OR pool_order IS NULL)
-            """, (artist_id,))
+                  AND (%s OR subfolder IS NULL OR pool_order IS NULL)
+            """, (artist_id, 1 if full else 0))
             rows = cur.fetchall()
         if not rows:
             return 0
@@ -3323,6 +3423,7 @@ class FurryArchiver:
         posts = self.e621_dl.search_artist_posts(artist_name)
         pools_by_post = {p['id']: (p.get('pools') or []) for p in posts}
 
+        linked     = 0  # додаткові пули (та сама робота ще в одному пулі)
         moved      = 0  # реально перенесені файли (subfolder щойно проставлено)
         ordered    = 0  # тільки дозаповнено pool_order (файл вже на місці)
         not_found  = []   # пости, яких немає серед результатів пошуку за тегом
@@ -3343,19 +3444,27 @@ class FurryArchiver:
             if not pool_ids:
                 no_pool += 1
                 continue
-            pool_folder, pool_order = self.e621_dl._get_pool_info({'id': int(numeric), 'pools': pool_ids})
-            if not pool_folder:
+            all_pools = self.e621_dl._get_pools_info({'id': int(numeric), 'pools': pool_ids})
+            if not all_pools:
                 errors.append(row['filename'])
                 continue
+            # «рідний» пул — той, у теці якого файл уже лежить (якщо це один
+            # з пулів поста), інакше перший; решта — привʼязки без копії
+            names = [n for n, _ in all_pools]
+            primary = row['subfolder'] if row['subfolder'] in names else names[0]
+            pool_folder, pool_order = all_pools[names.index(primary)]
+            linked += self.tracker.link_pools(row['id'], artist_id,
+                                              [p for p in all_pools if p[0] != primary], 'e621')
 
             if row['subfolder'] == pool_folder:
                 # Файл уже фізично лежить у правильній підпапці (наприклад,
                 # це щойно виявив звичайний скан структури) — переміщувати
                 # нічого не треба, лишається тільки дозаповнити pool_order.
-                with self.db.cursor() as cur:
-                    cur.execute("UPDATE furry_posts SET pool_order=%s WHERE file_id=%s",
-                                (pool_order, row['id']))
-                ordered += 1
+                if row.get('pool_order') != pool_order:
+                    with self.db.cursor() as cur:
+                        cur.execute("UPDATE furry_posts SET pool_order=%s WHERE file_id=%s",
+                                    (pool_order, row['id']))
+                    ordered += 1
                 continue
 
             if row['subfolder']:
@@ -3386,6 +3495,7 @@ class FurryArchiver:
         summary = (f"    🔍 pool-перевірка {folder_name}: {len(rows)} файл(ів) перевірено, "
                    f"{len(posts)} постів знайдено за тегом «{artist_name}», "
                    f"перенесено {moved}, дозаповнено порядок {ordered}, без pool {no_pool}")
+        if linked:    summary += f", додано в інші пули {linked}"
         if not_found: summary += f", не знайдено в пошуку {len(not_found)}"
         if errors:    summary += f", помилок {len(errors)}"
         print(summary)
@@ -3400,11 +3510,11 @@ class FurryArchiver:
             sample = ', '.join(errors[:3])
             print(f"      ⚠ помилки перенесення: {sample}")
 
-        if moved or ordered:
+        if moved or ordered or linked:
             self.db.commit()
-        return moved + ordered
+        return moved + ordered + linked
 
-    def _sync_check_pool_relocate_inkbunny(self, artist_id: int, folder_name: str) -> int:
+    def _sync_check_pool_relocate_inkbunny(self, artist_id: int, folder_name: str, full: bool = False) -> int:
         """
         Той самий retro-активний перенос у pool-підпапки, що вже є для e621
         (_sync_check_pool_relocate), тепер і для Inkbunny — для файлів,
@@ -3414,11 +3524,11 @@ class FurryArchiver:
             return 0
         with self.db.cursor() as cur:
             cur.execute("""
-                SELECT f.id, fp.post_id, f.name AS filename, fp.subfolder
+                SELECT f.id, fp.post_id, f.name AS filename, fp.subfolder, fp.pool_order
                 FROM furry_posts fp JOIN files f ON f.id = fp.file_id
                 WHERE artist_id=%s AND source='inkbunny'
-                  AND (subfolder IS NULL OR pool_order IS NULL)
-            """, (artist_id,))
+                  AND (%s OR subfolder IS NULL OR pool_order IS NULL)
+            """, (artist_id, 1 if full else 0))
             rows = cur.fetchall()
         if not rows:
             return 0
@@ -3448,7 +3558,7 @@ class FurryArchiver:
             except Exception as e:
                 print(f"    ✗ Inkbunny деталі (pool-перевірка): {e}")
 
-        moved, ordered, no_pool = 0, 0, 0
+        moved, ordered, no_pool, linked = 0, 0, 0, 0
         not_found, errors = [], []
 
         for row in rows:
@@ -3463,16 +3573,22 @@ class FurryArchiver:
             if not pools_list:
                 no_pool += 1
                 continue
-            pool_folder, pool_order = self.ib_dl._get_pool_info(int(numeric), pools_list)
-            if not pool_folder:
+            all_pools = self.ib_dl._get_pools_info(int(numeric), pools_list)
+            if not all_pools:
                 errors.append(row['filename'])
                 continue
+            names = [n for n, _ in all_pools]
+            primary = row['subfolder'] if row['subfolder'] in names else names[0]
+            pool_folder, pool_order = all_pools[names.index(primary)]
+            linked += self.tracker.link_pools(row['id'], artist_id,
+                                              [p for p in all_pools if p[0] != primary], 'inkbunny')
 
             if row['subfolder'] == pool_folder:
-                with self.db.cursor() as cur:
-                    cur.execute("UPDATE furry_posts SET pool_order=%s WHERE file_id=%s",
-                                (pool_order, row['id']))
-                ordered += 1
+                if row.get('pool_order') != pool_order:
+                    with self.db.cursor() as cur:
+                        cur.execute("UPDATE furry_posts SET pool_order=%s WHERE file_id=%s",
+                                    (pool_order, row['id']))
+                    ordered += 1
                 continue
 
             if row['subfolder']:
@@ -3498,13 +3614,14 @@ class FurryArchiver:
 
         summary = (f"    🔍 pool-перевірка (Inkbunny) {folder_name}: {len(rows)} файл(ів) перевірено, "
                    f"перенесено {moved}, дозаповнено порядок {ordered}, без pool {no_pool}")
+        if linked:    summary += f", додано в інші пули {linked}"
         if not_found: summary += f", не знайдено {len(not_found)}"
         if errors:    summary += f", помилок {len(errors)}"
         print(summary)
 
-        if moved or ordered:
+        if moved or ordered or linked:
             self.db.commit()
-        return moved + ordered
+        return moved + ordered + linked
 
     def _sync_hash_one(self, f: dict) -> dict:
         """Виконується в окремому потоці: читає файл і рахує MD5/pHash/розміри."""

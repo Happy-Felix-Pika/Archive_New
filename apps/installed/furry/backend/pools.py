@@ -9,6 +9,60 @@ from core.db import get_db, qq
 
 bp = Blueprint("pools", __name__)
 
+# Усі «учасники» пулів: файли, що лежать у теці пулу (furry_posts.subfolder),
+# і файли, привʼязані до пулу додатково (furry_pool_links — та сама робота
+# в кількох пулах). Скрізь, де рахуються чи показуються пули, — через це.
+POOL_MEMBERS = """(
+    SELECT fp.file_id, fp.artist_id, fp.subfolder AS pool_name, fp.pool_order, fp.source, 0 AS linked
+      FROM furry_posts fp WHERE fp.subfolder IS NOT NULL AND fp.subfolder <> ''
+    UNION ALL
+    SELECT pl.file_id, pl.artist_id, pl.pool_name, pl.pool_order, pl.source, 1 AS linked
+      FROM furry_pool_links pl
+)"""
+
+
+def add_link(db, file_id, artist_id, pool_name, pool_order=None, source=None):
+    """
+    Додати файл у ще один пул (без копії файлу). Повертає True, якщо
+    з'явилась нова привʼязка. Пул, у теці якого файл і так лежить, не
+    дублюється.
+    """
+    if not pool_name:
+        return False
+    with db.cursor() as cur:
+        cur.execute("SELECT subfolder FROM furry_posts WHERE file_id=%s", (file_id,))
+        row = cur.fetchone()
+        if row and (row["subfolder"] or "") == pool_name:
+            return False
+        cur.execute("""INSERT INTO furry_pool_links (file_id, artist_id, pool_name, pool_order, source)
+                       VALUES (%s,%s,%s,%s,%s)
+                       ON DUPLICATE KEY UPDATE pool_order = COALESCE(VALUES(pool_order), pool_order)""",
+                    (file_id, artist_id, pool_name, pool_order, source))
+        added = cur.rowcount == 1
+    _invalidate_pools_cache()
+    return added
+
+
+def remove_link(db, file_id, pool_name):
+    with db.cursor() as cur:
+        cur.execute("DELETE FROM furry_pool_links WHERE file_id=%s AND pool_name=%s", (file_id, pool_name))
+        n = cur.rowcount
+    _invalidate_pools_cache()
+    return n > 0
+
+
+def set_order(cur, file_id, pool_order, pool_name=None):
+    """Номер сторінки файлу в пулі: у «рідному» пулі — furry_posts,
+    у додатковому — furry_pool_links."""
+    if pool_name:
+        cur.execute("SELECT subfolder FROM furry_posts WHERE file_id=%s", (file_id,))
+        row = cur.fetchone()
+        if not row or (row["subfolder"] or "") != pool_name:
+            cur.execute("UPDATE furry_pool_links SET pool_order=%s WHERE file_id=%s AND pool_name=%s",
+                        (pool_order, file_id, pool_name))
+            return
+    cur.execute("UPDATE furry_posts SET pool_order=%s WHERE file_id=%s", (pool_order, file_id))
+
 
 _pools_cache = {"data": None, "ts": 0}
 _POOLS_CACHE_TTL = 3600  # 1 год — той самий підхід, що й для тегів
@@ -22,12 +76,11 @@ def _rebuild_pools_cache():
     і при старті, і фоновим потоком регулярно, як і для тегів."""
     try:
         db   = get_db()
-        rows = qq(db, """
-            SELECT d.subfolder AS name, d.artist_id, a.artist_name, d.source, COUNT(*) AS cnt
-            FROM furry_posts d
+        rows = qq(db, f"""
+            SELECT d.pool_name AS name, d.artist_id, a.artist_name, d.source, COUNT(*) AS cnt
+            FROM {POOL_MEMBERS} d
             JOIN artists a ON a.id = d.artist_id
-            WHERE d.subfolder IS NOT NULL
-            GROUP BY d.artist_id, d.subfolder, d.source
+            GROUP BY d.artist_id, d.pool_name, d.source
             ORDER BY cnt DESC
         """)
         db.close()
@@ -56,7 +109,7 @@ def api_pools():
             _rebuild_pools_cache()
         return jsonify(_pools_cache["data"] or [])
 
-    where = ["d.subfolder IS NOT NULL"]
+    where = ["1=1"]
     args  = []
     if artist_id:
         where.append("d.artist_id = %s")
@@ -66,7 +119,7 @@ def api_pools():
         where.append(f"""
             EXISTS (
                 SELECT dt.download_id FROM download_tags dt
-                WHERE dt.download_id = d.id AND dt.tag_id IN ({placeholders})
+                WHERE dt.download_id = d.file_id AND dt.tag_id IN ({placeholders})
                 GROUP BY dt.download_id
                 HAVING COUNT(DISTINCT dt.tag_id) = %s
             )
@@ -76,11 +129,11 @@ def api_pools():
     try:
         db   = get_db()
         rows = qq(db, f"""
-            SELECT d.subfolder AS name, d.artist_id, a.artist_name, d.source, COUNT(*) AS cnt
-            FROM furry_posts d
+            SELECT d.pool_name AS name, d.artist_id, a.artist_name, d.source, COUNT(*) AS cnt
+            FROM {POOL_MEMBERS} d
             JOIN artists a ON a.id = d.artist_id
             WHERE {' AND '.join(where)}
-            GROUP BY d.artist_id, d.subfolder, d.source
+            GROUP BY d.artist_id, d.pool_name, d.source
             ORDER BY cnt DESC
         """, args)
         db.close()
@@ -109,7 +162,7 @@ def api_external_access_pools():
         return jsonify({"error": "Ключ доступу недійсний або деактивований"}), 403
 
     hidden = get_hidden_folders_for_key(key_id)
-    args, where = [], ["d.subfolder IS NOT NULL"]
+    args, where = [], ["1=1"]
     if hidden:
         ph = ",".join(["%s"] * len(hidden))
         where.append(f"a.folder_name NOT IN ({ph})")
@@ -117,11 +170,11 @@ def api_external_access_pools():
     db = get_db()
     try:
         rows = qq(db, f"""
-            SELECT d.subfolder AS name, d.artist_id, a.artist_name, d.source, COUNT(*) AS cnt
-            FROM furry_posts d
+            SELECT d.pool_name AS name, d.artist_id, a.artist_name, d.source, COUNT(*) AS cnt
+            FROM {POOL_MEMBERS} d
             JOIN artists a ON a.id = d.artist_id
             WHERE {' AND '.join(where)}
-            GROUP BY d.artist_id, d.subfolder, d.source
+            GROUP BY d.artist_id, d.pool_name, d.source
             ORDER BY cnt DESC
         """, args)
         return jsonify(rows)

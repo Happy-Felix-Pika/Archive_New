@@ -90,6 +90,51 @@ def _matched_file(db, row: dict) -> dict | None:
              (row["matched_post_id"], row["matched_filename"], folder))
 
 
+def _matched_pools(db, file_id) -> list:
+    """Пули збереженого файлу: тека, де він лежить, і додаткові привʼязки."""
+    names = []
+    r = q(db, "SELECT subfolder FROM furry_posts WHERE file_id=%s", (file_id,))
+    if r and r["subfolder"]:
+        names.append(r["subfolder"])
+    try:
+        names += [x["pool_name"] for x in qq(db, "SELECT pool_name FROM furry_pool_links WHERE file_id=%s ORDER BY pool_name",
+                                             (file_id,)) if x["pool_name"] not in names]
+    except Exception:
+        pass          # таблиці привʼязок ще немає
+    return names
+
+
+def _link_into_pool(db, row) -> dict | None:
+    """
+    Новий файл відкинули як дублікат, але на сайті він — сторінка пулу,
+    в якому збереженого ще немає. Одна робота — кілька пулів: додаємо
+    збережений файл і в цей пул (без копії), з номером сторінки нового.
+    Повертає привʼязку (для відміни) або None.
+    """
+    pool = row.get("pool_folder")
+    if not pool:
+        return None
+    m = _matched_file(db, row)
+    if not m or pool in _matched_pools(db, m["id"]):
+        return None
+    try:
+        with db.cursor() as cur:
+            cur.execute("""INSERT IGNORE INTO furry_pool_links (file_id, artist_id, pool_name, pool_order, source)
+                           VALUES (%s,%s,%s,%s,%s)""",
+                        (m["id"], m["artist_id"], pool, row.get("pool_order"), row.get("source")))
+            if not cur.rowcount:
+                return None
+    except Exception as e:
+        print(f"  ⚠ Не вдалося додати «{m['name']}» у пул «{pool}»: {e}")
+        return None
+    try:
+        import sys      # пакет furry підключає менеджер застосунків під цим іменем
+        sys.modules["archive_app_furry.pools"]._invalidate_pools_cache()
+    except Exception:
+        pass
+    return {"file_id": m["id"], "pool_name": pool, "file_name": m["name"]}
+
+
 def _attach_matched_pool(db, rows):
     """Дописує в рядки черги, чи збережений файл лежить у pool."""
     for r in rows:
@@ -101,6 +146,7 @@ def _attach_matched_pool(db, rows):
         r["matched_file_id"]    = m["id"] if m else None
         r["matched_subfolder"]  = m["subfolder"] if m else None
         r["matched_pool_order"] = m["pool_order"] if m else None
+        r["matched_pools"]      = _matched_pools(db, m["id"]) if m else []
         r.setdefault("pool_folder", None)
         r.setdefault("pool_order", None)
         r.setdefault("pool_priority", 0)
@@ -539,15 +585,18 @@ def api_pending_reject(pending_id):
                 if lp and os.path.exists(lp): os.remove(lp)
             except Exception: pass
         snap = _snap(row)
+        link = _link_into_pool(db, row)       # сторінка іншого пулу — збережений файл іде й туди
         with db.cursor() as cur:
             _reject(cur, row["artist_id"], row["post_id"], row["page_num"], row["md5_hash"], "manual")
             cur.execute("DELETE FROM pending_duplicates WHERE id=%s", (pending_id,))
         db.commit()
         db.close()
         if kept:
-            modlog.record("pending.reject", f"«{row['filename']}» ≈ «{row['matched_filename']}»",
-                          {"pending": snap, "kept": kept})
-        return jsonify({"ok": True})
+            summary = f"«{row['filename']}» ≈ «{row['matched_filename']}»"
+            if link:
+                summary += f" (+ пул «{link['pool_name']}»)"
+            modlog.record("pending.reject", summary, {"pending": snap, "kept": kept, "link": link})
+        return jsonify({"ok": True, "linked_pool": link["pool_name"] if link else None})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -558,10 +607,11 @@ def api_pending_reject_all():
     try:
         db   = get_db()
         rows = qq(db, """
-            SELECT p.id, p.local_path, p.artist_id, p.post_id, p.page_num, p.md5_hash
+            SELECT p.*, a.folder_name
             FROM pending_duplicates p
             JOIN artists a ON a.id = p.artist_id
         """)
+        linked = sum(1 for r in rows if _link_into_pool(db, r))
         for r in rows:
             try:
                 if r["local_path"] and os.path.exists(r["local_path"]): os.remove(r["local_path"])
@@ -572,7 +622,7 @@ def api_pending_reject_all():
                 cur.execute("DELETE FROM pending_duplicates WHERE id=%s", (r["id"],))
         db.commit()
         db.close()
-        return jsonify({"ok": True, "deleted": len(rows)})
+        return jsonify({"ok": True, "deleted": len(rows), "linked": linked})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -886,6 +936,13 @@ def _undo_reject(p):
     except Exception:
         shutil.move(target, kept)
         raise
+    link = p.get("link")
+    if link:
+        db = get_db()
+        with db.cursor() as cur:
+            cur.execute("DELETE FROM furry_pool_links WHERE file_id=%s AND pool_name=%s",
+                        (link["file_id"], link["pool_name"]))
+        db.commit()
     return "файл знову в черзі «На перевірку»"
 
 

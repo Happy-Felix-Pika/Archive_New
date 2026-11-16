@@ -451,7 +451,7 @@ async function poolEditorLoad() {
           <img src="${API}${f.stream_url}" style="width:100%;aspect-ratio:1;object-fit:cover;border-radius:6px;cursor:zoom-in" onclick="galOpenFullscreen('${API}${f.stream_url}')">
           <input type="checkbox" data-pool-file-id="${f.id}" style="position:absolute;top:4px;left:4px;width:16px;height:16px">
         </div>
-        <div style="font-size:9.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(f.filename)}">${esc(f.filename)}</div>
+        <div style="font-size:9.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(f.filename)}${f.linked ? ' — лежить в іншому пулі, сюди привʼязаний' : ''}">${f.linked ? '🔗 ' : ''}${esc(f.filename)}</div>
         <div style="display:flex;align-items:center;gap:4px">
           <span style="font-size:10px;color:var(--muted)">стор.</span>
           <input type="number" value="${f.pool_order ?? ''}" data-pool-order-id="${f.id}" onchange="poolEditorSetPage(${f.id}, this.value)"
@@ -467,7 +467,8 @@ async function poolEditorSetPage(downloadId, value) {
   try {
     await fetch(`${API}/api/downloads/${downloadId}/set-page`, {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ pool_order: value ? parseInt(value) : null })
+      body: JSON.stringify({ pool_order: value ? parseInt(value) : null,
+                             pool: document.getElementById('pool-editor-select').value || null })
     });
     toast('Номер сторінки збережено', 'ok');
   } catch {
@@ -864,6 +865,22 @@ let _pendingOffset = 0;
 let _pendingTotal  = 0;
 let _pendingBusy   = false;
 
+// Пули файлу в картці перегляду. Одна робота може бути в кількох пулах
+// (furry_pool_links) — показуємо всі; той, що зараз гортаєш, — першим.
+function galPoolBadges(d) {
+  let pools = Array.isArray(d.pools) && d.pools.length ? d.pools.slice()
+    : (d.subfolder ? [{ name: d.subfolder, order: d.pool_order, total: d.pool_total, artist_id: d.artist_id }] : []);
+  if (!pools.length) return '';
+  const cur = typeof _galSelectedPool !== 'undefined' ? _galSelectedPool : '';
+  pools.sort((a, b) => (b.name === cur) - (a.name === cur));
+  return pools.map((p, i) => `<div class="pool-progress-badge" data-pool="${esc(p.name)}" data-artist-id="${p.artist_id || d.artist_id}" data-artist-name="${esc(d.artist)}" title="${t('gal.filterbypool')}">
+        <i>${p.linked ? '🔗' : '📖'}</i>
+        <span class="pool-progress-title">${esc(p.name)}</span>
+        <div class="pool-progress-bar"><div class="pool-progress-fill" style="width:${p.total ? Math.min(100, Math.round(((p.order||1)/p.total)*100)) : 0}%"></div></div>
+        <span class="pool-progress-count">${t('gal.page')} ${p.order||'?'}${(p.order || 0) <= (p.total || 0) ? ` ${t('gal.of')} ${p.total}` : ''}${i === 0 ? ' <span style="opacity:.5">(P)</span>' : ''}</span>
+      </div>`).join('');
+}
+
 // Pool (серія) у парі: новий файл — сторінка pool на сайті, збережений лежить
 // у pool в архіві. Від цього залежить, що станеться при кожній дії.
 function _pendingPoolLabel(name, order) {
@@ -880,8 +897,15 @@ function pendingPoolNote(item) {
   } else {
     if (op) notes.push(`⚠ Збережений файл — сторінка пулу ${_pendingPoolLabel(op, item.matched_pool_order)}. ` +
                        `«${t('pending.replaceold')}» поставить новий на його місце в пулі.`);
-    if (np && np !== op) notes.push(`⚠ Новий файл — сторінка пулу ${_pendingPoolLabel(np, item.pool_order)} на сайті. ` +
-                       `Якщо позначити його як дублікат, цієї сторінки в пулі не буде.`);
+    const inPools = item.matched_pools || (op ? [op] : []);
+    if (np && !inPools.includes(np) && item.matched_file_id) {
+      // одна робота — кілька пулів: при «Дублікат» збережений файл іде й у цей пул
+      notes.push(`🔗 Новий файл — сторінка пулу ${_pendingPoolLabel(np, item.pool_order)} на сайті. ` +
+                 `«${t('pending.duplicate')}» не втратить цю сторінку: збережений файл додасться й у цей пул, без копії.`);
+    } else if (np && np !== op && !inPools.includes(np)) {
+      notes.push(`⚠ Новий файл — сторінка пулу ${_pendingPoolLabel(np, item.pool_order)} на сайті. ` +
+                 `Якщо позначити його як дублікат, цієї сторінки в пулі не буде.`);
+    }
   }
   return `<div class="review-pool-note">${notes.map(n => `<div>${n}</div>`).join('')}</div>`;
 }
@@ -930,6 +954,7 @@ function pendingCardHtml(item) {
             <div class="review-meta-row"><span class="review-meta-key">post</span><span class="review-meta-val">${item.matched_post_id||'—'}</span></div>
             <div class="review-meta-row"><span class="review-meta-key">${t('pending.size')}</span><span class="review-meta-val" id="size-match-${item.id}">…</span></div>
             ${item.matched_subfolder ? `<div class="review-meta-row"><span class="review-meta-key">📚 пул</span><span class="review-meta-val review-pool">${_pendingPoolLabel(item.matched_subfolder, item.matched_pool_order)}</span></div>` : ''}
+            ${(item.matched_pools || []).filter(n => n !== item.matched_subfolder).map(n => `<div class="review-meta-row"><span class="review-meta-key">🔗 пул</span><span class="review-meta-val review-pool">«${esc(n)}»</span></div>`).join('')}
           </div>
         </div>
       </div>
@@ -1214,7 +1239,8 @@ async function rejectItem(id) {
   card.style.opacity = '.35';
   const r = await fetch(`${API}/api/pending/${id}/reject`, {method:'POST'});
   if (r.ok) {
-    toast(t('toast.rejected'), 'ok');
+    const d = await r.json().catch(() => ({}));
+    toast(d.linked_pool ? `${t('toast.rejected')} · 🔗 + пул «${d.linked_pool}»` : t('toast.rejected'), 'ok');
     fadeRemove(card);
     adjustCounter(-1);
   } else {
@@ -1985,12 +2011,7 @@ async function galleryShow(idx) {
           ${canModerate() ? `<span class="catalog-crumb" style="color:var(--red)" onclick="galDeleteFile(${id})" title="${t('gal.delete')}">🗑</span>` : ''}
         </span>
       </div>
-      ${d.subfolder ? `<div class="pool-progress-badge" data-pool="${esc(d.subfolder)}" data-artist-id="${d.artist_id}" data-artist-name="${esc(d.artist)}" title="${t('gal.filterbypool')}">
-        <i>📖</i>
-        <span class="pool-progress-title">${esc(d.subfolder)}</span>
-        <div class="pool-progress-bar"><div class="pool-progress-fill" style="width:${d.pool_total ? Math.round(((d.pool_order||1)/d.pool_total)*100) : 0}%"></div></div>
-        <span class="pool-progress-count">${t('gal.page')} ${d.pool_order||1} ${t('gal.of')} ${d.pool_total||1} <span style="opacity:.5">(P)</span></span>
-      </div>` : ''}
+      ${galPoolBadges(d)}
       <div class="gallery-tags-toggle" onclick="galToggleTagsPanel(${id})">
         <span>🏷 ${(d.tags||[]).length} ${t('gal.tagscount')}</span>
         <span class="gal-tags-chevron">▾</span>
@@ -2476,7 +2497,8 @@ document.addEventListener('keydown', e => {
     e.preventDefault();
     const curId = _galIds[_galIdx];
     const meta  = _galMeta[curId];
-    if (meta?.subfolder) { galEnterPool(meta.subfolder, meta.artist_id, meta.artist); return; }
+    const poolName = meta?.subfolder || meta?.pools?.[0]?.name;
+    if (poolName) { galEnterPool(poolName, meta.pools?.find(p => p.name === poolName)?.artist_id || meta.artist_id, meta.artist); return; }
     // Раніше тут була мовчанка: ні пулу, ні пояснення. Якщо в картці
     // немає subfolder — файл не прив'язаний до поста (нема рядка в
     // furry_posts), і галерея просто не знає, до якого pool він
