@@ -5,7 +5,8 @@ import os, re, shutil
 from flask import Blueprint, jsonify, request as flask_request
 
 
-from .pools import _invalidate_pools_cache, pool_members, set_order
+from .pools import _invalidate_pools_cache
+from . import poolstore
 from blueprints.tags import _invalidate_tags_cache
 from core.auth import admin_required, moderator_required, get_user_nc_config
 from core import modlog
@@ -258,13 +259,16 @@ def api_artist_pool_editor(artist_id):
     try:
         db = get_db()
         if subfolder:
-            # і файли з теки пулу, і привʼязані до нього з інших пулів
-            members, margs = pool_members("{artist_id}=%s AND {pool_name}=%s", (artist_id, subfolder))
-            rows = qq(db, f"""
-                SELECT f.id, f.name AS filename, m.pool_order, f.ext AS file_ext, m.linked
-                FROM {members} m JOIN files f ON f.id = m.file_id
-                ORDER BY m.pool_order ASC, f.id ASC
-            """, margs)
+            # сторінки пулу: і з його теки, і привʼязані з інших пулів
+            with db.cursor() as cur:
+                pid = poolstore.find_pool(cur, artist_id, subfolder)
+            rows = qq(db, """
+                SELECT f.id, f.name AS filename, i.page AS pool_order, f.ext AS file_ext,
+                       1 - i.via_folder AS linked
+                FROM furry_pool_items i JOIN files f ON f.id = i.file_id
+                WHERE i.pool_id = %s
+                ORDER BY i.page IS NULL, i.page ASC, f.id ASC
+            """, (pid,)) if pid else []
         else:
             rows = qq(db, """
                 SELECT f.id, f.name AS filename, fp.pool_order, f.ext AS file_ext
@@ -284,12 +288,9 @@ def api_artist_pool_names(artist_id):
     """Список назв усіх pool цього автора — для вибору в редакторі."""
     try:
         db   = get_db()
-        members, margs = pool_members("{artist_id}=%s", (artist_id,))
-        rows = qq(db, f"""
-            SELECT DISTINCT m.pool_name FROM {members} m ORDER BY m.pool_name
-        """, margs)
+        rows = qq(db, "SELECT name FROM furry_pools WHERE artist_id=%s ORDER BY name", (artist_id,))
         db.close()
-        return jsonify([r["pool_name"] for r in rows])
+        return jsonify([r["name"] for r in rows])
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -303,21 +304,27 @@ def api_download_set_page(download_id):
     pool  = (body.get("pool") or "").strip() or None   # у якому пулі (файл може бути в кількох)
     try:
         db = get_db()
-        old = q(db, """SELECT fp.pool_order, fp.subfolder, f.name FROM furry_posts fp
+        old = q(db, """SELECT fp.artist_id, fp.pool_order, fp.subfolder, f.name FROM furry_posts fp
                        JOIN files f ON f.id = fp.file_id WHERE fp.file_id=%s""", (download_id,))
-        if old and pool and pool != (old["subfolder"] or ""):
-            link = q(db, "SELECT pool_order FROM furry_pool_links WHERE file_id=%s AND pool_name=%s",
-                     (download_id, pool))
-            if link:
-                old = {**old, "pool_order": link["pool_order"], "subfolder": pool}
-            else:
-                pool = None
+        pid = None
         with db.cursor() as cur:
-            set_order(cur, download_id, order, pool)
+            if old:
+                pid = poolstore.find_pool(cur, old["artist_id"], pool or old["subfolder"])
+            if pid:
+                cur.execute("SELECT page FROM furry_pool_items WHERE pool_id=%s AND file_id=%s", (pid, download_id))
+                item = cur.fetchone()
+                if item:
+                    old = {**old, "pool_order": item["page"], "subfolder": pool or old["subfolder"]}
+                    poolstore.set_page(cur, download_id, pid, order)
+                else:
+                    pid = None
+            if not pid:
+                cur.execute("UPDATE furry_posts SET pool_order=%s WHERE file_id=%s", (order, download_id))
+                poolstore.sync_file(cur, download_id)
         db.commit(); db.close()
         if old and old["pool_order"] != order:
             modlog.record("pool.set_page", f"«{old['name']}» у «{old['subfolder']}»: стор. {old['pool_order']} → {order}",
-                          {"orders": [{"file_id": download_id, "pool_order": old["pool_order"], "pool": pool}]})
+                          {"orders": [{"file_id": download_id, "pool_order": old["pool_order"], "pool_id": pid}]})
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -372,31 +379,32 @@ def api_artist_pool_assign(artist_id):
                 print(f"  ⚠ Не вдалося перемістити {row['filename']}: {e}")
 
         with db.cursor() as cur:
-            # файли тепер «рідні» в цьому пулі — додаткові привʼязки до нього прибираємо
-            cur.execute(f"""SELECT file_id, artist_id, pool_name, pool_order, source FROM furry_pool_links
-                            WHERE pool_name=%s AND file_id IN ({placeholders})""", [pool_name] + download_ids)
-            removed_links = cur.fetchall()
-            cur.execute(f"DELETE FROM furry_pool_links WHERE pool_name=%s AND file_id IN ({placeholders})",
-                        [pool_name] + download_ids)
+            # ці файли вже були в пулі додатково — запамʼятовуємо (для відміни),
+            # тепер вони в ньому «рідні»
+            pid = poolstore.ensure_pool(cur, artist_id, pool_name)
+            cur.execute(f"""SELECT file_id, page AS pool_order FROM furry_pool_items
+                            WHERE pool_id=%s AND via_folder=0 AND file_id IN ({placeholders})""",
+                        [pid] + download_ids)
+            removed_links = [{**r, "artist_id": artist_id, "pool_name": pool_name} for r in cur.fetchall()]
             cur.execute(f"UPDATE furry_posts SET subfolder=%s WHERE file_id IN ({placeholders})",
                         [pool_name] + download_ids)
+            poolstore.sync_files(cur, download_ids)
             # Файли переїхали у сховищі — оновлюємо їхній шлях у ядрі,
             # інакше вони перестануть відкриватись.
             resync_rel_path(db, download_ids)
             # Одразу проставляємо очерговість — за природнім порядком назви,
             # щоб не лишати porожнім/незрозумілим
-            members, margs = pool_members("{artist_id}=%s AND {pool_name}=%s", (artist_id, pool_name))
-            cur.execute(f"""SELECT f.id, f.name AS filename, m.pool_order, m.linked
-                            FROM {members} m JOIN files f ON f.id = m.file_id""", margs)
+            cur.execute("""SELECT f.id, f.name AS filename, i.page AS pool_order
+                           FROM furry_pool_items i JOIN files f ON f.id = i.file_id
+                           WHERE i.pool_id = %s""", (pid,))
             pool_files = cur.fetchall()
             # сторінки, що вже були в пулі, теж перенумеруються — запамʼятовуємо
             moved_ids = {int(i) for i in download_ids}
-            prev_orders = [{"file_id": r["id"], "pool_order": r["pool_order"],
-                            "pool": pool_name if r["linked"] else None}
+            prev_orders = [{"file_id": r["id"], "pool_order": r["pool_order"], "pool_id": pid}
                            for r in pool_files if r["id"] not in moved_ids]
             pool_files.sort(key=lambda r: _natural_sort_key(r["filename"]))
             for order, r in enumerate(pool_files, start=1):
-                set_order(cur, r["id"], order, pool_name)
+                poolstore.set_page(cur, r["id"], pid, order)
         db.commit(); db.close()
         modlog.record("pool.assign", f"{len(before_rows)} файл(ів) → пул «{pool_name}»",
                       {"artist_id": artist_id, "pool_name": pool_name, "files": before_rows,
@@ -421,15 +429,15 @@ def api_artist_resort_pool(artist_id):
     try:
         db = get_db()
         with db.cursor() as cur:
-            members, margs = pool_members("{artist_id}=%s AND {pool_name}=%s", (artist_id, subfolder))
-            cur.execute(f"""SELECT f.id, f.name AS filename, m.pool_order, m.linked
-                            FROM {members} m JOIN files f ON f.id = m.file_id""", margs)
+            pid = poolstore.find_pool(cur, artist_id, subfolder)
+            cur.execute("""SELECT f.id, f.name AS filename, i.page AS pool_order
+                           FROM furry_pool_items i JOIN files f ON f.id = i.file_id
+                           WHERE i.pool_id = %s""", (pid,))
             files = cur.fetchall()
-            before = [{"file_id": r["id"], "pool_order": r["pool_order"],
-                       "pool": subfolder if r["linked"] else None} for r in files]
+            before = [{"file_id": r["id"], "pool_order": r["pool_order"], "pool_id": pid} for r in files]
             files.sort(key=lambda r: _natural_sort_key(r["filename"]))
             for order, r in enumerate(files, start=1):
-                set_order(cur, r["id"], order, subfolder)
+                poolstore.set_page(cur, r["id"], pid, order)
         db.commit(); db.close()
         modlog.record("pool.resort", f"пул «{subfolder}» ({len(files)} стор.)", {"orders": before})
         return jsonify({"ok": True, "count": len(files)})
@@ -579,9 +587,9 @@ def api_artists_merge(source_id):
                             (target_id, target_subfolder, source_id))
             else:
                 cur.execute("UPDATE IGNORE downloads SET artist_id=%s WHERE artist_id=%s", (target_id, source_id))
-            # Додаткові пули (одна робота в кількох пулах) — теж до нового автора,
+            # Пули старого автора — до нового (та сама серія склеюється),
             # інакше вони зникли б разом зі старим записом автора
-            cur.execute("UPDATE furry_pool_links SET artist_id=%s WHERE artist_id=%s", (target_id, source_id))
+            poolstore.move_artist_pools(cur, source_id, target_id)
             # Ще й точні збіги post_id, які не змогли перепривʼязатись — прибираємо
             cur.execute("DELETE FROM files WHERE id IN (SELECT file_id FROM furry_posts WHERE artist_id=%s)", (source_id,))
 
@@ -604,6 +612,9 @@ def api_artists_merge(source_id):
                 if alias:
                     cur.execute("INSERT IGNORE INTO artist_aliases (artist_id, alias_name) VALUES (%s,%s)",
                                 (target_id, alias))
+            # файли переїхали (й, можливо, в pool) — звіряємо пули нового автора
+            poolstore.reconcile_artist(cur, target_id)
+            poolstore.merge_duplicate_pools(cur, target_id)
             cur.execute("DELETE FROM artists WHERE id=%s", (source_id,))
         db.commit(); db.close()
         _invalidate_tags_cache(); _invalidate_pools_cache()

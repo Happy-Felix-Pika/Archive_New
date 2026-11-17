@@ -11,7 +11,7 @@ Furry Archive — застосунок.
 
 import threading
 
-from . import artists, library, ncstats, pools, runner
+from . import artists, library, ncstats, poolstore, pools, runner
 
 MODULES = (artists, ncstats, pools, runner)
 
@@ -25,11 +25,7 @@ def _file_meta(data, file_id, db, **_):
     with db.cursor() as cur:
         cur.execute("""
             SELECT fp.source, fp.post_url, fp.subfolder, fp.pool_order,
-                   a.folder_name, a.artist_name, a.id AS artist_id,
-                   (SELECT COUNT(*) FROM furry_posts fp2
-                     WHERE fp2.artist_id = fp.artist_id
-                       AND fp2.subfolder <=> fp.subfolder
-                       AND fp2.source    <=> fp.source) AS pool_total
+                   a.folder_name, a.artist_name, a.id AS artist_id
             FROM furry_posts fp
             JOIN artists a ON a.id = fp.artist_id
             WHERE fp.file_id = %s
@@ -39,6 +35,10 @@ def _file_meta(data, file_id, db, **_):
     if not row:
         # Файл без автора — нічого не додаємо, картка лишається як є
         return data
+
+    # усі пули файлу — один запит по індексу таблиці сторінок
+    with db.cursor() as cur:
+        file_pools = poolstore.file_pools(cur, file_id)
 
     share_url = None
     if row["folder_name"]:
@@ -54,35 +54,11 @@ def _file_meta(data, file_id, db, **_):
         "post_url":   row["post_url"],
         "subfolder":  row["subfolder"],
         "pool_order": row["pool_order"],
-        "pool_total": row["pool_total"] if row["subfolder"] else None,
-        "pools":      _file_pools(db, file_id),
+        "pool_total": next((p["total"] for p in file_pools if not p["linked"]), None) if row["subfolder"] else None,
+        "pools":      file_pools,
         "share_url":  share_url,
     })
     return data
-
-
-def _file_pools(db, file_id):
-    """
-    Усі пули, у яких є цей файл: «рідний» (тека, де він лежить) і додаткові
-    (furry_pool_links). Для кожного — номер сторінки й скільки сторінок
-    у пулі загалом.
-    """
-    # Окремими запитами по ключу файлу — це відкривається на кожен арт,
-    # тут не можна жодного проходу по всьому архіву.
-    with db.cursor() as cur:
-        cur.execute("""SELECT artist_id, subfolder AS name, pool_order AS `order`, 0 AS linked
-                       FROM furry_posts WHERE file_id=%s AND subfolder IS NOT NULL AND subfolder <> ''""",
-                    (file_id,))
-        rows = list(cur.fetchall())
-        try:
-            cur.execute("""SELECT artist_id, pool_name AS name, pool_order AS `order`, 1 AS linked
-                           FROM furry_pool_links WHERE file_id=%s ORDER BY pool_name""", (file_id,))
-            rows += list(cur.fetchall())
-        except Exception:
-            pass          # таблиці привʼязок ще немає
-        return [{"name": r["name"], "order": r["order"],
-                 "total": pools.pool_size(cur, r["artist_id"], r["name"]),
-                 "linked": bool(r["linked"]), "artist_id": r["artist_id"]} for r in rows]
 
 
 def _snapshot_for_trash(snap, file_id, db, **_):
@@ -93,11 +69,10 @@ def _snapshot_for_trash(snap, file_id, db, **_):
     if row:
         snap["furry"] = {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in row.items()}
         with db.cursor() as cur:
-            cur.execute("""SELECT artist_id, pool_name, pool_order, source
-                           FROM furry_pool_links WHERE file_id=%s""", (file_id,))
-            links = cur.fetchall()
-        if links:
-            snap["furry"]["pool_links"] = links
+            extra = [{"artist_id": p["artist_id"], "pool_name": p["name"], "pool_order": p["order"]}
+                     for p in poolstore.file_pools(cur, file_id) if p["linked"]]
+        if extra:
+            snap["furry"]["pool_links"] = extra
     return snap
 
 
@@ -141,12 +116,30 @@ def _restore_from_trash(payload):
                     (payload["file_id"], data["artist_id"], data["post_id"], data.get("source"),
                      data.get("post_url"), data.get("page_num"), data.get("subfolder"),
                      data.get("pool_order"), data.get("downloaded_at")))
+        poolstore.sync_file(cur, payload["file_id"])
         for l in data.get("pool_links") or []:
             cur.execute("SELECT 1 FROM artists WHERE id=%s", (l["artist_id"],))
             if cur.fetchone():
-                cur.execute("""INSERT IGNORE INTO furry_pool_links
-                               (file_id, artist_id, pool_name, pool_order, source) VALUES (%s,%s,%s,%s,%s)""",
-                            (payload["file_id"], l["artist_id"], l["pool_name"], l.get("pool_order"), l.get("source")))
+                poolstore.link(cur, payload["file_id"], l["artist_id"], l["pool_name"], l.get("pool_order"), l.get("source"))
+
+
+def _pools_startup():
+    from core.db import _connect
+    try:
+        db = _connect()
+        try:
+            with db.cursor() as cur:
+                cur.execute("SELECT COUNT(*) AS n FROM furry_pools")
+                first = cur.fetchone()["n"] == 0
+                cur.execute("SHOW TABLES LIKE 'furry_pool_links'")
+                first = first or bool(cur.fetchone())
+            if first:
+                print("  … Пули: перший перенос у таблиці пулів (разово, може зайняти хвилину)")
+                poolstore.reconcile_all(db)
+        finally:
+            db.close()
+    except Exception as e:
+        print(f"  ⚠ Пули: перенос не вдався: {e}")
 
 
 def _overview_stats(data, db, **_):
@@ -249,28 +242,24 @@ def _on_file_moved(payload):
     if not target:
         return
     artist_id, sub = target
+    fid = payload["file_id"]
     with db.cursor() as cur:
         # у тій самій серії лишається її номер, у новій — ще не визначений
         cur.execute("""UPDATE furry_posts
                        SET pool_order = CASE WHEN artist_id=%s AND subfolder<=>%s THEN pool_order ELSE NULL END,
                            artist_id=%s, subfolder=%s
                        WHERE file_id=%s""",
-                    (artist_id, sub, artist_id, sub, payload["file_id"]))
+                    (artist_id, sub, artist_id, sub, fid))
         if sub:
-            # тепер файл лежить у теці цього пулу — додаткова привʼязка зайва,
-            # але її номер сторінки беремо, якщо свого ще немає
-            cur.execute("SELECT pool_order FROM furry_pool_links WHERE file_id=%s AND pool_name=%s",
-                        (payload["file_id"], sub))
-            link = cur.fetchone()
-            if link:
-                cur.execute("UPDATE furry_posts SET pool_order=COALESCE(pool_order,%s) WHERE file_id=%s",
-                            (link["pool_order"], payload["file_id"]))
-                cur.execute("DELETE FROM furry_pool_links WHERE file_id=%s AND pool_name=%s",
-                            (payload["file_id"], sub))
-    try:
-        pools._invalidate_pools_cache()
-    except Exception:
-        pass
+            # файл уже був у цьому пулі додатково — беремо звідти номер сторінки
+            pid = poolstore.find_pool(cur, artist_id, sub)
+            if pid:
+                cur.execute("SELECT page FROM furry_pool_items WHERE pool_id=%s AND file_id=%s", (pid, fid))
+                was = cur.fetchone()
+                if was and was["page"] is not None:
+                    cur.execute("UPDATE furry_posts SET pool_order=COALESCE(pool_order,%s) WHERE file_id=%s",
+                                (was["page"], fid))
+        poolstore.sync_file(cur, fid)
 
 
 def _upload_plan(plan, form, md5, db, **_):
@@ -314,10 +303,7 @@ def _on_file_created(payload):
                            (file_id, artist_id, post_id, source, post_url, page_num, subfolder, downloaded_at)
                            VALUES (%s,%s,%s,NULL,NULL,1,%s,NOW())""",
                         (payload["file_id"], data["artist_id"], data["post_id"], data.get("subfolder")))
-    try:
-        pools._invalidate_pools_cache()
-    except Exception:
-        pass
+            poolstore.sync_file(cur, payload["file_id"])
 
 
 # ── Відміна дій модератора (журнал ядра) ─────────────────────────────
@@ -331,10 +317,7 @@ def _state_restore(payload):
         cur.execute("""UPDATE furry_posts SET artist_id=%s, subfolder=%s, pool_order=%s
                        WHERE file_id=%s""",
                     (data["artist_id"], data.get("subfolder"), data.get("pool_order"), payload["file_id"]))
-    try:
-        pools._invalidate_pools_cache()
-    except Exception:
-        pass
+        poolstore.sync_file(cur, payload["file_id"])
 
 
 def _undo_auto_update(p):
@@ -350,9 +333,24 @@ def _undo_orders(p):
     db = get_db()
     with db.cursor() as cur:
         for o in p.get("orders") or []:
-            pools.set_order(cur, o["file_id"], o["pool_order"], o.get("pool"))
+            _restore_order(cur, o)
     db.commit()
-    pools._invalidate_pools_cache()
+
+
+def _restore_order(cur, o):
+    """Повернути номер сторінки з журналу: у конкретному пулі (pool_id),
+    за назвою пулу (старі записи) або «рідний» у furry_posts."""
+    fid = o["file_id"]
+    pid = o.get("pool_id")
+    if not pid and o.get("pool"):
+        cur.execute("SELECT artist_id FROM furry_posts WHERE file_id=%s", (fid,))
+        r = cur.fetchone()
+        pid = poolstore.find_pool(cur, r["artist_id"], o["pool"]) if r else None
+    if pid:
+        poolstore.set_page(cur, fid, pid, o["pool_order"])
+    else:
+        cur.execute("UPDATE furry_posts SET pool_order=%s WHERE file_id=%s", (o["pool_order"], fid))
+        poolstore.sync_file(cur, fid)
 
 
 def _undo_pool_assign(p):
@@ -382,18 +380,16 @@ def _undo_pool_assign(p):
         with db.cursor() as cur:
             cur.execute("UPDATE furry_posts SET subfolder=%s, pool_order=%s WHERE file_id=%s",
                         (f.get("subfolder"), f.get("pool_order"), f["file_id"]))
+            poolstore.sync_file(cur, f["file_id"])
         ids.append(f["file_id"])
     library.resync_rel_path(db, ids)
     with db.cursor() as cur:
         for o in p.get("prev_pool_orders") or []:
-            pools.set_order(cur, o["file_id"], o["pool_order"], o.get("pool"))
-        # привʼязки, які прибрав перенос (файл став «рідним» у цьому пулі)
+            _restore_order(cur, o)
+        # додаткові пули, які перенос зробив «рідними» — знову додаткові
         for l in p.get("removed_links") or []:
-            cur.execute("""INSERT IGNORE INTO furry_pool_links
-                           (file_id, artist_id, pool_name, pool_order, source) VALUES (%s,%s,%s,%s,%s)""",
-                        (l["file_id"], l["artist_id"], l["pool_name"], l.get("pool_order"), l.get("source")))
+            poolstore.link(cur, l["file_id"], l["artist_id"], l["pool_name"], l.get("pool_order"), l.get("source"))
     db.commit()
-    pools._invalidate_pools_cache()
     if errors and not ids:
         raise UndoError("; ".join(errors[:5]))
     return f"повернуто {len(ids)}" + (f", не вдалося: {'; '.join(errors[:5])}" if errors else "")
@@ -455,10 +451,9 @@ def register(core):
     modlog.register("pool.assign",        _undo_pool_assign,  "Переніс у пул")
     modlog.register("archiver.run",       _undo_archiver_run, "Запустив архіватор")
 
-    # Кеш серій і нічний планувальник — турбота застосунку, не ядра.
-    try:
-        pools._rebuild_pools_cache()
-    except Exception as e:
-        print(f"  ⚠ furry: кеш серій не прогрівся: {e}")
-    threading.Thread(target=pools._pools_cache_background_loop, daemon=True).start()
+    # Пули: при першому запуску після оновлення — перенести наявні пули в
+    # таблиці пулів і склеїти дублі (разом, до відкриття сервера); далі —
+    # звірка у фоні щогодини.
+    _pools_startup()
+    threading.Thread(target=pools.reconcile_loop, daemon=True).start()
     threading.Thread(target=runner._auto_update_scheduler_loop, daemon=True).start()

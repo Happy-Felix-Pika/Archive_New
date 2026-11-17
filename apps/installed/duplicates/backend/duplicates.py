@@ -90,18 +90,20 @@ def _matched_file(db, row: dict) -> dict | None:
              (row["matched_post_id"], row["matched_filename"], folder))
 
 
+def _ps():
+    """Модуль пулів застосунку furry (менеджер підключає його під цим іменем)."""
+    import sys
+    return sys.modules.get("archive_app_furry.poolstore")
+
+
 def _matched_pools(db, file_id) -> list:
-    """Пули збереженого файлу: тека, де він лежить, і додаткові привʼязки."""
-    names = []
-    r = q(db, "SELECT subfolder FROM furry_posts WHERE file_id=%s", (file_id,))
-    if r and r["subfolder"]:
-        names.append(r["subfolder"])
-    try:
-        names += [x["pool_name"] for x in qq(db, "SELECT pool_name FROM furry_pool_links WHERE file_id=%s ORDER BY pool_name",
-                                             (file_id,)) if x["pool_name"] not in names]
-    except Exception:
-        pass          # таблиці привʼязок ще немає
-    return names
+    """Назви пулів збереженого файлу: «рідний» першим, далі додаткові."""
+    ps = _ps()
+    if not ps:
+        r = q(db, "SELECT subfolder FROM furry_posts WHERE file_id=%s", (file_id,))
+        return [r["subfolder"]] if r and r["subfolder"] else []
+    with db.cursor() as cur:
+        return [p["name"] for p in ps.file_pools(cur, file_id)]
 
 
 def _link_into_pool(db, row) -> dict | None:
@@ -109,30 +111,25 @@ def _link_into_pool(db, row) -> dict | None:
     Новий файл відкинули як дублікат, але на сайті він — сторінка пулу,
     в якому збереженого ще немає. Одна робота — кілька пулів: додаємо
     збережений файл і в цей пул (без копії), з номером сторінки нового.
-    Повертає привʼязку (для відміни) або None.
+    Та сама серія під іншою назвою (інший сайт) — це той самий пул, нічого
+    не додається. Повертає привʼязку (для відміни) або None.
     """
-    pool = row.get("pool_folder")
-    if not pool:
+    pool, ps = row.get("pool_folder"), _ps()
+    if not pool or not ps:
         return None
     m = _matched_file(db, row)
-    if not m or pool in _matched_pools(db, m["id"]):
+    if not m:
         return None
     try:
         with db.cursor() as cur:
-            cur.execute("""INSERT IGNORE INTO furry_pool_links (file_id, artist_id, pool_name, pool_order, source)
-                           VALUES (%s,%s,%s,%s,%s)""",
-                        (m["id"], m["artist_id"], pool, row.get("pool_order"), row.get("source")))
-            if not cur.rowcount:
+            pid = ps.ensure_pool(cur, m["artist_id"], pool, row.get("source"))
+            if not pid or pid in ps.file_pool_ids(cur, m["id"]):
                 return None
+            ps.add_item(cur, pid, m["id"], row.get("pool_order"))
     except Exception as e:
         print(f"  ⚠ Не вдалося додати «{m['name']}» у пул «{pool}»: {e}")
         return None
-    try:
-        import sys      # пакет furry підключає менеджер застосунків під цим іменем
-        sys.modules["archive_app_furry.pools"]._invalidate_pools_cache()
-    except Exception:
-        pass
-    return {"file_id": m["id"], "pool_name": pool, "file_name": m["name"]}
+    return {"file_id": m["id"], "pool_id": pid, "pool_name": pool, "file_name": m["name"]}
 
 
 def _attach_matched_pool(db, rows):
@@ -265,6 +262,11 @@ def replace_pending(pending_id, user_id=None) -> dict:
 
         snap = _snap(row)
         old_trash_id = None
+        ps = _ps()
+        old_extra = []          # додаткові пули старого — перейдуть до нового
+        if old and ps:
+            with db.cursor() as cur:
+                old_extra = [p for p in ps.file_pools(cur, old["id"]) if p["linked"]]
         if old:
             # старий md5 — у відхилені, щоб скачування не підхопило його знову
             with db.cursor() as cur:
@@ -274,6 +276,13 @@ def replace_pending(pending_id, user_id=None) -> dict:
 
         try:
             _rel_new, fid = _store_new(db, row, artist_id=artist_id, folder=folder, sub=sub, order=order)  # 2. новий
+            if ps and fid:
+                with db.cursor() as cur:
+                    for p in old_extra:
+                        ps.add_item(cur, p["pool_id"], fid, p["order"])
+                    # новий був сторінкою свого пулу, а в пул старого став «рідним» — свій теж лишаємо
+                    if row.get("pool_folder") and row.get("pool_folder") != sub:
+                        ps.link(cur, fid, artist_id, row["pool_folder"], row.get("pool_order"), row.get("source"))
             db.commit()
         except PendingError as e:
             db.rollback()
@@ -937,11 +946,15 @@ def _undo_reject(p):
         shutil.move(target, kept)
         raise
     link = p.get("link")
-    if link:
+    if link and _ps():
         db = get_db()
         with db.cursor() as cur:
-            cur.execute("DELETE FROM furry_pool_links WHERE file_id=%s AND pool_name=%s",
-                        (link["file_id"], link["pool_name"]))
+            pid = link.get("pool_id")
+            if not pid:      # старі записи журналу — за назвою
+                r = q(db, "SELECT artist_id FROM furry_posts WHERE file_id=%s", (link["file_id"],))
+                pid = _ps().find_pool(cur, r["artist_id"], link["pool_name"]) if r else None
+            if pid:
+                _ps().unlink(cur, link["file_id"], pid)
         db.commit()
     return "файл знову в черзі «На перевірку»"
 
