@@ -67,18 +67,22 @@ def _file_pools(db, file_id):
     (furry_pool_links). Для кожного — номер сторінки й скільки сторінок
     у пулі загалом.
     """
+    # Окремими запитами по ключу файлу — це відкривається на кожен арт,
+    # тут не можна жодного проходу по всьому архіву.
     with db.cursor() as cur:
-        cur.execute(f"""
-            SELECT m.pool_name AS name, m.pool_order AS `order`, m.linked, m.artist_id,
-                   (SELECT COUNT(*) FROM {pools.POOL_MEMBERS} m2
-                     WHERE m2.artist_id = m.artist_id AND m2.pool_name = m.pool_name) AS total
-            FROM {pools.POOL_MEMBERS} m
-            WHERE m.file_id = %s
-            ORDER BY m.linked, m.pool_name
-        """, (file_id,))
-        rows = cur.fetchall()
-    return [{"name": r["name"], "order": r["order"], "total": int(r["total"] or 0),
-             "linked": bool(r["linked"]), "artist_id": r["artist_id"]} for r in rows]
+        cur.execute("""SELECT artist_id, subfolder AS name, pool_order AS `order`, 0 AS linked
+                       FROM furry_posts WHERE file_id=%s AND subfolder IS NOT NULL AND subfolder <> ''""",
+                    (file_id,))
+        rows = list(cur.fetchall())
+        try:
+            cur.execute("""SELECT artist_id, pool_name AS name, pool_order AS `order`, 1 AS linked
+                           FROM furry_pool_links WHERE file_id=%s ORDER BY pool_name""", (file_id,))
+            rows += list(cur.fetchall())
+        except Exception:
+            pass          # таблиці привʼязок ще немає
+        return [{"name": r["name"], "order": r["order"],
+                 "total": pools.pool_size(cur, r["artist_id"], r["name"]),
+                 "linked": bool(r["linked"]), "artist_id": r["artist_id"]} for r in rows]
 
 
 def _snapshot_for_trash(snap, file_id, db, **_):
