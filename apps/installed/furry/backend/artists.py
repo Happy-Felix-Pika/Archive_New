@@ -5,7 +5,7 @@ import os, re, shutil
 from flask import Blueprint, jsonify, request as flask_request
 
 
-from .pools import _invalidate_pools_cache, POOL_MEMBERS, set_order
+from .pools import _invalidate_pools_cache, pool_members, set_order
 from blueprints.tags import _invalidate_tags_cache
 from core.auth import admin_required, moderator_required, get_user_nc_config
 from core import modlog
@@ -259,11 +259,12 @@ def api_artist_pool_editor(artist_id):
         db = get_db()
         if subfolder:
             # і файли з теки пулу, і привʼязані до нього з інших пулів
+            members, margs = pool_members("{artist_id}=%s AND {pool_name}=%s", (artist_id, subfolder))
             rows = qq(db, f"""
                 SELECT f.id, f.name AS filename, m.pool_order, f.ext AS file_ext, m.linked
-                FROM {POOL_MEMBERS} m JOIN files f ON f.id = m.file_id
-                WHERE m.artist_id=%s AND m.pool_name=%s ORDER BY m.pool_order ASC, f.id ASC
-            """, (artist_id, subfolder))
+                FROM {members} m JOIN files f ON f.id = m.file_id
+                ORDER BY m.pool_order ASC, f.id ASC
+            """, margs)
         else:
             rows = qq(db, """
                 SELECT f.id, f.name AS filename, fp.pool_order, f.ext AS file_ext
@@ -283,10 +284,10 @@ def api_artist_pool_names(artist_id):
     """Список назв усіх pool цього автора — для вибору в редакторі."""
     try:
         db   = get_db()
+        members, margs = pool_members("{artist_id}=%s", (artist_id,))
         rows = qq(db, f"""
-            SELECT DISTINCT m.pool_name FROM {POOL_MEMBERS} m
-            WHERE m.artist_id=%s ORDER BY m.pool_name
-        """, (artist_id,))
+            SELECT DISTINCT m.pool_name FROM {members} m ORDER BY m.pool_name
+        """, margs)
         db.close()
         return jsonify([r["pool_name"] for r in rows])
     except Exception as e:
@@ -384,10 +385,9 @@ def api_artist_pool_assign(artist_id):
             resync_rel_path(db, download_ids)
             # Одразу проставляємо очерговість — за природнім порядком назви,
             # щоб не лишати porожнім/незрозумілим
+            members, margs = pool_members("{artist_id}=%s AND {pool_name}=%s", (artist_id, pool_name))
             cur.execute(f"""SELECT f.id, f.name AS filename, m.pool_order, m.linked
-                            FROM {POOL_MEMBERS} m JOIN files f ON f.id = m.file_id
-                            WHERE m.artist_id=%s AND m.pool_name=%s""",
-                        (artist_id, pool_name))
+                            FROM {members} m JOIN files f ON f.id = m.file_id""", margs)
             pool_files = cur.fetchall()
             # сторінки, що вже були в пулі, теж перенумеруються — запамʼятовуємо
             moved_ids = {int(i) for i in download_ids}
@@ -421,10 +421,9 @@ def api_artist_resort_pool(artist_id):
     try:
         db = get_db()
         with db.cursor() as cur:
+            members, margs = pool_members("{artist_id}=%s AND {pool_name}=%s", (artist_id, subfolder))
             cur.execute(f"""SELECT f.id, f.name AS filename, m.pool_order, m.linked
-                            FROM {POOL_MEMBERS} m JOIN files f ON f.id = m.file_id
-                            WHERE m.artist_id=%s AND m.pool_name=%s""",
-                        (artist_id, subfolder))
+                            FROM {members} m JOIN files f ON f.id = m.file_id""", margs)
             files = cur.fetchall()
             before = [{"file_id": r["id"], "pool_order": r["pool_order"],
                        "pool": subfolder if r["linked"] else None} for r in files]
