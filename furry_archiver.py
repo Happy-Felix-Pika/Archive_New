@@ -250,6 +250,24 @@ class Database:
 # DATABASE TRACKER  (замена DownloadTracker / download.txt)
 # ─────────────────────────────────────────────────────────────────────────────
 
+_POOLSTORE = None
+
+
+def poolstore():
+    """Модуль пулів застосунку furry (apps/installed/furry/backend/poolstore.py).
+    Той самий код, що й на сервері: таблиці пулів, назви, сторінки."""
+    global _POOLSTORE
+    if _POOLSTORE is None:
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            'apps', 'installed', 'furry', 'backend', 'poolstore.py')
+        spec = importlib.util.spec_from_file_location('archive_poolstore', path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _POOLSTORE = mod
+    return _POOLSTORE
+
+
 class DatabaseTracker:
     """
     Хранит информацию о скачанных файлах в MariaDB.
@@ -261,6 +279,7 @@ class DatabaseTracker:
 
     def __init__(self, db: Database, config: Config):
         self.db = db
+        self.touched_artists = set()     # чиї пули звірити наприкінці запуску
         self.phash_threshold = config.get('download', 'phash_threshold') or PHASH_THRESHOLD
         self._artist_cache: dict[str, int] = {}      # folder_name -> artist_id
         self._phash_cache:  dict[int, list] = {}     # artist_id -> [(phash, post_id, filename)]
@@ -331,20 +350,30 @@ class DatabaseTracker:
             )
             return cur.fetchone()
 
-    def file_pool_names(self, file_id: int) -> set:
-        """Усі пули файлу: тека, де він лежить, і додаткові привʼязки."""
-        names = set()
+    def in_pool(self, file_id: int, artist_id: int, pool_name: str) -> bool:
+        """Чи файл уже в цьому пулі (будь-яка з назв пулу — та сама серія)."""
         with self.db.cursor() as cur:
-            cur.execute("SELECT subfolder FROM furry_posts WHERE file_id=%s", (file_id,))
-            row = cur.fetchone()
-            if row and row['subfolder']:
-                names.add(row['subfolder'])
-            try:
-                cur.execute("SELECT pool_name FROM furry_pool_links WHERE file_id=%s", (file_id,))
-                names.update(r['pool_name'] for r in cur.fetchall())
-            except pymysql.err.ProgrammingError:
-                pass
-        return names
+            pid = poolstore().find_pool(cur, artist_id, pool_name)
+            return bool(pid) and pid in poolstore().file_pool_ids(cur, file_id)
+
+    def sync_pool(self, file_id: int):
+        """«Рідний» пул файлу — за furry_posts (після зміни теки/сторінки)."""
+        with self.db.cursor() as cur:
+            poolstore().sync_file(cur, file_id)
+            cur.execute("SELECT artist_id FROM furry_posts WHERE file_id=%s", (file_id,))
+            r = cur.fetchone()
+        if r:
+            self.touched_artists.add(r['artist_id'])
+
+    def reconcile_pools(self, artist_ids=None):
+        """Звірка пулів зачеплених авторів і склейка дублів назв (кінець запуску)."""
+        ids = set(artist_ids if artist_ids is not None else self.touched_artists)
+        for aid in ids:
+            with self.db.cursor() as cur:
+                poolstore().reconcile_artist(cur, aid)
+                poolstore().merge_duplicate_pools(cur, aid)
+            self.db.commit()
+        return len(ids)
 
     def link_pools(self, file_id: int, artist_id: int, pools: list, source: str | None) -> int:
         """Кілька привʼязок разом; повертає, скільки нових."""
@@ -371,6 +400,7 @@ class DatabaseTracker:
             cur.execute("UPDATE furry_posts SET subfolder=%s, pool_order=%s WHERE file_id=%s",
                         (subfolder, pool_order, file_id))
         self._sync_rel_path(file_id)
+        self.sync_pool(file_id)
 
     # ── pHash (MediaDC-style) ─────────────────────────────────────────────────
 
@@ -547,29 +577,25 @@ class DatabaseTracker:
         # Зберігаємо теги якщо є і запис новий
         if tags and download_id:
             self._save_tags(download_id, tags)
+        if download_id and subfolder:
+            self.sync_pool(download_id)
         return download_id
 
     def add_pool_link(self, file_id: int, artist_id: int, pool_name: str, pool_order=None,
                       source: str | None = None) -> bool:
         """
-        Та сама робота ще й у цьому пулі: файл не копіюємо, а привʼязуємо
-        (furry_pool_links). Пул, у теці якого файл і так лежить, — пропускаємо.
+        Та сама робота ще й у цьому пулі: файл не копіюємо, а додаємо сторінку
+        в пул (furry_pool_items). Та сама серія під іншою назвою (інший сайт)
+        — той самий пул: нічого нового не зʼявляється.
         """
         if not file_id or not pool_name:
             return False
+        self.touched_artists.add(artist_id)
         with self.db.cursor() as cur:
-            cur.execute("SELECT subfolder FROM furry_posts WHERE file_id=%s", (file_id,))
-            row = cur.fetchone()
-            if not row or (row['subfolder'] or '') == pool_name:
-                return False
             try:
-                cur.execute("""INSERT INTO furry_pool_links (file_id, artist_id, pool_name, pool_order, source)
-                               VALUES (%s,%s,%s,%s,%s)
-                               ON DUPLICATE KEY UPDATE pool_order = COALESCE(VALUES(pool_order), pool_order)""",
-                            (file_id, artist_id, pool_name, pool_order, source))
+                return poolstore().link(cur, file_id, artist_id, pool_name, pool_order, source)
             except pymysql.err.ProgrammingError:
-                return False          # таблиці ще немає (міграцію не застосовано)
-            return cur.rowcount == 1
+                return False          # таблиць пулів ще немає (сервер ще не оновлювався)
 
     def _save_tags(self, download_id: int, tags: list | dict):
         """
@@ -1984,14 +2010,15 @@ class FurryArchiver:
                     old_pool = (matched or {}).get('subfolder')
                     near     = hamming_dist <= self.cross_source_threshold
                     pool_priority = bool(pool_folder and not old_pool and near)
-                    # у яких пулах збережений файл уже є (свій + привʼязки)
-                    matched_pools = self.tracker.file_pool_names(matched['id']) if matched else set()
+                    # чи збережений файл уже в пулі нового (будь-яка назва тієї самої серії)
+                    already_in = bool(matched and pool_folder
+                                      and self.tracker.in_pool(matched['id'], matched_artist_id, pool_folder))
 
                     # Та сама робота з іншого сайту, але в ІНШОМУ пулі (на e621
                     # в одному, на Inkbunny в іншому). Копія не потрібна:
                     # збережений файл просто додається і в цей пул.
                     if (secondary and near and matched and pool_folder and old_pool
-                            and pool_folder not in matched_pools):
+                            and not already_in):
                         os.remove(fpath)
                         if not dry_run:
                             self.tracker.link_pools(matched['id'], matched_artist_id,
@@ -2006,7 +2033,7 @@ class FurryArchiver:
                     # якщо тільки новий файл не потрібен якомусь pool:
                     #   * новий у pool, старий ні → замінимо старий (pool_priority);
                     #   * обидва в РІЗНИХ pool → на ручний розбір, хай вирішує людина.
-                    both_pools_differ = bool(pool_folder and old_pool and pool_folder not in matched_pools)
+                    both_pools_differ = bool(pool_folder and old_pool and not already_in)
                     if secondary and near and not pool_priority and not both_pools_differ:
                         os.remove(fpath)
                         self.tracker.add_rejected(artist_id, post_id, md5, pnum)
@@ -3499,6 +3526,7 @@ class FurryArchiver:
                     with self.db.cursor() as cur:
                         cur.execute("UPDATE furry_posts SET pool_order=%s WHERE file_id=%s",
                                     (pool_order, row['id']))
+                    self.tracker.sync_pool(row['id'])
                     ordered += 1
                 continue
 
@@ -3521,6 +3549,7 @@ class FurryArchiver:
                     cur.execute("UPDATE furry_posts SET subfolder=%s, pool_order=%s WHERE file_id=%s",
                                 (pool_folder, pool_order, row['id']))
                 self.tracker._sync_rel_path(row['id'])   # файл переїхав — оновлюємо шлях у ядрі
+                self.tracker.sync_pool(row['id'])
                 moved += 1
                 print(f"    📦 {row['filename']} → «{pool_folder}» (#{pool_order})")
             else:
@@ -3623,6 +3652,7 @@ class FurryArchiver:
                     with self.db.cursor() as cur:
                         cur.execute("UPDATE furry_posts SET pool_order=%s WHERE file_id=%s",
                                     (pool_order, row['id']))
+                    self.tracker.sync_pool(row['id'])
                     ordered += 1
                 continue
 
@@ -3642,6 +3672,7 @@ class FurryArchiver:
                     cur.execute("UPDATE furry_posts SET subfolder=%s, pool_order=%s WHERE file_id=%s",
                                 (pool_folder, pool_order, row['id']))
                 self.tracker._sync_rel_path(row['id'])   # файл переїхав — оновлюємо шлях у ядрі
+                self.tracker.sync_pool(row['id'])
                 moved += 1
                 print(f"    📦 {row['filename']} → «{pool_folder}» (#{pool_order})")
             else:
@@ -4136,6 +4167,20 @@ def main():
     except KeyboardInterrupt:
         print("\n\n✗ Прервано пользователем")
     finally:
+        # Пули: звірити «рідні» пули зачеплених авторів і склеїти дублі назв
+        # (та сама серія з різних сайтів). Після синхронізації сховища —
+        # усіх авторів, бо вона могла зачепити будь-кого.
+        try:
+            if args.sync_all:
+                with archiver.db.cursor() as cur:
+                    cur.execute("SELECT DISTINCT artist_id FROM furry_posts")
+                    ids = [r['artist_id'] for r in cur.fetchall()]
+                archiver.tracker.reconcile_pools(ids)
+            elif archiver.tracker.touched_artists:
+                n = archiver.tracker.reconcile_pools()
+                print(f"  ✓ Пули звірено: {n} автор(ів)")
+        except Exception as e:
+            print(f"  ⚠ Звірка пулів не вдалася: {e}")
         archiver.close()
 
 

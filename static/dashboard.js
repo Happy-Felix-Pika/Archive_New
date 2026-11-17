@@ -866,7 +866,7 @@ let _pendingTotal  = 0;
 let _pendingBusy   = false;
 
 // Пули файлу в картці перегляду. Одна робота може бути в кількох пулах
-// (furry_pool_links) — показуємо всі; той, що зараз гортаєш, — першим.
+// (таблиця сторінок пулів) — показуємо всі; той, що зараз гортаєш, — першим.
 function _galFilePools(d) {
   return Array.isArray(d?.pools) && d.pools.length ? d.pools.slice()
     : (d?.subfolder ? [{ name: d.subfolder, order: d.pool_order, total: d.pool_total, artist_id: d.artist_id }] : []);

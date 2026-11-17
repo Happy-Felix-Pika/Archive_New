@@ -79,12 +79,19 @@ def _gallery_ids_query(f, artist_id, subfolder, tag_ids, hide_tag_ids, favorites
         where.append("fp.artist_id = %s")
         args.append(int(artist_id))
 
+    pool_join = ""
     if subfolder:
-        # пул — це і файли в його теці, і ті, що привʼязані до нього
-        # додатково (та сама робота в кількох пулах, furry_pool_links)
-        where.append("(fp.subfolder = %s OR EXISTS (SELECT 1 FROM furry_pool_links pl "
-                     "WHERE pl.file_id = f.id AND pl.pool_name = %s))")
-        args.extend([subfolder, subfolder])
+        # Пул — таблиця сторінок furry_pool_items (і файли з теки пулу, і ті,
+        # що привʼязані до нього додатково). Назва могла прийти будь-яка з
+        # назв пулу (e621 / Inkbunny / тека) — шукаємо серед усіх.
+        pdb = get_db()
+        pargs = [subfolder] + ([int(artist_id)] if artist_id else [])
+        pool_ids = [r["pool_id"] for r in qq(pdb, "SELECT DISTINCT pool_id FROM furry_pool_names WHERE name=%s"
+                                              + (" AND artist_id=%s" if artist_id else ""), pargs)]
+        if not pool_ids:
+            return jsonify({"ids": []})
+        pool_join = (" JOIN furry_pool_items pi ON pi.file_id = f.id AND pi.pool_id IN ("
+                     + ",".join(str(int(i)) for i in pool_ids) + ")")
 
     if favorites_only:
         where.append("EXISTS (SELECT 1 FROM user_favorites uf WHERE uf.user_id=%s AND uf.download_id=f.id)")
@@ -99,17 +106,11 @@ def _gallery_ids_query(f, artist_id, subfolder, tag_ids, hide_tag_ids, favorites
         args.append(int(tid))
 
     order_args = []
-    if subfolder:
-        # номер сторінки — свій у кожному пулі
-        order_by = ("COALESCE(IF(fp.subfolder = %s, fp.pool_order, NULL), "
-                    "(SELECT pl.pool_order FROM furry_pool_links pl "
-                    "WHERE pl.file_id = f.id AND pl.pool_name = %s LIMIT 1)) ASC, f.id ASC")
-        order_args = [subfolder, subfolder]
-    else:
-        order_by = "f.id ASC"
+    # номер сторінки — свій у кожному пулі
+    order_by = "pi.page IS NULL, pi.page ASC, f.id ASC" if subfolder else "f.id ASC"
     select_cols = "f.id, fp.post_id" if include_post_id else "f.id"
     if has_furry:
-        joins = "LEFT JOIN furry_posts fp ON fp.file_id = f.id " + join_artists
+        joins = "LEFT JOIN furry_posts fp ON fp.file_id = f.id " + join_artists + pool_join
     else:
         joins = ""
         select_cols = select_cols.replace(", fp.post_id", ", NULL AS post_id")

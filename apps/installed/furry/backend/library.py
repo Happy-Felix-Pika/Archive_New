@@ -47,6 +47,9 @@ def create_file_with_post(cur, *, artist_id, post_id, source, post_url, md5_hash
     if phash is not None:
         cur.execute("""INSERT INTO file_phash (file_id, phash) VALUES (%s,%s)
                        ON DUPLICATE KEY UPDATE phash=VALUES(phash)""", (file_id, phash))
+    if subfolder:
+        from . import poolstore
+        poolstore.sync_file(cur, file_id)
     return file_id
 
 
