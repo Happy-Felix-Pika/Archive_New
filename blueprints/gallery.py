@@ -8,6 +8,7 @@ from flask import Blueprint, Response, jsonify, request as flask_request, send_f
 
 from core.auth import current_user_id, get_user_nc_config
 from core import events
+from core.warmcache import WarmCache
 from core.db import table_exists, get_db, q, qq
 from core.imgcache import _IMG_CACHE_DIR
 from core.nextcloud import nc_share_url
@@ -39,6 +40,19 @@ def _gallery_ids_query(f, artist_id, subfolder, tag_ids, hide_tag_ids, favorites
     elif f == "video": exts = VIDEO_EXTS
     elif f == "flash": exts = FLASH_EXTS
     else:              exts = IMAGE_EXTS + VIDEO_EXTS
+
+    # Найчастіше — «усе / фото / відео / флеш» без жодних фільтрів. Цей
+    # список (сотні тисяч id) рахується заздалегідь у фоні; тут лише
+    # перемішується готовий.
+    plain = not (artist_id or subfolder or tag_ids or hide_tag_ids or favorites_only
+                 or include_post_id or exclude_folder_names or include_file_ids)
+    if plain:
+        try:
+            ids = list(_all_ids_cache.get().get(f if f in ("image", "video", "flash") else "all", []))
+            random.shuffle(ids)
+            return jsonify({"ids": ids})
+        except Exception:
+            pass          # бази нема чи кеш не порахувався — нижче наживо
 
     # Без застосунку furry таблиці furry_posts немає — тоді галерея просто
     # показує файли, без фільтрів за автором і серією.
@@ -109,8 +123,12 @@ def _gallery_ids_query(f, artist_id, subfolder, tag_ids, hide_tag_ids, favorites
     # номер сторінки — свій у кожному пулі
     order_by = "pi.page IS NULL, pi.page ASC, f.id ASC" if subfolder else "f.id ASC"
     select_cols = "f.id, fp.post_id" if include_post_id else "f.id"
-    if has_furry:
-        joins = "LEFT JOIN furry_posts fp ON fp.file_id = f.id " + join_artists + pool_join
+    # furry_posts приєднуємо лише коли він справді потрібен (автор, пул,
+    # post_id, приховані теки) — на сотнях тисяч файлів зайве приєднання
+    # подвоює час запиту
+    need_fp = bool(artist_id or include_post_id or join_artists)
+    if has_furry and (need_fp or pool_join):
+        joins = ("LEFT JOIN furry_posts fp ON fp.file_id = f.id " if need_fp else "") + join_artists + pool_join
     else:
         joins = ""
         select_cols = select_cols.replace(", fp.post_id", ", NULL AS post_id")
@@ -130,6 +148,29 @@ def _gallery_ids_query(f, artist_id, subfolder, tag_ids, hide_tag_ids, favorites
         return jsonify({"ids": ids})
     except Exception as e:
         return jsonify({"error": str(e)}), 503
+
+
+def _compute_all_ids(db):
+    """Усі id файлів галереї, розкладені за типом — один прохід по таблиці."""
+    image = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
+    video = {'webm', 'mp4'}
+    out = {"all": [], "image": [], "video": [], "flash": []}
+    import pymysql
+    with db.cursor(pymysql.cursors.Cursor) as cur:      # кортежі — помітно швидше за словники
+        cur.execute("SELECT id, ext FROM files WHERE name IS NOT NULL "
+                    "AND ext IN ('png','jpg','jpeg','gif','webp','webm','mp4','swf')")
+        for fid, ext in cur.fetchall():
+            if ext in image:
+                out["image"].append(fid); out["all"].append(fid)
+            elif ext in video:
+                out["video"].append(fid); out["all"].append(fid)
+            else:
+                out["flash"].append(fid)
+    return out
+
+
+# Перераховується після змін в архіві й раз на 10 хв (нове від архіватора)
+_all_ids_cache = WarmCache("gallery-ids", _compute_all_ids, interval=600)
 
 
 def _resolve_tag_names(names_csv: str) -> list:
