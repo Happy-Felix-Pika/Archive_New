@@ -1,7 +1,7 @@
 """Дублікати та pending-review"""
 
 import hashlib
-import base64, mimetypes, os
+import base64, json, mimetypes, os
 
 from flask import Blueprint, jsonify, request as flask_request
 
@@ -181,12 +181,38 @@ def _store_new(db, row, *, artist_id, folder, sub, order):
             folder_name=folder, size_bytes=os.path.getsize(lp))
         if not fid:
             raise PendingError("Цей пост уже є в архіві в того автора")
+        _save_tags(cur, fid, row.get("tags"))
         if artist_id != row["artist_id"]:
             # файл записано за іншим автором (успадкував його pool) — свому
             # автору кажемо «вже є», інакше архіватор качав би пост знову
             _reject(cur, row["artist_id"], row["post_id"], row["page_num"], row["md5_hash"], "replaced")
         cur.execute("DELETE FROM pending_duplicates WHERE id=%s", (row["id"],))
     return rel, fid
+
+
+def _save_tags(cur, file_id, tags_json):
+    """Теги нового файлу з черги (JSON: список або {категорія: [..]})."""
+    if not tags_json or not file_id:
+        return
+    try:
+        tags = json.loads(tags_json) if isinstance(tags_json, str) else tags_json
+    except ValueError:
+        return
+    tag_map = {"other": tags} if isinstance(tags, list) else (tags or {})
+    for category, names in tag_map.items():
+        if category not in ("character", "species", "general", "other"):
+            category = "other"
+        for name in names or []:
+            name = str(name).strip().lower()[:100]
+            if not name:
+                continue
+            cur.execute("INSERT IGNORE INTO tags (name, category) VALUES (%s,%s)", (name, category))
+            cur.execute("UPDATE tags SET category=%s WHERE name=%s AND category='other'", (category, name))
+            cur.execute("SELECT id FROM tags WHERE name=%s", (name,))
+            t = cur.fetchone()
+            if t:
+                cur.execute("INSERT IGNORE INTO download_tags (download_id, tag_id) VALUES (%s,%s)",
+                            (file_id, t["id"]))
 
 
 def _snap(row) -> dict:
@@ -266,6 +292,11 @@ def replace_pending(pending_id, user_id=None) -> dict:
         if old and ps:
             with db.cursor() as cur:
                 old_extra = [p for p in ps.file_pools(cur, old["id"]) if p["linked"]]
+        old_tag_ids = []        # теги старого — до кошика, бо там вони йдуть разом з файлом
+        if old:
+            with db.cursor() as cur:
+                cur.execute("SELECT tag_id FROM download_tags WHERE download_id=%s", (old["id"],))
+                old_tag_ids = [r["tag_id"] for r in cur.fetchall()]
         if old:
             # старий md5 — у відхилені, щоб скачування не підхопило його знову
             with db.cursor() as cur:
@@ -275,6 +306,11 @@ def replace_pending(pending_id, user_id=None) -> dict:
 
         try:
             _rel_new, fid = _store_new(db, row, artist_id=artist_id, folder=folder, sub=sub, order=order)  # 2. новий
+            if old_tag_ids and fid:
+                # теги старого файлу переходять до нового (той самий арт)
+                with db.cursor() as cur:
+                    cur.executemany("INSERT IGNORE INTO download_tags (download_id, tag_id) VALUES (%s,%s)",
+                                    [(fid, t) for t in old_tag_ids])
             if ps and fid:
                 with db.cursor() as cur:
                     for p in old_extra:

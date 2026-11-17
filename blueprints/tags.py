@@ -7,56 +7,47 @@ from flask import Blueprint, jsonify, request as flask_request
 
 from core.auth import moderator_required
 from core.db import get_db, qq
+from core.warmcache import WarmCache
 
 bp = Blueprint("tags", __name__)
 
 
 # ── Tags API ──────────────────────────────────────────────────────────────
 
-_tags_cache = {"data": None, "ts": 0}
-_TAGS_CACHE_TTL = 3600  # 1 год — фонове оновлення перебудовує кеш раніше, ніж він встигне протухнути
+def _compute_tags(db):
+    rows = qq(db, """
+        SELECT t.id, t.name, t.category, COUNT(dt.download_id) AS usage_count
+        FROM tags t
+        LEFT JOIN download_tags dt ON dt.tag_id = t.id
+        GROUP BY t.id
+        ORDER BY t.category, usage_count DESC, t.name ASC
+    """)
+    for r in rows:
+        r["usage_count"] = int(r["usage_count"] or 0)
+    return rows
+
+
+# Рахується у фоні на старті й після змін; запит отримує готовий список.
+tags_cache = WarmCache("tags", _compute_tags, interval=600)
+
 
 def _invalidate_tags_cache():
-    _tags_cache["data"] = None
+    tags_cache.invalidate()
+
 
 def _rebuild_tags_cache():
-    """Рахує список тегів наживо і кладе в кеш. Викликається і при старті
-    (щоб кеш був теплий одразу), і у фоновому потоці регулярно — тому
-    жоден користувач ніколи не ловить важкий запит наживо."""
-    try:
-        db   = get_db()
-        rows = qq(db, """
-            SELECT t.id, t.name, t.category, COUNT(dt.download_id) AS usage_count
-            FROM tags t
-            LEFT JOIN download_tags dt ON dt.tag_id = t.id
-            GROUP BY t.id
-            ORDER BY t.category, usage_count DESC, t.name ASC
-        """)
-        db.close()
-        for r in rows:
-            r["usage_count"] = int(r["usage_count"] or 0)
-        _tags_cache["data"] = rows
-        _tags_cache["ts"]   = time.time()
-        return True
-    except Exception as e:
-        print(f"  ⚠ Не вдалося оновити кеш тегів: {e}")
-        return False
+    """Сумісність зі старим запуском (main.py): кеш і так гріється сам."""
+    return True
+
 
 def _tags_cache_background_loop():
-    """Фоновий потік — оновлює кеш тегів заздалегідь, ще до того як він
-    протухне, щоб ЖОДЕН запит користувача не потрапив на живий підрахунок."""
-    while True:
-        time.sleep(_TAGS_CACHE_TTL - 30)  # трохи раніше за TTL, з запасом
-        _rebuild_tags_cache()
+    """Сумісність: фонове оновлення тепер робить WarmCache."""
+    return
+
 
 @bp.route("/api/tags")
 def api_tags_list():
-    # Кеш прогрітий при старті й оновлюється фоново — тут просто віддаємо
-    # готове. Якщо з якоїсь причини кеш ще порожній (перший запит одразу
-    # після старту, фонове оновлення ще не встигло) — рахуємо наживо один раз.
-    if _tags_cache["data"] is None:
-        _rebuild_tags_cache()
-    return jsonify(_tags_cache["data"] or [])
+    return jsonify(tags_cache.get() or [])
 
 
 @bp.route("/api/tags", methods=["POST"])

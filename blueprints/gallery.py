@@ -43,15 +43,23 @@ def _gallery_ids_query(f, artist_id, subfolder, tag_ids, hide_tag_ids, favorites
     # Найчастіше — «усе / фото / відео / флеш» без жодних фільтрів. Цей
     # список (сотні тисяч id) рахується заздалегідь у фоні; тут лише
     # перемішується готовий.
-    plain = not (artist_id or subfolder or tag_ids or hide_tag_ids or favorites_only
-                 or include_post_id or exclude_folder_names or include_file_ids)
-    if plain:
+    #
+    # З фільтрами (теги, автор, улюблене) — те саме, без проходу по всій
+    # таблиці файлів: кожен фільтр — це короткий запит по індексу
+    # («файли з цим тегом», «файли цього автора»), а перетин і тип файлу
+    # рахуються в пам'яті. Час залежить від розміру фільтра, а не архіву.
+    if not (subfolder or include_post_id or exclude_folder_names or include_file_ids):
         try:
-            ids = list(_all_ids_cache.get().get(f if f in ("image", "video", "flash") else "all", []))
+            if not (artist_id or tag_ids or hide_tag_ids or favorites_only):
+                return _plain_response(f)
+            if hide_tag_ids and not (artist_id or tag_ids or favorites_only):
+                # лише «сховати теги» — з уже перемішаного готового списку
+                return _plain_response(f, hide_tag_ids)
+            ids = _fast_ids(f, artist_id, tag_ids, hide_tag_ids, favorites_only, user_id)
             random.shuffle(ids)
             return jsonify({"ids": ids})
-        except Exception:
-            pass          # бази нема чи кеш не порахувався — нижче наживо
+        except Exception as e:
+            print(f"  ⚠ Галерея: швидкий шлях не вдався ({e}) — рахую наживо")
 
     # Без застосунку furry таблиці furry_posts немає — тоді галерея просто
     # показує файли, без фільтрів за автором і серією.
@@ -154,23 +162,144 @@ def _gallery_ids_query(f, artist_id, subfolder, tag_ids, hide_tag_ids, favorites
         return jsonify({"error": str(e)}), 503
 
 
+_KIND_CODE = {**{e: 1 for e in ('png', 'jpg', 'jpeg', 'gif', 'webp')},
+              **{e: 2 for e in ('webm', 'mp4')}, 'swf': 3}
+_FILTER_CODES = {"image": (1,), "video": (2,), "flash": (3,)}
+
+
 def _compute_all_ids(db):
-    """Усі id файлів галереї, розкладені за типом — один прохід по таблиці."""
-    image = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
-    video = {'webm', 'mp4'}
+    """
+    Усі id файлів галереї, розкладені за типом — один прохід по таблиці.
+    "kind" — тип кожного файлу за його id (1 байт на id: фото/відео/флеш),
+    щоб відфільтровані списки перевіряти миттєво, не питаючи базу.
+    """
     out = {"all": [], "image": [], "video": [], "flash": []}
     import pymysql
+    rows = []
     with db.cursor(pymysql.cursors.Cursor) as cur:      # кортежі — помітно швидше за словники
         cur.execute("SELECT id, ext FROM files WHERE name IS NOT NULL "
                     "AND ext IN ('png','jpg','jpeg','gif','webp','webm','mp4','swf')")
-        for fid, ext in cur.fetchall():
-            if ext in image:
-                out["image"].append(fid); out["all"].append(fid)
-            elif ext in video:
-                out["video"].append(fid); out["all"].append(fid)
-            else:
-                out["flash"].append(fid)
+        rows = cur.fetchall()
+    kind = bytearray((max((r[0] for r in rows), default=0)) + 1)
+    for fid, ext in rows:
+        code = _KIND_CODE.get(ext, 0)
+        kind[fid] = code
+        if code == 1:
+            out["image"].append(fid); out["all"].append(fid)
+        elif code == 2:
+            out["video"].append(fid); out["all"].append(fid)
+        elif code == 3:
+            out["flash"].append(fid)
+    out["kind"] = kind
     return out
+
+
+# Готова відповідь «усе/фото/відео/флеш»: вже перемішана й перетворена в
+# JSON. Віддається миттєво, а наступна (з новим порядком) готується у фоні.
+_plain_ready = {}            # kind -> (перемішаний список, bytes)
+_plain_lock = threading.Lock()
+
+
+def _build_plain(kind, data):
+    import json
+    ids = list(data.get(kind, []))
+    random.shuffle(ids)
+    ready = (ids, json.dumps({"ids": ids}, separators=(",", ":")).encode())
+    _plain_ready[kind] = ready
+    return ready
+
+
+def _plain_response(f, hide_tag_ids=None):
+    """
+    Готовий перемішаний список віддається одразу, а новий порядок для
+    наступного відкриття готується у фоні. Якщо щойно щось додали чи
+    видалили — у цій відповіді ще може бути попередній список (секунди),
+    у наступній уже новий.
+    """
+    import json
+    from flask import Response
+    kind = f if f in ("image", "video", "flash") else "all"
+    data = _all_ids_cache.get()
+    with _plain_lock:
+        ready = _plain_ready.pop(kind, None)
+    if not ready:
+        ready = _build_plain(kind, data)
+        _plain_ready.pop(kind, None)
+    threading.Thread(target=_build_plain, args=(kind, _all_ids_cache.get()), daemon=True).start()
+    if not hide_tag_ids:
+        return Response(ready[1], mimetype="application/json")
+    db = get_db()
+    try:
+        ph = ",".join(["%s"] * len(hide_tag_ids))
+        hidden = set(_col(db, f"SELECT download_id FROM download_tags WHERE tag_id IN ({ph})",
+                          [int(t) for t in hide_tag_ids]))
+    finally:
+        db.close()
+    ids = [i for i in ready[0] if i not in hidden]
+    return Response(json.dumps({"ids": ids}, separators=(",", ":")), mimetype="application/json")
+
+
+def _col(db, sql, args=()):
+    """Перший стовпчик результату — списком (кортежі швидші за словники)."""
+    import pymysql
+    with db.cursor(pymysql.cursors.Cursor) as cur:
+        cur.execute(sql, args)
+        return [r[0] for r in cur.fetchall()]
+
+
+def _fast_ids(f, artist_id, tag_ids, hide_tag_ids, favorites_only, user_id) -> list:
+    cache = _all_ids_cache.get()
+    codes = _FILTER_CODES.get(f, (1, 2))
+    filters = []          # (sql, args) — множини id, які треба перетнути
+    for tid in tag_ids:
+        filters.append(("SELECT download_id FROM download_tags WHERE tag_id=%s", (int(tid),)))
+    if favorites_only:
+        filters.append(("SELECT download_id FROM user_favorites WHERE user_id=%s", (user_id,)))
+    if artist_id == "fav":
+        filters.append(("""SELECT fp.file_id FROM furry_favorite_artists fa
+                           JOIN furry_posts fp ON fp.artist_id = fa.artist_id
+                           WHERE fa.user_id=%s""", (user_id,)))
+    elif artist_id:
+        filters.append(("SELECT file_id FROM furry_posts WHERE artist_id=%s", (int(artist_id),)))
+    if not filters and not hide_tag_ids:
+        return list(cache.get(f if f in ("image", "video", "flash") else "all", []))
+
+    db = get_db()
+    try:
+        if filters:
+            cand = None
+            for sql, args in filters:
+                got = _col(db, sql, args)
+                cand = set(got) if cand is None else cand.intersection(got)
+                if not cand:
+                    return []
+            kind = cache["kind"]
+            n = len(kind)
+            ids = [i for i in cand if i < n and kind[i] in codes]
+            newer = [i for i in cand if i >= n]       # додане після останнього підрахунку
+            if newer:
+                ph = ",".join(["%s"] * len(newer))
+                for fid, ext in qq_tuples(db, f"SELECT id, ext FROM files WHERE name IS NOT NULL AND id IN ({ph})", newer):
+                    if _KIND_CODE.get(ext, 0) in codes:
+                        ids.append(fid)
+        else:
+            ids = list(cache.get(f if f in ("image", "video", "flash") else "all", []))
+        if hide_tag_ids:
+            ph = ",".join(["%s"] * len(hide_tag_ids))
+            hidden = set(_col(db, f"SELECT download_id FROM download_tags WHERE tag_id IN ({ph})",
+                              [int(t) for t in hide_tag_ids]))
+            if hidden:
+                ids = [i for i in ids if i not in hidden]
+        return ids
+    finally:
+        db.close()
+
+
+def qq_tuples(db, sql, args=()):
+    import pymysql
+    with db.cursor(pymysql.cursors.Cursor) as cur:
+        cur.execute(sql, args)
+        return cur.fetchall()
 
 
 # Перераховується після змін в архіві й раз на 10 хв (нове від архіватора)

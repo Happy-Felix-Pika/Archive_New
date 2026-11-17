@@ -1,6 +1,6 @@
 """Зовнішні архіви та доступ по ключу"""
 
-import random, secrets, time
+import json, random, secrets, time
 
 import os
 
@@ -916,23 +916,15 @@ def api_gallery_ids_combined():
     combined      = []
     seen_post_ids = set()
 
-    db = get_db()
-    where = ["f.name IS NOT NULL"]
-    args  = []
-    for tid in tag_ids:
-        where.append("EXISTS (SELECT 1 FROM download_tags dt WHERE dt.download_id=f.id AND dt.tag_id=%s)")
-        args.append(int(tid))
-    for tid in hide_tag_ids:
-        where.append("NOT EXISTS (SELECT 1 FROM download_tags dt WHERE dt.download_id=f.id AND dt.tag_id=%s)")
-        args.append(int(tid))
-    local_rows = qq(db, f"""SELECT f.id, fp.post_id FROM files f
-                            LEFT JOIN furry_posts fp ON fp.file_id = f.id
-                            WHERE {' AND '.join(where)}""", args)
-    db.close()
-    for r in local_rows:
-        if r["post_id"]:
-            seen_post_ids.add(r["post_id"])
-        combined.append({"source": "local", "id": r["id"]})
+    # Локальна частина — тим самим швидким шляхом, що й «Арти» (без проходу
+    # по всій таблиці файлів). post_id для склеювання з чужими архівами
+    # не тягнемо на всі сотні тисяч файлів наперед: нижче перевіряємо лише
+    # ті post_id, що прийшли ззовні.
+    from blueprints.gallery import _fast_ids
+    # JSON складаємо одразу рядками: на сотнях тисяч елементів це в рази
+    # швидше, ніж словник на кожен файл і jsonify
+    combined = ['{"source":"local","id":%d}' % fid
+                for fid in _fast_ids("all", None, tag_ids, hide_tag_ids, False, user_id)]
 
     ext_params = {"tag_names": tag_names_param, "hide_tag_names": hide_tag_names_param, "include_post_id": "1"}
     for a in get_external_archives(user_id):
@@ -941,7 +933,23 @@ def api_gallery_ids_combined():
         resp, err = call_external_api(a, "/api/external-access/gallery/ids", params=ext_params)
         if err:
             continue  # архів недоступний/ключ деактивовано — просто пропускаємо
-        for item in (resp.json().get("ids") or []):
+        items = resp.json().get("ids") or []
+        # які з цих постів уже є в нашому архіві — одним запитом по індексу
+        pids = list({it.get("post_id") for it in items if isinstance(it, dict) and it.get("post_id")}
+                    - seen_post_ids)
+        if pids:
+            db = get_db()
+            try:
+                for i in range(0, len(pids), 1000):
+                    chunk = pids[i:i + 1000]
+                    ph = ",".join(["%s"] * len(chunk))
+                    for r in qq(db, f"SELECT DISTINCT post_id FROM furry_posts WHERE post_id IN ({ph})", chunk):
+                        seen_post_ids.add(r["post_id"])
+            except Exception:
+                pass                  # без застосунку furry — склеювати нема з чим
+            finally:
+                db.close()
+        for item in items:
             # З include_post_id=1 хост повертає {"id":.., "post_id":..}
             # замість голих ID — саме post_id і використовуємо для дедублікації
             rid = item.get("id") if isinstance(item, dict) else item
@@ -950,10 +958,10 @@ def api_gallery_ids_combined():
                 if pid in seen_post_ids:
                     continue  # той самий реальний пост уже є з іншого джерела
                 seen_post_ids.add(pid)
-            combined.append({"source": a["id"], "id": rid})
+            combined.append(json.dumps({"source": a["id"], "id": rid}, separators=(",", ":")))
 
     random.shuffle(combined)
-    return jsonify({"items": combined})
+    return Response('{"items":[' + ",".join(combined) + "]}", mimetype="application/json")
 
 
 @bp.route("/api/external-access/keys/<int:key_id>/exceptions", methods=["GET"])
