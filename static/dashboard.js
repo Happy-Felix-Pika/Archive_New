@@ -3145,7 +3145,47 @@ async function deleteExternalArchive(id) {
   }
 }
 
+// ── Версія архіву ────────────────────────────────────────────────────
+function _verLabel(v) {
+  if (!v || v.build === 'dev') return v && v.short ? `розробка · ${v.short}` : 'розробка';
+  return `збірка #${v.build}` + (v.short ? ` · ${v.short}` : '');
+}
+function _verDate(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return isNaN(d) ? '' : d.toLocaleString(_lang === 'en' ? 'en-GB' : 'uk-UA',
+    { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+async function loadVersionBadge() {
+  try {
+    const v = await fetch(`${API}/api/version`).then(r => r.ok ? r.json() : null);
+    const el = document.getElementById('logo-version');
+    if (v && el) { el.textContent = _verLabel(v); el.title = _verDate(v.date); }
+  } catch (e) {}
+}
+async function checkVersion(force) {
+  const txt = document.getElementById('cfg-version-text');
+  const st  = document.getElementById('cfg-version-status');
+  if (!txt) return;
+  if (force) st.innerHTML = '<span class="muted">Перевіряю…</span>';
+  try {
+    const v = await fetch(`${API}/api/version/check${force ? '?force=1' : ''}`).then(r => r.json());
+    txt.textContent = _verLabel(v) + (v.date ? ` · ${_verDate(v.date)}` : '');
+    const l = v.latest || {};
+    if (l.status === 'current') {
+      st.innerHTML = '<span style="color:var(--green)">✓ Актуальна версія</span>';
+    } else if (l.status === 'outdated') {
+      st.innerHTML = `<span style="color:var(--yellow, #d90)">⬆ Є новіша збірка від ${escapeHtml(_verDate(l.latest_date))} — онови контейнер</span>`;
+    } else {
+      st.innerHTML = `<span class="muted">${escapeHtml(l.reason || 'Не вдалося перевірити')}</span>`;
+    }
+  } catch (e) {
+    st.innerHTML = '<span class="muted">Не вдалося перевірити</span>';
+  }
+}
+
 async function loadConfig() {
+  checkVersion(false);
   const cfg = await fetch(`${API}/api/config`).then(r=>r.json()).catch(()=>({}));
   const v = (...p) => { let o=cfg; for(const k of p)o=o?.[k]; return o??''; };
 
@@ -5240,6 +5280,7 @@ async function authLogout() {
 
 async function onAuthSuccess(data) {
   _currentUser = data;
+  loadVersionBadge();
   if (!data.setup_done) {
     showSetupScreen();
   } else {
