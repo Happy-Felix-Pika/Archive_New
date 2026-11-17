@@ -21,67 +21,102 @@ bp = Blueprint("artists", __name__)
 
 # ── Artists ───────────────────────────────────────────────────────────────
 
-def _artist_rows(db, f="all", tag_ids=(), sort="files"):
-    IMAGE_EXTS = ('png','jpg','jpeg','gif','webp')
-    VIDEO_EXTS = ('webm','mp4')
-    # Умова «файл підходить під фільтр» — рахуємо нею, а не відсіюємо рядки:
-    # «останнє скачування» показується по всіх файлах автора, як і раніше.
-    if f == "image":   match = f"f2.ext IN {IMAGE_EXTS}"
-    elif f == "video": match = f"f2.ext IN {VIDEO_EXTS}"
-    else:              match = "1"
-
-    tag_where = ""
-    tag_args  = []
-    if tag_ids:
-        placeholders = ",".join(["%s"] * len(tag_ids))
-        tag_where = f"""
-            AND EXISTS (
-                SELECT dt.download_id FROM download_tags dt
-                JOIN furry_posts dd ON dd.file_id = dt.download_id AND dd.artist_id = a.id
-                WHERE dt.tag_id IN ({placeholders})
-                GROUP BY dt.download_id
-                HAVING COUNT(DISTINCT dt.tag_id) = %s
-            )
-        """
-        tag_args = [int(t) for t in tag_ids] + [len(tag_ids)]
-
-    order_col = "total_size" if sort == "size" else "total_files"
-
-    # Один прохід по всіх постах з групуванням за автором. Раніше на
-    # КОЖНОГО автора було шість окремих підзапитів — на великій
-    # бібліотеці це секунди (вкладка «Автори» й пошук по авторах
-    # чекали саме на це).
-    rows = qq(db, f"""
-        SELECT a.id, a.folder_name, a.artist_name, a.created_at, a.auto_update,
-               s.total_files, s.e621_files, s.ib_files, s.last_download, s.total_size,
-               (SELECT COUNT(*) FROM pending_duplicates p WHERE p.artist_id=a.id) AS pending_count
-        FROM artists a
-        JOIN (SELECT fp.artist_id,
-                     SUM({match}) AS total_files,
-                     SUM({match} AND fp.source='e621') AS e621_files,
-                     SUM({match} AND fp.source='inkbunny') AS ib_files,
-                     MAX(fp.downloaded_at) AS last_download,
-                     COALESCE(SUM(IF({match}, f2.size_bytes, 0)),0) AS total_size
-              FROM furry_posts fp JOIN files f2 ON f2.id = fp.file_id
-              GROUP BY fp.artist_id) s ON s.artist_id = a.id
-        WHERE s.total_files > 0 {tag_where}
-        ORDER BY {order_col} DESC, a.id
-    """, tag_args)
-    for r in rows:
-        if r["created_at"]:    r["created_at"]    = r["created_at"].isoformat()
-        if r["last_download"]: r["last_download"]  = r["last_download"].isoformat()
-        r["total_files"]   = int(r["total_files"]   or 0)
-        r["e621_files"]    = int(r["e621_files"]    or 0)
-        r["ib_files"]      = int(r["ib_files"]      or 0)
-        r["pending_count"] = int(r["pending_count"] or 0)
-        r["total_size"]    = int(r["total_size"]    or 0)
-    return rows
+_KIND_SQL = ("CASE WHEN f2.ext IN ('png','jpg','jpeg','gif','webp') THEN 'image' "
+             "WHEN f2.ext IN ('webm','mp4') THEN 'video' ELSE 'other' END")
+_VIEW_KINDS = {"all": ("image", "video", "other"), "image": ("image",), "video": ("video",)}
 
 
-# Основний вигляд (усі файли, без тегів) — найчастіший: вкладка «Автори» і
-# пошук по авторах. Рахується на старті й оновлюється у фоні після змін
-# (core/warmcache.py), тож відкривається миттєво.
+def _artist_rows(db):
+    """
+    Усе для вкладки «Автори» й вибору автора — один прохід по постах:
+      views       — готові списки для «усе / фото / відео»;
+      file_artist — автор кожного файлу за його id (масив чисел), щоб
+                    фільтр за тегами визначав авторів у пам'яті, а не
+                    перебором усього архіву.
+    """
+    import pymysql
+    from array import array
+    meta = {r["id"]: r for r in qq(db, """SELECT id, folder_name, artist_name, created_at, auto_update
+                                          FROM artists""")}
+    pending = {r["artist_id"]: int(r["n"]) for r in qq(db, """SELECT artist_id, COUNT(*) AS n
+                                                             FROM pending_duplicates GROUP BY artist_id""")}
+    stats = {}           # artist_id -> {kind: [files, e621, ib, size]}, last
+    last = {}
+    for r in qq(db, f"""SELECT fp.artist_id, fp.source, {_KIND_SQL} AS k, COUNT(*) AS n,
+                               COALESCE(SUM(f2.size_bytes),0) AS sz, MAX(fp.downloaded_at) AS last
+                        FROM furry_posts fp JOIN files f2 ON f2.id = fp.file_id
+                        GROUP BY fp.artist_id, fp.source, k"""):
+        a = stats.setdefault(r["artist_id"], {})
+        c = a.setdefault(r["k"], [0, 0, 0, 0])
+        n = int(r["n"])
+        c[0] += n
+        if r["source"] == "e621":
+            c[1] += n
+        elif r["source"] == "inkbunny":
+            c[2] += n
+        c[3] += int(r["sz"] or 0)
+        if r["last"] and (last.get(r["artist_id"]) is None or r["last"] > last[r["artist_id"]]):
+            last[r["artist_id"]] = r["last"]
+    views = {}
+    for view, kinds in _VIEW_KINDS.items():
+        rows = []
+        for aid, by_kind in stats.items():
+            m = meta.get(aid)
+            if not m:
+                continue
+            tot = [sum(by_kind.get(k, (0, 0, 0, 0))[i] for k in kinds) for i in range(4)]
+            if tot[0] <= 0:
+                continue
+            rows.append({
+                "id": aid, "folder_name": m["folder_name"], "artist_name": m["artist_name"],
+                "created_at": m["created_at"].isoformat() if m["created_at"] else None,
+                "auto_update": m["auto_update"],
+                "total_files": tot[0], "e621_files": tot[1], "ib_files": tot[2], "total_size": tot[3],
+                "last_download": last[aid].isoformat() if last.get(aid) else None,
+                "pending_count": pending.get(aid, 0),
+            })
+        rows.sort(key=lambda r: (-r["total_files"], r["id"]))
+        views[view] = rows
+    with db.cursor(pymysql.cursors.Cursor) as cur:
+        cur.execute("SELECT file_id, artist_id FROM furry_posts")
+        pairs = cur.fetchall()
+    fa = array("i", [0]) * ((max((p[0] for p in pairs), default=0)) + 1)
+    for fid, aid in pairs:
+        fa[fid] = aid
+    return {"views": views, "file_artist": fa}
+
+
+# Рахується на старті й оновлюється у фоні після змін (core/warmcache.py),
+# тож вкладка «Автори» і вибір автора відкриваються миттєво — з будь-яким
+# фільтром і тегами.
 artists_cache = WarmCache("artists", _artist_rows)
+
+
+def _artists_with_tags(tag_ids) -> set:
+    """Автори, у яких є хоч один файл з усіма цими тегами."""
+    import pymysql
+    files = None
+    db = get_db()
+    try:
+        with db.cursor(pymysql.cursors.Cursor) as cur:
+            for tid in dict.fromkeys(int(t) for t in tag_ids):
+                cur.execute("SELECT download_id FROM download_tags WHERE tag_id=%s", (tid,))
+                got = [r[0] for r in cur.fetchall()]
+                files = set(got) if files is None else files.intersection(got)
+                if not files:
+                    return set()
+            fa = artists_cache.get()["file_artist"]
+            n = len(fa)
+            out = {fa[i] for i in files if i < n}
+            newer = [i for i in files if i >= n]       # додане після підрахунку
+            if newer:
+                ph = ",".join(["%s"] * len(newer))
+                cur.execute(f"SELECT DISTINCT artist_id FROM furry_posts WHERE file_id IN ({ph})", newer)
+                out.update(r[0] for r in cur.fetchall())
+            out.discard(0)
+            return out
+    finally:
+        db.close()
 
 
 @bp.route("/api/artists")
@@ -91,12 +126,12 @@ def api_artists():
     tag_ids = flask_request.args.getlist("tag_id")
     sort = flask_request.args.get("sort", "files")  # files | size
     try:
-        if f == "all" and not tag_ids:
-            rows = artists_cache.get()
-            if sort == "size":
-                rows = sorted(rows, key=lambda r: (-r["total_size"], r["id"]))
-        else:
-            rows = _artist_rows(get_db(), f, tag_ids, sort)
+        rows = artists_cache.get()["views"].get(f if f in _VIEW_KINDS else "all", [])
+        if tag_ids:
+            keep = _artists_with_tags(tag_ids)
+            rows = [r for r in rows if r["id"] in keep]
+        if sort == "size":
+            rows = sorted(rows, key=lambda r: (-r["total_size"], r["id"]))
         return jsonify(_with_favorites(rows))
     except Exception as e:
         return jsonify({"error": str(e)}), 503

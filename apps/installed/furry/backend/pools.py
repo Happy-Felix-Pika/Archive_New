@@ -11,6 +11,7 @@ import time
 from flask import Blueprint, jsonify, request as flask_request
 
 from core.db import get_db, qq
+from core.warmcache import WarmCache
 from . import poolstore
 
 bp = Blueprint("pools", __name__)
@@ -32,6 +33,21 @@ def all_pools(db, hidden_folders=None, artist_id=None) -> list:
                       FROM furry_pools p JOIN artists a ON a.id = p.artist_id
                       WHERE {' AND '.join(where)}
                       ORDER BY p.cnt DESC, p.name""", args)
+
+
+def _compute_pool_items(db):
+    """Хто в якому пулі: {file_id: (pool_id, ...)} — кілька десятків тисяч
+    записів, у пам'яті це дрібниця. Для підрахунку пулів з тегами."""
+    import pymysql
+    out = {}
+    with db.cursor(pymysql.cursors.Cursor) as cur:
+        cur.execute("SELECT file_id, pool_id FROM furry_pool_items")
+        for fid, pid in cur.fetchall():
+            out[fid] = out.get(fid, ()) + (pid,)
+    return out
+
+
+pool_items_cache = WarmCache("pool-items", _compute_pool_items)
 
 
 def reconcile_loop():
@@ -59,21 +75,37 @@ def api_pools():
         if not tag_ids:
             rows = all_pools(db, artist_id=artist_id)
         else:
-            # з тегами — рахуємо лише сторінки, що мають усі обрані теги
-            args, where = [], []
-            if artist_id:
-                where.append("p.artist_id = %s"); args.append(int(artist_id))
-            ph = ",".join(["%s"] * len(tag_ids))
-            where.append(f"""EXISTS (SELECT dt.download_id FROM download_tags dt
-                                     WHERE dt.download_id = i.file_id AND dt.tag_id IN ({ph})
-                                     GROUP BY dt.download_id HAVING COUNT(DISTINCT dt.tag_id) = %s)""")
-            args.extend(int(t) for t in tag_ids); args.append(len(tag_ids))
-            rows = qq(db, f"""SELECT p.name, p.artist_id, a.artist_name, p.source, COUNT(*) AS cnt
-                              FROM furry_pool_items i
-                              JOIN furry_pools p ON p.id = i.pool_id
-                              JOIN artists a ON a.id = p.artist_id
-                              WHERE {' AND '.join(where)}
-                              GROUP BY p.id ORDER BY cnt DESC""", args)
+            # з тегами — рахуємо лише сторінки, що мають усі обрані теги:
+            # файли з кожним тегом (короткий запит по індексу тегу),
+            # перетин — у пам'яті, а хто в якому пулі — з готової карти.
+            # Жодного проходу по всьому архіву.
+            import pymysql
+            files = None
+            with db.cursor(pymysql.cursors.Cursor) as cur:
+                for tid in dict.fromkeys(int(t) for t in tag_ids):
+                    cur.execute("SELECT download_id FROM download_tags WHERE tag_id=%s", (tid,))
+                    got = [r[0] for r in cur.fetchall()]
+                    files = set(got) if files is None else files.intersection(got)
+                    if not files:
+                        break
+            counts = {}
+            items = pool_items_cache.get()
+            for fid in files or ():
+                for pid in items.get(fid, ()):
+                    counts[pid] = counts.get(pid, 0) + 1
+            rows = []
+            if counts:
+                ph = ",".join(["%s"] * len(counts))
+                args = list(counts)
+                extra = ""
+                if artist_id:
+                    extra = " AND p.artist_id = %s"; args.append(int(artist_id))
+                rows = list(qq(db, f"""SELECT p.id, p.name, p.artist_id, a.artist_name, p.source
+                                  FROM furry_pools p JOIN artists a ON a.id = p.artist_id
+                                  WHERE p.id IN ({ph}){extra}""", args))
+                for r in rows:
+                    r["cnt"] = counts[r.pop("id")]
+                rows.sort(key=lambda r: -r["cnt"])
         db.close()
         return jsonify(rows)
     except Exception as e:

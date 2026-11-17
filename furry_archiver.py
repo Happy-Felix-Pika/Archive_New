@@ -720,7 +720,7 @@ class DatabaseTracker:
                     matched_filename: str, hamming_distance: int,
                     matched_folder_name: str = '',
                     pool_folder: str | None = None, pool_order=None,
-                    pool_priority: bool = False):
+                    pool_priority: bool = False, tags=None):
         """
         pool_folder/pool_order — у якому pool (серії) на сайті цей новий файл.
         pool_priority — новий файл є сторінкою pool, а збережений ні: така
@@ -733,22 +733,31 @@ class DatabaseTracker:
                      filename, file_ext, page_num, local_path, nc_target_path,
                      matched_post_id, matched_filename, matched_folder_name, hamming_distance)
         with self.db.cursor() as cur:
+            tags_json = json.dumps(tags, ensure_ascii=False) if tags else None
             try:
                 cur.execute(f"""
                     INSERT IGNORE INTO pending_duplicates
-                        ({base_cols}, pool_folder, pool_order, pool_priority)
-                    VALUES ({",".join(["%s"] * (len(base_vals) + 3))})
-                """, base_vals + (pool_folder, pool_order, 1 if pool_priority else 0))
+                        ({base_cols}, pool_folder, pool_order, pool_priority, tags)
+                    VALUES ({",".join(["%s"] * (len(base_vals) + 4))})
+                """, base_vals + (pool_folder, pool_order, 1 if pool_priority else 0, tags_json))
             except pymysql.err.OperationalError as e:
-                if e.args and e.args[0] == 1054:
-                    # колонок pool_* ще немає (міграцію не застосовано) —
-                    # пишемо як раніше, без них
+                if not (e.args and e.args[0] == 1054):
+                    raise
+                try:
+                    # колонки tags ще немає (сервер не оновлювався) — без тегів
+                    cur.execute(f"""
+                        INSERT IGNORE INTO pending_duplicates
+                            ({base_cols}, pool_folder, pool_order, pool_priority)
+                        VALUES ({",".join(["%s"] * (len(base_vals) + 3))})
+                    """, base_vals + (pool_folder, pool_order, 1 if pool_priority else 0))
+                except pymysql.err.OperationalError as e2:
+                    if not (e2.args and e2.args[0] == 1054):
+                        raise
+                    # колонок pool_* теж немає — пишемо як раніше, без них
                     cur.execute(f"""
                         INSERT IGNORE INTO pending_duplicates ({base_cols})
                         VALUES ({",".join(["%s"] * len(base_vals))})
                     """, base_vals)
-                else:
-                    raise
 
     def update_hashes(self, artist_id: int, post_id: str, page_num: int,
                       md5_hash: str, phash_val: int | None,
@@ -1574,6 +1583,32 @@ class InkbunnyDownloader:
         ordered = [full_by_id[sid] for sid in ordered_ids if sid in full_by_id]
         return pool_name, ordered
 
+    def get_keywords(self, sub_ids) -> dict:
+        """{номер роботи: [теги]} — деталі пачками по 100 номерів."""
+        out = {}
+        ids = [str(i) for i in sub_ids]
+        for i in range(0, len(ids), 100):
+            self._rate_limit()
+            try:
+                r = self.session.post(f"{INKBUNNY_API_BASE}_submissions.php", data={
+                    'sid': self.sid, 'submission_ids': ','.join(ids[i:i + 100]),
+                    'show_description': 'no'})
+                r.raise_for_status()
+                data = r.json()
+                if data.get('error_code') is not None:
+                    print(f"  ✗ Inkbunny теги: {data.get('error_message')}")
+                    continue
+                for full in data.get('submissions', []) or []:
+                    sid = full.get('submission_id')
+                    if sid is None:
+                        continue
+                    out[int(sid)] = [kw.get('keyword_name', '').strip()
+                                     for kw in (full.get('keywords') or [])
+                                     if kw.get('keyword_name', '').strip()]
+            except Exception as e:
+                print(f"  ✗ Inkbunny теги: {e}")
+        return out
+
     def download_submission(self, submission: dict, local_dir: str) -> dict | None:
         self._rate_limit()
         sub_id = submission['submission_id']
@@ -1796,6 +1831,8 @@ class FurryArchiver:
             same = self.tracker.md5_file(artist_id, md5)
             if same:
                 os.remove(fpath)
+                if tags and not dry_run:
+                    self.tracker._save_tags(same['id'], tags)   # теги другого сайту — теж до файлу
                 # Той самий файл уже є, але поза pool, а на сайті він — сторінка
                 # pool: переносимо наявний у pool, щоб у серії не було дірки.
                 pools_to_link = list(extra_pools)
@@ -1841,6 +1878,9 @@ class FurryArchiver:
                     # Та сама робота з іншого сайту, але в ІНШОМУ пулі (на e621
                     # в одному, на Inkbunny в іншому). Копія не потрібна:
                     # збережений файл просто додається і в цей пул.
+                    if secondary and near and matched and tags and not dry_run:
+                        # та сама робота з іншого сайту: її теги додаються до збереженого файлу
+                        self.tracker._save_tags(matched['id'], tags)
                     if (secondary and near and matched and pool_folder and old_pool
                             and not already_in):
                         os.remove(fpath)
@@ -1883,7 +1923,7 @@ class FurryArchiver:
                         hamming_distance=hamming_dist,
                         matched_folder_name=matched_folder_actual,
                         pool_folder=pool_folder, pool_order=pool_order,
-                        pool_priority=pool_priority,
+                        pool_priority=pool_priority, tags=tags,
                     )
                     if pool_priority:
                         return f'pool_priority:{matched_filename}:{hamming_dist}'
@@ -3301,23 +3341,14 @@ class FurryArchiver:
                         tags_by_numeric_id[post['id']] = self.e621_dl._extract_e621_tags(post)
 
                 elif source == 'inkbunny' and self.ib_dl and self.ib_dl.sid:
-                    subs = self.ib_dl.search_artist_submissions(artist_name)
-                    sub_ids = [str(s.get('submission_id')) for s in subs if s.get('submission_id')]
-                    if sub_ids:
-                        time.sleep(INKBUNNY_RATE_LIMIT)
-                        r = self.ib_dl.session.post(
-                            f"{INKBUNNY_API_BASE}_submissions.php",
-                            data={'sid': self.ib_dl.sid, 'submission_ids': ','.join(sub_ids),
-                                  'show_description': 'no'}
-                        )
-                        r.raise_for_status()
-                        for full in r.json().get('submissions', []):
-                            sid = full.get('submission_id')
-                            if sid is None:
-                                continue
-                            kws = [kw.get('keyword_name', '').strip()
-                                   for kw in (full.get('keywords') or []) if kw.get('keyword_name', '').strip()]
-                            tags_by_numeric_id[int(sid)] = kws
+                    # Номери робіт і так відомі з post_id — беремо деталі прямо
+                    # по них, пачками по 100 (більше API за раз не віддає).
+                    # Пошук за іменем автора не потрібен: на Inkbunny воно
+                    # може відрізнятись від назви теки в архіві.
+                    sub_ids = sorted({r['post_id'].replace('ib_', '').split('-')[0]
+                                      for r in group_rows
+                                      if r['post_id'].replace('ib_', '').split('-')[0].isdigit()})
+                    tags_by_numeric_id.update(self.ib_dl.get_keywords(sub_ids))
                 else:
                     continue
 
