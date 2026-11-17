@@ -11,15 +11,15 @@ Furry Archive — застосунок.
 
 import threading
 
-from . import artists, library, ncstats, poolstore, pools, runner
+from . import artists, library, poolstore, pools, runner
 
-MODULES = (artists, ncstats, pools, runner)
+MODULES = (artists, pools, runner)
 
 
 def _file_meta(data, file_id, db, **_):
     """
     Дописує в картку файлу те, що знає тільки furry: автора, джерело,
-    посилання на пост, серію й публічне посилання Nextcloud.
+    посилання на пост і серію.
     Ядро цих полів не знає — воно лише дає фільтру доповнити відповідь.
     """
     with db.cursor() as cur:
@@ -40,13 +40,6 @@ def _file_meta(data, file_id, db, **_):
     with db.cursor() as cur:
         file_pools = poolstore.file_pools(cur, file_id)
 
-    share_url = None
-    if row["folder_name"]:
-        from core.auth import get_user_nc_config
-        from core.nextcloud import nc_share_url
-        base = get_user_nc_config().get("base_folder", "").strip("/")
-        share_url = nc_share_url(row["folder_name"], data["filename"], base)
-
     data.update({
         "artist":     row["artist_name"],
         "artist_id":  row["artist_id"],
@@ -57,7 +50,6 @@ def _file_meta(data, file_id, db, **_):
         "pool_total": next((p["total"] for p in file_pools if not p["linked"]), None) if row["subfolder"] else None,
         "pools":      file_pools,
         "artist_fav": row["artist_id"] in artists.favorite_artist_ids(_uid()),
-        "share_url":  share_url,
     })
     return data
 

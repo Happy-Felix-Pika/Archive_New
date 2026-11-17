@@ -5,7 +5,7 @@ import os
 from flask import Blueprint, jsonify, request as flask_request
 
 
-from core.auth import admin_required, moderator_required, current_user_id, get_user_nc_config, login_required
+from core.auth import admin_required, moderator_required, current_user_id, login_required
 from core import modlog
 from core.db import get_db, q, qq, table_exists
 from core.storage_api import StorageError, get_storage

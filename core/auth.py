@@ -139,7 +139,7 @@ def current_user_id() -> int:
 
 def get_user_settings(user_id: int | None = None) -> dict:
     """
-    Повертає ВСІ налаштування (nextcloud, nextcloud_db, e621, inkbunny, download)
+    Повертає ВСІ налаштування (e621, inkbunny, download і секції застосунків)
     з archiver_config.json (все, крім секції 'database'). Параметр user_id
     лишений для сумісності сигнатур виклику — налаштування тепер спільні для всіх.
     """
@@ -166,6 +166,3 @@ def merge_user_settings(patch: dict, user_id: int | None = None):
     save_user_settings(current)
 
 
-def get_user_nc_config(user_id: int | None = None) -> dict:
-    """Повертає Nextcloud-конфіг зі спільного файлового конфігу."""
-    return get_user_settings().get("nextcloud", {})

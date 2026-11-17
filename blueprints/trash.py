@@ -83,32 +83,7 @@ def _send_preview(rel_path: str, name: str, full: bool):
                 return jsonify({"error": "thumb failed"}), 404
         return send_file(out, mimetype="image/jpeg", conditional=True, max_age=86400)
 
-    # Nextcloud: качаємо у тимчасовий файл і робимо так само
-    if not full and not (is_image or is_video):
-        return jsonify({"error": "no preview"}), 404
-    out = _thumb_cache_path(f"nc:{rel_path}")
-    if not full and os.path.exists(out):
-        return send_file(out, mimetype="image/jpeg", conditional=True, max_age=86400)
-    fd, tmp = tempfile.mkstemp(suffix=f".{ext}" if ext else "")
-    os.close(fd)
-    try:
-        if not get_storage().download(rel_path, tmp):
-            return jsonify({"error": "not found"}), 404
-        if full:
-            with open(tmp, "rb") as fh:
-                data = fh.read()
-            from flask import Response
-            return Response(data, mimetype=mimetypes.guess_type(name)[0] or "application/octet-stream")
-        ok = _make_image_thumb(tmp, out) if is_image else _make_video_thumb(tmp, out)
-        if not ok:
-            return jsonify({"error": "thumb failed"}), 404
-        return send_file(out, mimetype="image/jpeg", conditional=True, max_age=86400)
-    finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-
+    return jsonify({"error": "Сховище не налаштоване"}), 400
 
 @bp.route("/api/trash/<int:trash_id>/thumb")
 @moderator_required

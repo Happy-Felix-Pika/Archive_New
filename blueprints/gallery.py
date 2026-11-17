@@ -6,12 +6,11 @@ import mimetypes, os, random, threading
 from flask import Blueprint, Response, jsonify, request as flask_request, send_file
 
 
-from core.auth import current_user_id, get_user_nc_config
+from core.auth import current_user_id
 from core import events
 from core.warmcache import WarmCache
 from core.db import table_exists, get_db, q, qq
 from core.imgcache import _IMG_CACHE_DIR
-from core.nextcloud import nc_share_url
 from core.files_api import get_file, local_path
 from core.storage import get_storage_mode, local_file_path
 
@@ -263,7 +262,7 @@ def api_gallery_meta(download_id):
 
 @bp.route("/api/gallery/stream/<int:download_id>")
 def api_gallery_stream(download_id):
-    """Віддає файл з активного сховища (Nextcloud або локальний диск)."""
+    """Віддає файл зі сховища (локальна тека)."""
     try:
         db  = get_db()
         # Читаємо з ядра: шлях до файлу більше не збирається з автора.
@@ -274,113 +273,10 @@ def api_gallery_stream(download_id):
 
         mime = mimetypes.guess_type(row["name"])[0] or "application/octet-stream"
 
-        if get_storage_mode() == "local":
-            fpath = local_path(row["rel_path"])
-            if not os.path.isfile(fpath):
-                return jsonify({"error": "Файл не знайдено на диску"}), 404
-            return send_file(fpath, mimetype=mime, conditional=True)
-
-        nc_cfg      = get_user_nc_config()
-        base_folder = nc_cfg.get("base_folder", "").strip("/")
-        webdav_url  = nc_cfg.get("webdav_url", "").rstrip("/")
-        # rel_path — це і є шлях усередині сховища (@автор/Пул/файл),
-        # тобто рівно те, що раніше збиралося з folder_name + subfolder + filename.
-        nc_path     = f"{base_folder}/{row['rel_path']}" if base_folder else row["rel_path"]
-        file_url    = f"{webdav_url}/{nc_path}"
-        is_video    = mime.startswith("video/")
-
-        import requests as req
-
-        # ── Зображення: диск-кеш (швидко при повторному перегляді)
-        if not is_video:
-            cache_key  = hashlib.md5(f"{download_id}:{row['name']}".encode()).hexdigest()
-            cache_path = os.path.join(_IMG_CACHE_DIR, cache_key)
-
-            if not os.path.exists(cache_path):
-                # Завантажуємо і кешуємо
-                r = req.get(file_url,
-                            auth=(nc_cfg.get("username",""), nc_cfg.get("password","")),
-                            stream=True, timeout=30)
-                r.raise_for_status()
-                with open(cache_path, "wb") as f:
-                    for chunk in r.iter_content(65536):
-                        if chunk: f.write(chunk)
-
-            # Віддаємо з кешу з підтримкою Range
-            file_size    = os.path.getsize(cache_path)
-            range_header = flask_request.headers.get("Range")
-
-            if range_header:
-                import re as _re
-                m = _re.match(r"bytes=(\d+)-(\d*)", range_header)
-                start = int(m.group(1))
-                end   = int(m.group(2)) if m.group(2) else file_size - 1
-                length = end - start + 1
-                def gen_range():
-                    with open(cache_path, "rb") as f:
-                        f.seek(start)
-                        remaining = length
-                        while remaining:
-                            chunk = f.read(min(65536, remaining))
-                            if not chunk: break
-                            remaining -= len(chunk)
-                            yield chunk
-                return Response(gen_range(), status=206, headers={
-                    "Content-Type":   mime,
-                    "Content-Range":  f"bytes {start}-{end}/{file_size}",
-                    "Content-Length": str(length),
-                    "Accept-Ranges":  "bytes",
-                    "Cache-Control":  "public, max-age=3600",
-                })
-            else:
-                def gen_full():
-                    with open(cache_path, "rb") as f:
-                        while True:
-                            chunk = f.read(65536)
-                            if not chunk: break
-                            yield chunk
-                return Response(gen_full(), status=200, headers={
-                    "Content-Type":   mime,
-                    "Content-Length": str(file_size),
-                    "Accept-Ranges":  "bytes",
-                    "Cache-Control":  "public, max-age=3600",
-                })
-
-        # ── Відео: стрім напряму (без кешу — файли великі)
-        range_header = flask_request.headers.get("Range")
-        headers = {}
-        if range_header:
-            headers["Range"] = range_header
-
-        nc_resp = req.get(file_url,
-                          auth=(nc_cfg.get("username",""), nc_cfg.get("password","")),
-                          headers=headers, stream=True, timeout=30)
-
-        status_code = nc_resp.status_code
-        def gen_video():
-            for chunk in nc_resp.iter_content(chunk_size=131072):
-                if chunk: yield chunk
-
-        resp_headers = {
-            "Content-Type":  mime,
-            "Accept-Ranges": "bytes",
-            "Cache-Control": "no-store",
-        }
-        if "Content-Length" in nc_resp.headers:
-            resp_headers["Content-Length"] = nc_resp.headers["Content-Length"]
-        if "Content-Range" in nc_resp.headers:
-            resp_headers["Content-Range"] = nc_resp.headers["Content-Range"]
-
-        return Response(gen_video(), status=status_code, headers=resp_headers)
-
-    except req.exceptions.HTTPError as e:
-        # Файл реально відсутній на Nextcloud (видалили/перенесли вручну,
-        # чи pool-реорганізація рознесла шляхи) — це не помилка сервера,
-        # а очікуваний стан, тому 404, а не 500.
-        status = e.response.status_code if e.response is not None else 502
-        if status == 404:
-            return jsonify({"error": "Файл не знайдено на Nextcloud (можливо видалений/перенесений)"}), 404
-        return jsonify({"error": str(e)}), 502
+        fpath = local_path(row["rel_path"])
+        if not os.path.isfile(fpath):
+            return jsonify({"error": "Файл не знайдено на диску"}), 404
+        return send_file(fpath, mimetype=mime, conditional=True)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

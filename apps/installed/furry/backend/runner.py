@@ -128,7 +128,7 @@ def _stream_process(proc, job_id=None):
 # дублікати, перевірити пули. Повні проходи, синхронізація, очищення,
 # міграції — лише адмін.
 _MOD_FLAGS = {"artist", "find_duplicates", "recheck_pools", "subfolder", "dry_run"}
-_ADMIN_FLAGS = {"migrate", "migrate_tags", "sync_all", "cleanup", "cleanup_dry", "backfill_sizes"}
+_ADMIN_FLAGS = {"migrate_tags", "sync_all", "cleanup", "cleanup_dry", "backfill_sizes"}
 
 
 @bp.route("/api/run", methods=["POST"])
@@ -147,7 +147,6 @@ def api_run():
                 return jsonify({"error": "Синхронізація, очищення й міграції — лише для адміна"}), 403
         flags = ["--user-id", "1"]
         if body.get("dry_run"):      flags.append("--dry-run")
-        if body.get("migrate"):      flags.append("--migrate")
         if body.get("migrate_tags"): flags.append("--migrate-tags")
         if body.get("sync_all"):     flags.append("--sync-all")
         if body.get("artist"):       flags.extend(["--artist", str(body.get("artist"))])

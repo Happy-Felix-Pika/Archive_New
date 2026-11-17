@@ -6,11 +6,10 @@ import base64, mimetypes, os
 from flask import Blueprint, jsonify, request as flask_request
 
 
-from core.auth import admin_required, current_role, get_user_nc_config, get_user_settings, current_user_id, login_required, moderator_required
+from core.auth import admin_required, current_role, get_user_settings, current_user_id, login_required, moderator_required
 from core import modlog
 from core.db import get_db, q, qq
 from core.imgcache import _IMG_CACHE_DIR
-from core.nextcloud import get_file_nc_real_path, get_nc_db, nc_share_url
 from core.paths import PENDING_DIR
 from core.storage_api import StorageError, get_storage
 from core.files_api import TrashError, trash_file, get_file, local_path
@@ -999,7 +998,6 @@ def _recover_pending_file(row: dict, user_id: int | None = None) -> str | None:
     """
     Якщо файл з pending_review зник — відновлює його.
     Спочатку пробує скачати з e621/Inkbunny по прямому URL файлу,
-    якщо не виходить — через WebDAV з Nextcloud (nc_target_path).
     Повертає шлях до відновленого файлу або None.
     """
     filename  = row.get("filename", "")
@@ -1066,27 +1064,6 @@ def _recover_pending_file(row: dict, user_id: int | None = None) -> str | None:
                                     return local_path
     except Exception as e:
         print(f"  ⚠ Не вдалося відновити {filename} з API: {e}")
-
-    # 2. Fallback — качаємо з Nextcloud (файл там вже є як "matched" або новий не завантажили)
-    try:
-        nc_cfg      = get_user_nc_config()
-        folder_name = row.get("folder_name", "")
-        base_folder = nc_cfg.get("base_folder", "").strip("/")
-        nc_path     = f"{base_folder}/{folder_name}/{filename}"
-
-        from webdav3.client import Client
-        client = Client({
-            "webdav_hostname": nc_cfg.get("webdav_url", ""),
-            "webdav_login":    nc_cfg.get("username", ""),
-            "webdav_password": nc_cfg.get("password", ""),
-            "disable_check":   True,
-        })
-        if client.check(nc_path):
-            client.download_sync(remote_path=nc_path, local_path=local_path)
-            print(f"  ✓ Відновлено з Nextcloud: {filename}")
-            return local_path
-    except Exception as e:
-        print(f"  ⚠ Не вдалося відновити {filename} з Nextcloud: {e}")
 
     return None
 

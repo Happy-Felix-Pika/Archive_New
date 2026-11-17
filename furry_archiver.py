@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Furry Art Archiver - автоматический архиватор контента с e621 и Inkbunny
-Сканирует Nextcloud папку, находит авторов и скачивает контент
+Сканирует локальную папку-сховище, находит авторов и скачивает контент
 Хранит данные в MariaDB + дедупликация через pHash (как MediaDC)
 """
 
@@ -17,7 +17,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as
 import requests
 import time
 import warnings
-from webdav3.client import Client
 import argparse
 import pymysql
 import pymysql.cursors
@@ -90,7 +89,7 @@ PENDING_DIR = "/data/pending_review" if _os.path.isdir("/data") else "./pending_
 
 class Config:
     """
-    Конфіг архиватора. Все — і 'database', і 'nextcloud'/'e621'/'inkbunny'/
+    Конфіг архиватора. Все — і 'database', і 'local'/'e621'/'inkbunny'/
     'download' — читається з одного файлу archiver_config.json (дашборд
     записує туди все через /api/config, /api/user-settings).
     """
@@ -121,8 +120,6 @@ class Config:
         """Гарантує що всі очікувані секції існують (навіть порожні),
         щоб .get(...) ніде не падав з KeyError."""
         defaults = {
-            "nextcloud": {"webdav_url": "", "username": "", "password": "", "base_folder": "",
-                          "enabled": False, "local_data_path": ""},
             "local":     {"path": ""},
             "e621":      {"enabled": True, "username": "", "api_key": "", "max_posts_per_artist": None},
             "inkbunny":  {"enabled": True, "username": "", "password": "", "max_submissions_per_artist": None},
@@ -932,162 +929,14 @@ def _compute_videohash(file_bytes: bytes, ext: str) -> int | None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# NEXTCLOUD
-# ─────────────────────────────────────────────────────────────────────────────
-
-class NextcloudScanner:
-    def __init__(self, config: Config):
-        self.config = config
-        self.client = Client({
-            'webdav_hostname': config.get('nextcloud', 'webdav_url'),
-            'webdav_login':    config.get('nextcloud', 'username'),
-            'webdav_password': config.get('nextcloud', 'password'),
-            'disable_check': True
-        })
-        # Якщо архіватор працює на тому ж сервері, де стоїть Nextcloud —
-        # можна читати файли напряму з диска, оминаючи WebDAV повністю.
-        self.local_data_path = (config.get('nextcloud', 'local_data_path') or '').rstrip('/')
-        self.nc_username     = config.get('nextcloud', 'username') or ''
-        self._direct_ok      = 0
-        self._direct_fail    = 0
-
-        if self.local_data_path:
-            probe = os.path.join(self.local_data_path, self.nc_username, 'files')
-            if os.path.isdir(probe):
-                print(f"  ✓ Прямий доступ до диска Nextcloud: {probe} — знайдено, буде використано")
-            else:
-                print(f"  ⚠ Прямий доступ до диска Nextcloud: {probe} — ПАПКУ НЕ ЗНАЙДЕНО")
-                print(f"    Найімовірніша причина, якщо на хості ця папка точно існує:")
-                print(f"    архіватор працює у Docker-контейнері, і шлях хоста не змонтований")
-                print(f"    усередину контейнера — потрібен volume-маунт у docker-compose.yml,")
-                print(f"    що вказує на ту саму папку даних Nextcloud (можна read-only).")
-                print(f"    Інакше перевір сам шлях у Конфізі та логін '{self.nc_username}'.")
-                print(f"    Поки що всі читання йтимуть через WebDAV (повільніше).")
-
-    def scan_artists(self) -> list:
-        base_folder = self.config.get('nextcloud', 'base_folder').strip('/')
-        artists = []
-        try:
-            items = self.client.list(base_folder)
-            for item in items:
-                item_norm = item.strip('/')
-                if item_norm == base_folder:
-                    continue
-                folder_name = item.rstrip('/').split('/')[-1]
-                if folder_name.startswith('@'):
-                    artist_name = folder_name[1:]
-                    full_path = item if item.startswith(base_folder) else f"{base_folder}/{folder_name}"
-                    if not full_path.endswith('/'):
-                        full_path += '/'
-                    artists.append({
-                        'folder_name': folder_name,
-                        'artist_name': artist_name,
-                        'path': full_path
-                    })
-            print(f"✓ Найдено {len(artists)} авторов в Nextcloud")
-        except Exception as e:
-            print(f"✗ Ошибка сканирования Nextcloud: {e}")
-        return artists
-
-    def upload_file(self, local_path: str, remote_path: str) -> bool:
-        try:
-            dest_dir = remote_path.rsplit('/', 1)[0] if '/' in remote_path else ''
-            if dest_dir:
-                try:
-                    self.client.mkdir(dest_dir)
-                except Exception:
-                    pass  # найчастіше "вже існує" — не критично
-            self.client.upload_sync(remote_path=remote_path, local_path=local_path)
-            return True
-        except Exception as e:
-            print(f"✗ Ошибка загрузки {remote_path}: {e}")
-            return False
-
-    def download_file(self, remote_path: str, local_path: str):
-        self.client.download_sync(
-            remote_path=remote_path,
-            local_path=local_path
-        )
-
-    def move_file(self, remote_path_from: str, remote_path_to: str) -> bool:
-        """Переносить файл на самому Nextcloud (без завантаження туди-сюди).
-        Використовується наприклад коли синхронізація виявляє, що файл
-        належить до e621 pool і його треба перенести у підпапку.
-        WebDAV MOVE вимагає щоб цільова папка вже існувала — тому спершу
-        завжди пробуємо створити її (без попередньої перевірки через check(),
-        яка іноді бреше) і просто ігноруємо помилку якщо вона вже є."""
-        try:
-            dest_dir = remote_path_to.rsplit('/', 1)[0] if '/' in remote_path_to else ''
-            if dest_dir:
-                try:
-                    self.client.mkdir(dest_dir)
-                    print(f"    📁 створено папку: {dest_dir}")
-                except Exception as e:
-                    # Найчастіше це "вже існує" — не критично, просто фіксуємо
-                    print(f"    ℹ mkdir({dest_dir}): {e}")
-
-            self.client.move(remote_path_from=remote_path_from, remote_path_to=remote_path_to)
-            return True
-        except Exception as e:
-            print(f"    ✗ Не вдалося перенести {remote_path_from} → {remote_path_to}: {e}")
-            return False
-
-    def list_files(self, folder: str):
-        return self.client.list(folder)
-
-    def read_bytes(self, remote_path: str) -> bytes | None:
-        """
-        Читає вміст файлу. Спершу пробує прямий доступ до диска Nextcloud
-        (якщо налаштований local_data_path — той самий сервер, без мережі,
-        набагато швидше). Якщо не вийшло (не налаштовано, файла нема саме
-        там, зовнішнє сховище тощо) — тихо падає на завантаження через
-        WebDAV, як і раніше.
-        Використовується синхронізацією для обчислення MD5/pHash/розмірів.
-        """
-        if self.local_data_path and self.nc_username:
-            # Стандартна структура даних Nextcloud (local storage backend):
-            # {datadirectory}/{username}/files/{шлях_відносно_кореня_юзера}
-            local_path = os.path.join(self.local_data_path, self.nc_username, 'files', remote_path)
-            try:
-                with open(local_path, 'rb') as f:
-                    self._direct_ok += 1
-                    return f.read()
-            except Exception as e:
-                self._direct_fail += 1
-                if self._direct_fail <= 3:  # не спамимо лог на кожен файл
-                    print(f"    ⚠ Пряме читання не вдалося ({local_path}): {e} — падаю на WebDAV")
-                elif self._direct_fail == 4:
-                    print(f"    ⚠ (далі такі помилки більше не показую, щоб не засмічувати лог)")
-
-        import tempfile
-        tmp_path = None
-        try:
-            with tempfile.NamedTemporaryFile(delete=False) as tmp:
-                tmp_path = tmp.name
-            self.client.download_sync(remote_path=remote_path, local_path=tmp_path)
-            with open(tmp_path, 'rb') as f:
-                return f.read()
-        except Exception as e:
-            print(f"    ⚠ Не вдалося скачати {remote_path}: {e}")
-            return None
-        finally:
-            if tmp_path and os.path.exists(tmp_path):
-                try:
-                    os.remove(tmp_path)
-                except Exception:
-                    pass
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ЛОКАЛЬНЕ СХОВИЩЕ (без Nextcloud)
+# СХОВИЩЕ — локальна тека
 # ─────────────────────────────────────────────────────────────────────────────
 
 class LocalStorage:
     """
-    Альтернатива NextcloudScanner — зберігає файли прямо в папку на диску
-    сервера, без Nextcloud/WebDAV. Реалізує той самий інтерфейс
-    (scan_artists, upload_file, download_file, list_files), тому решта коду
-    (run(), _check_and_upload тощо) працює однаково незалежно від того,
-    яке сховище обрав користувач.
+    Сховище архіватора — тека на диску сервера (Конфіг → Сховище файлів).
+    Інтерфейс: scan_artists, upload_file, download_file, list_files.
+    (Атрибут архіватора історично зветься nc_scanner.)
     """
     def __init__(self, config: Config):
         self.config = config
@@ -1107,7 +956,7 @@ class LocalStorage:
                     artists.append({
                         'folder_name': entry,
                         'artist_name': entry[1:],
-                        'path': entry + '/'  # відносний шлях, узгоджено з NextcloudScanner
+                        'path': entry + '/'
                     })
             print(f"✓ Найдено {len(artists)} авторов локально")
         except Exception as e:
@@ -1883,21 +1732,14 @@ class FurryArchiver:
             self.config.get('download', 'cross_source_threshold') or CROSS_SOURCE_THRESHOLD
         )
 
-        nc_cfg     = self.config.config.get('nextcloud', {}) or {}
-        nc_enabled = nc_cfg.get('enabled', bool(nc_cfg.get('webdav_url')))
-
-        if nc_enabled and nc_cfg.get('webdav_url'):
-            self.nc_scanner   = NextcloudScanner(self.config)
-            self.storage_mode = 'nextcloud'
-            print("  Сховище: Nextcloud")
-        elif self.config.get('local', 'path'):
-            self.nc_scanner   = LocalStorage(self.config)
-            self.storage_mode = 'local'
+        # Сховище — локальна тека (Nextcloud — окремий застосунок дашборда,
+        # архіватор з ним не працює)
+        self.nc_scanner   = LocalStorage(self.config)
+        self.storage_mode = 'local'
+        if self.config.get('local', 'path'):
             print(f"  Сховище: локальна папка ({self.config.get('local', 'path')})")
         else:
-            self.nc_scanner   = NextcloudScanner(self.config)
-            self.storage_mode = 'nextcloud'
-            print("  ⚠ Сховище не налаштоване (ні Nextcloud, ні локальна папка)")
+            print("  ⚠ Сховище не налаштоване — вкажи локальну папку (Конфіг → Сховище файлів)")
 
         self.e621_dl = None
         # Папки, які юзер явно позначив "не сканувати" — напр. особисті
@@ -1919,24 +1761,6 @@ class FurryArchiver:
         tmp = self.config.get('download', 'local_temp_dir')
         print(f"  Temp dir: {tmp!r}")
 
-    def _get_nc_db(self):
-        """Підключення до БД Nextcloud (read-only) — для швидкого масового
-        порівняння замість повільної перевірки кожного файлу через WebDAV."""
-        cfg = self.config.config.get("nextcloud_db", {})
-        if not cfg.get("host") or not cfg.get("user") or not cfg.get("database"):
-            return None
-        return pymysql.connect(
-            host=cfg.get("host", "localhost"),
-            port=int(cfg.get("port", 3306)),
-            user=cfg.get("user", ""),
-            password=cfg.get("password", ""),
-            database=cfg.get("database", ""),
-            charset="utf8mb4",
-            cursorclass=pymysql.cursors.DictCursor,
-            connect_timeout=10,
-        )
-
-
     def _check_and_upload(self, artist_id: int, artist_path: str,
                            result_file: dict, post_id: str, source: str,
                            post_url: str, dry_run: bool,
@@ -1944,7 +1768,7 @@ class FurryArchiver:
                            tags: list | None = None,
                            secondary: bool = False) -> str:
         """
-        Проверяет дубликаты (MD5 + pHash) и загружает файл в Nextcloud.
+        Проверяет дубликаты (MD5 + pHash) и загружает файл в сховище.
         Возвращает: 'uploaded' | 'md5_dup' | 'phash_dup' | 'upload_error'
         """
         md5    = result_file['md5_hash']
@@ -2099,7 +1923,7 @@ class FurryArchiver:
         """
         Перенести вже збережений файл цього автора в підпапку pool.
         artist_path — той самий шлях теки автора, яким користується
-        завантаження (для Nextcloud — разом з base_folder).
+        завантаження.
         """
         src = f"{artist_path}{existing['name']}"
         dst = f"{artist_path}{pool_folder}/{existing['name']}"
@@ -2346,42 +2170,17 @@ class FurryArchiver:
             artists = []
             for name in artist_names:
                 folder_name = f"@{name}"
-                if self.storage_mode == 'nextcloud':
-                    base = self.config.get('nextcloud', 'base_folder').strip('/')
-                    full_folder = f"{base}/{folder_name}"
-                    try:
-                        self.nc_scanner.client.mkdir(full_folder)
-                    except Exception:
-                        pass
-                    artist_path = f"{full_folder}/"
-                elif self.storage_mode == 'local':
-                    os.makedirs(os.path.join(self.nc_scanner.root, folder_name), exist_ok=True)
-                    artist_path = folder_name + '/'
-                else:
-                    artist_path = folder_name + '/'
+                artist_path = self._ensure_artist_dir(folder_name)
                 artists.append({'artist_name': name, 'folder_name': folder_name, 'path': artist_path})
         elif artist_name:
             # Режим одного автора — качаємо всю бібліотеку конкретного автора,
             # створюючи папку якщо її ще нема (наприклад, з вкладки "Онлайн").
             folder_name = f"@{artist_name}"
             print(f"[1/3] Режим одного автора: {artist_name}")
-            if self.storage_mode == 'nextcloud':
-                base = self.config.get('nextcloud', 'base_folder').strip('/')
-                full_folder = f"{base}/{folder_name}"
-                try:
-                    self.nc_scanner.client.mkdir(full_folder)
-                    print(f"  📁 створено папку: {full_folder}")
-                except Exception as e:
-                    print(f"  ℹ mkdir({full_folder}): {e}")
-                artist_path = f"{full_folder}/"
-            elif self.storage_mode == 'local':
-                os.makedirs(os.path.join(self.nc_scanner.root, folder_name), exist_ok=True)
-                artist_path = folder_name + '/'
-            else:
-                artist_path = folder_name + '/'
+            artist_path = self._ensure_artist_dir(folder_name)
             artists = [{'artist_name': artist_name, 'folder_name': folder_name, 'path': artist_path}]
         else:
-            print("[1/3] Сканирование Nextcloud...")
+            print("[1/3] Сканування сховища...")
             artists = self.nc_scanner.scan_artists()
             # автори з каналами Telegram, у яких ще немає теки (новий автор,
             # нічого не скачано) — інакше повний запуск їх не побачив би
@@ -2390,19 +2189,7 @@ class FurryArchiver:
                 if row['folder_name'] in known or row['folder_name'] == '_root':
                     continue
                 folder_name = row['folder_name']
-                if self.storage_mode == 'nextcloud':
-                    base = self.config.get('nextcloud', 'base_folder').strip('/')
-                    full_folder = f"{base}/{folder_name}"
-                    try:
-                        self.nc_scanner.client.mkdir(full_folder)
-                    except Exception:
-                        pass
-                    artist_path = f"{full_folder}/"
-                elif self.storage_mode == 'local':
-                    os.makedirs(os.path.join(self.nc_scanner.root, folder_name), exist_ok=True)
-                    artist_path = folder_name + '/'
-                else:
-                    artist_path = folder_name + '/'
+                artist_path = self._ensure_artist_dir(folder_name)
                 artists.append({'artist_name': row['artist_name'], 'folder_name': folder_name,
                                 'path': artist_path})
             if not artists:
@@ -2628,203 +2415,20 @@ class FurryArchiver:
 
     # ── MIGRATE: перенос старых download.txt → БД ─────────────────────────────
 
-    def migrate_from_txt(self):
-        """
-Читает download.txt из каждой папки автора в Nextcloud.
-
-Переносит записи в MariaDB,
-после чего скачивает существующие файлы из Nextcloud,
-вычисляет MD5 и pHash,
-определяет имя файла и расширение
-и обновляет записи в базе данных.
-"""
-        tmp_dir = "./tmp_hashes"
-        os.makedirs(tmp_dir, exist_ok=True)
-
-        print("\n" + "="*60)
-        print("  МИГРАЦИЯ download.txt → MariaDB")
-        print("="*60 + "\n")
-
-        if self.storage_mode != 'nextcloud':
-            print("✗ Ця функція підтримує тільки Nextcloud-сховище (потрібен старий download.txt).")
-            print("  Для локального сховища скористайся кнопкою «Синхронізація».")
-            return
-
-        artists = self.nc_scanner.scan_artists()
-        if not artists:
-            print("✗ Авторы не найдены.")
-            return
-
-        total_migrated = 0
-
-        for artist in artists:
-            folder = artist['folder_name']
-            name   = artist['artist_name']
-            base   = self.config.get('nextcloud', 'base_folder').strip('/')
-            tracker_path = f"{base}/{folder}/download.txt"
-
-            print(f"→ {name}...")
-
+    def _ensure_artist_dir(self, folder_name: str) -> str:
+        """Тека автора в сховищі (створюється, якщо нема) → відносний шлях."""
+        root = getattr(self.nc_scanner, 'root', '') or ''
+        if root:
             try:
-                if not self.nc_scanner.client.check(tracker_path):
-                    print(f"  ⊘ download.txt не найден — пропускаем")
-                    continue
-
-                tmp = f"./tmp_migrate_{folder}.txt"
-                self.nc_scanner.client.download_sync(
-                    remote_path=tracker_path, local_path=tmp
-                )
-
-                artist_id = self.tracker.get_or_create_artist(folder, name, self.user_id)
-                migrated  = 0
-                migration_ok = True
-
-                with open(tmp, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        parts = [p.strip() for p in line.split('|')]
-                        if len(parts) < 2:
-                            continue
-
-                        post_id = parts[0]
-                        url     = parts[1]
-
-                        # Нормализуем старый формат (просто число → e621_XXXXX)
-                        if post_id.isdigit():
-                            post_id = f"e621_{post_id}"
-
-                        # Определяем source
-                        source = 'inkbunny' if post_id.startswith('ib_') else 'e621'
-
-                        if not self.tracker.is_post_downloaded(artist_id, post_id):
-                            self.tracker.add_download(
-                                artist_id=artist_id,
-                                post_id=post_id,
-                                source=source,
-                                post_url=url,
-                                md5_hash=None,
-                                filename=None,
-                                file_ext=None,
-                                page_num=1,
-                                phash_val=None
-                            )
-                            migrated += 1
-
-                os.remove(tmp)
-                print("  → Вычисление MD5 и pHash...")
-
-                files = self.nc_scanner.list_files(f"{base}/{folder}")
-
-                for remote in files:
-
-                    remote_name = os.path.basename(remote.rstrip("/"))
-
-                    if not remote_name:
-                        continue
-
-                    remote_file = f"{base}/{folder}/{remote_name}"
-
-                    if remote_name == "download.txt":
-                        continue
-
-                    parsed = parse_filename(remote_name)
-
-                    if not parsed:
-                        continue
-
-                    post_id, page_num, ext = parsed
-
-                    tmp_file = os.path.join(tmp_dir, remote_name)
-
-                    try:
-
-                        self.nc_scanner.download_file(remote_file, tmp_file)
-
-                        with open(tmp_file, "rb") as f:
-                            data = f.read()
-
-                        md5 = hashlib.md5(data).hexdigest()
-
-                        phash = compute_phash(data, ext)
-
-                        updated = self.tracker.update_hashes(
-                            artist_id,
-                            post_id,
-                            page_num,
-                            md5,
-                            phash,
-                            remote_name,
-                            ext
-                        )
-
-                        if updated:
-                            if phash is not None:
-                                self.tracker.add_to_phash_cache(
-                                    artist_id,
-                                    phash,
-                                    post_id,
-                                    remote_name
-                                )
-                        else:
-                            print(f"     ⚠ Не найдена запись {post_id} page {page_num}")
-
-                        print(f"     ✓ {remote_name}")
-
-
-
-                    except Exception as e:
-
-                        migration_ok = False
-
-                        print(f"     ✗ {remote_name}: {e}")
-
-
-                    finally:
-                        if os.path.exists(tmp_file):
-                            os.remove(tmp_file)
-                self.tracker.save()
-
-                # Проверяем, что миграция прошла успешно
-                db_count = self.tracker.count_downloads(artist_id)
-
-                if migration_ok and db_count >= migrated:
-
-                    try:
-                        self.nc_scanner.client.clean(tracker_path)
-                        print("  ✓ download.txt удалён")
-
-                    except Exception as e:
-                        print(f"  ⚠ Не удалось удалить download.txt: {e}")
-
-                else:
-                    print("  ⚠ download.txt оставлен (миграция завершилась с ошибками)")
-
-                print(f"  ✓ Перенесено записей: {migrated}")
-                total_migrated += migrated
-
-            except Exception as e:
-                print(f"  ✗ Ошибка: {e}")
-                continue
-
-        try:
-            os.rmdir(tmp_dir)
-        except OSError:
-            pass
-
-        print(f"\n{'='*60}")
-        print(f"  МИГРАЦИЯ ЗАВЕРШЕНА. Всего перенесено: {total_migrated} записей")
-        print(f"{'='*60}\n")
-
-        # Автоматично скачуємо теги для щойно перенесених файлів
-        print("Запускаємо міграцію тегів для перенесених файлів...")
-        self.migrate_tags()
+                os.makedirs(os.path.join(root, folder_name), exist_ok=True)
+            except OSError as e:
+                print(f"  ⚠ Не вдалося створити теку {folder_name}: {e}")
+        return folder_name + '/'
 
     def close(self):
         self.db.close()
 
-    # ── CLEANUP: видаляє з БД записи яких немає на Nextcloud ─────────────────
+    # ── CLEANUP: видаляє з БД записи яких немає в сховищі ─────────────────
 
     def backfill_file_sizes(self):
         """
@@ -2851,73 +2455,20 @@ class FurryArchiver:
             return
         print(f"Файлів без ваги: {len(rows)}\n")
 
-        if self.storage_mode == 'local':
-            root = self.config.get('local', 'path') or ''
-            updated = 0
-            with self.db.cursor() as cur:
-                for row in rows:
-                    parts = [root, row['folder_name']]
-                    if row.get('subfolder'):
-                        parts.append(row['subfolder'])
-                    parts.append(row['filename'])
-                    fpath = os.path.join(*parts)
-                    try:
-                        size = os.path.getsize(fpath)
-                        cur.execute("UPDATE files SET size_bytes=%s WHERE id=%s", (size, row['id']))
-                        updated += 1
-                    except OSError:
-                        pass
-            self.db.commit()
-            print(f"Оновлено: {updated} з {len(rows)}")
-            return
-
-        # Nextcloud — спершу пробуємо швидкий шлях через власну БД Nextcloud
-        # (той самий підхід, що вже й так є для cleanup) — один масовий
-        # запит замість тисяч окремих WebDAV-звернень
-        nc_conn = self._get_nc_db()
-        if nc_conn:
-            base = self.config.get('nextcloud', 'base_folder').strip('/')
-            print("Тягну розміри файлів з Nextcloud DB (швидкий шлях)...")
-            with nc_conn.cursor() as cur:
-                cur.execute("SELECT path, size FROM oc_filecache WHERE path LIKE %s", (f"files/{base}/%",))
-                size_by_pair = {}
-                for r in cur.fetchall():
-                    parts = r['path'].split('/')
-                    if len(parts) >= 2:
-                        parent = parts[-2]
-                        if not parent.startswith('@') and len(parts) >= 3 and parts[-3].startswith('@'):
-                            parent = parts[-3]  # pool-підпапка — беремо папку автора рівнем вище
-                        size_by_pair[(parent, parts[-1])] = r['size']
-            nc_conn.close()
-
-            updated = 0
-            with self.db.cursor() as cur:
-                for row in rows:
-                    size = size_by_pair.get((row['folder_name'], row['filename']))
-                    if size is not None:
-                        cur.execute("UPDATE files SET size_bytes=%s WHERE id=%s", (size, row['id']))
-                        updated += 1
-            self.db.commit()
-            print(f"Оновлено: {updated} з {len(rows)}")
-            if updated < len(rows):
-                print(f"Не знайдено в Nextcloud DB: {len(rows)-updated} (можливо видалені файли чи розбіжність шляхів)")
-            return
-
-        # Фолбек — повільніше, по одному файлу через WebDAV
-        print("БД Nextcloud не налаштована — читаю розміри через WebDAV (повільніше)...")
-        base = self.config.get('nextcloud', 'base_folder').strip('/')
+        root = self.config.get('local', 'path') or ''
         updated = 0
         with self.db.cursor() as cur:
             for row in rows:
-                sub = f"{row['subfolder']}/" if row.get('subfolder') else ""
-                remote_path = f"{base}/{row['folder_name']}/{sub}{row['filename']}"
+                parts = [root, row['folder_name']]
+                if row.get('subfolder'):
+                    parts.append(row['subfolder'])
+                parts.append(row['filename'])
+                fpath = os.path.join(*parts)
                 try:
-                    info = self.nc_scanner.client.info(remote_path)
-                    size = int(info.get('size', 0) or 0)
-                    if size:
-                        cur.execute("UPDATE files SET size_bytes=%s WHERE id=%s", (size, row['id']))
-                        updated += 1
-                except Exception:
+                    size = os.path.getsize(fpath)
+                    cur.execute("UPDATE files SET size_bytes=%s WHERE id=%s", (size, row['id']))
+                    updated += 1
+                except OSError:
                     pass
         self.db.commit()
         print(f"Оновлено: {updated} з {len(rows)}")
@@ -3095,17 +2646,7 @@ class FurryArchiver:
         print(f"  {mode}CLEANUP: перевірка файлів у сховищі")
         print("="*60 + "\n")
 
-        if self.storage_mode == 'local':
-            self._cleanup_missing_via_local(dry_run)
-            return
-
-        nc_conn = self._get_nc_db()
-        if nc_conn:
-            self._cleanup_missing_via_db(nc_conn, dry_run)
-        else:
-            print("  ⚠ nextcloud_db не налаштована — використовую повільний WebDAV-метод")
-            print("    (рекомендую заповнити Nextcloud DB в Конфізі дашборда для миттєвої перевірки)\n")
-            self._cleanup_missing_via_webdav(dry_run)
+        self._cleanup_missing_via_local(dry_run)
 
     def _cleanup_missing_via_local(self, dry_run: bool):
         """Cleanup для локального сховища — перевіряє наявність файлів на диску."""
@@ -3160,174 +2701,6 @@ class FurryArchiver:
             print(f"Видалено з БД: {len(missing)}")
             print(f"Видалено порожніх авторів: {empty_artists}")
 
-    def _cleanup_missing_via_db(self, nc_conn, dry_run: bool):
-        """Швидкий cleanup — звіряє нашу БД з реальними шляхами файлів в БД Nextcloud
-        одним масовим запитом, замість тисяч окремих WebDAV-перевірок.
-
-        Структура папок під кореневим каталогом може бути будь-якої глибини
-        (root/@author/file.jpg, root/1/@author/file.jpg, root/a/b/@author/file.jpg тощо),
-        тому звіряємо не точний шлях, а пару (папка_автора, ім'я_файлу) — шукаємо
-        чи існує ДЕ-НЕБУДЬ під коренем шлях що закінчується на /@author/filename."""
-        base = self.config.get('nextcloud', 'base_folder').strip('/')
-        # Корінь — це вся базова папка з Конфігу (не тільки перший сегмент,
-        # інакше зачіпає сторонні папки поза нею). Глибина ПІД цим коренем
-        # може бути будь-якою — саме для цього нижче звіряємо пару
-        # (папка_автора, ім'я_файлу), а не точний шлях.
-        root = base
-
-        print(f"Завантажую список реальних шляхів файлів з Nextcloud DB (корінь: {root})...")
-        with nc_conn.cursor() as cur:
-            cur.execute("SELECT path FROM oc_filecache WHERE path LIKE %s", (f"files/{root}/%",))
-            all_paths = [row['path'] for row in cur.fetchall()]
-        nc_conn.close()
-        print(f"  → знайдено {len(all_paths)} файлів/папок на Nextcloud під {root}\n")
-
-        # Будуємо множину пар (folder_name, filename) — останні два сегменти шляху
-        # для файлів прямо в папці автора. АЛЕ якщо файл лежить у pool-підпапці
-        # (root/@автор/НазваPool/файл.jpg), останні два сегменти дадуть
-        # (НазваPool, файл.jpg) — це НЕ те саме, що (@автор, файл.jpg) з БД,
-        # і файл хибно вважався б відсутнім. Тому перевіряємо: якщо
-        # безпосередній батько НЕ починається на '@' (отже це підпапка pool) —
-        # беремо той сегмент, що на рівень вище.
-        nc_pairs = set()
-        for p in all_paths:
-            parts = p.split('/')
-            if len(parts) >= 2:
-                parent = parts[-2]
-                if not parent.startswith('@') and len(parts) >= 3 and parts[-3].startswith('@'):
-                    parent = parts[-3]  # це pool-підпапка — беремо папку автора рівнем вище
-                nc_pairs.add((parent, parts[-1]))  # (@author, file.jpg)
-
-        with self.db.cursor() as cur:
-            cur.execute("""
-                SELECT f.id, fp.post_id, f.name AS filename, a.folder_name, a.artist_name
-                FROM furry_posts fp
-                JOIN files f   ON f.id = fp.file_id
-                JOIN artists a ON a.id = fp.artist_id
-                ORDER BY a.artist_name, f.id
-            """)
-            rows = cur.fetchall()
-
-        total   = len(rows)
-        missing = []
-        print(f"Записів з filename у БД: {total}\n")
-
-        for row in rows:
-            pair = (row['folder_name'], row['filename'])
-            if pair not in nc_pairs:
-                missing.append(row)
-                print(f"  ✗ Відсутній: {row['artist_name']} / {row['filename']} ({row['post_id']})")
-
-        print(f"\nПеревірено: {total}, відсутніх: {len(missing)}")
-
-        if missing and not dry_run:
-            with self.db.cursor() as cur:
-                for row in missing:
-                    cur.execute("DELETE FROM files WHERE id=%s", (row['id'],))
-            self.db.commit()
-
-        empty_artists = 0
-        if not dry_run:
-            empty_artists = self._cleanup_empty_artists()
-
-        print(f"\n{'='*60}")
-        print(f"  {'[DRY RUN] ' if dry_run else ''}CLEANUP ЗАВЕРШЕНО (через NC DB)")
-        print(f"{'='*60}")
-        print(f"Перевірено:  {total}")
-        print(f"Відсутніх:   {len(missing)}")
-        if dry_run:
-            print(f"\n→ Запусти з --cleanup (без --cleanup-dry) щоб реально видалити")
-        else:
-            print(f"Видалено з БД: {len(missing)}")
-            print(f"Видалено порожніх авторів: {empty_artists}")
-
-    def _cleanup_missing_via_webdav(self, dry_run: bool):
-        """Старий повільний метод — перевіряє кожен файл окремим WebDAV-запитом.
-        Використовується тільки якщо nextcloud_db не налаштована.
-
-        УВАГА: цей метод припускає що структура папок завжди
-        {base_folder}/{folder_name}/{filename} — фіксованої глибини.
-        Якщо реальна структура глибша (наприклад base/1/@author/file)
-        перевірка може давати хибні 'відсутній'. Для коректної роботи
-        з будь-якою глибиною вкладеності налаштуй Nextcloud DB в Конфізі —
-        тоді спрацює швидкий і надійний _cleanup_missing_via_db."""
-        base = self.config.get('nextcloud', 'base_folder').strip('/')
-
-        # Беремо всі записи з БД де є filename
-        with self.db.cursor() as cur:
-            cur.execute("""
-                SELECT f.id, fp.post_id, f.name AS filename, fp.subfolder, fp.source,
-                       a.folder_name, a.artist_name
-                FROM furry_posts fp
-                JOIN files f   ON f.id = fp.file_id
-                JOIN artists a ON a.id = fp.artist_id
-                ORDER BY a.artist_name, f.id
-            """)
-            rows = cur.fetchall()
-
-        total     = len(rows)
-        missing   = 0
-        checked   = 0
-        errors    = 0
-        to_delete = []
-
-        print(f"Записів з filename у БД: {total}\n")
-
-        current_artist = None
-        for row in rows:
-            checked += 1
-            artist  = row['artist_name']
-            sub     = f"{row['subfolder']}/" if row.get('subfolder') else ""
-            nc_path = f"{base}/{row['folder_name']}/{sub}{row['filename']}"
-
-            if artist != current_artist:
-                if to_delete and not dry_run:
-                    # Зберігаємо після кожного автора
-                    self.db.commit()
-                current_artist = artist
-                print(f"→ {artist}...")
-
-            try:
-                exists = self.nc_scanner.client.check(nc_path)
-            except Exception as e:
-                errors += 1
-                if errors <= 5:
-                    print(f"  ⚠ Помилка перевірки {row['filename']}: {e}")
-                continue
-
-            if not exists:
-                missing += 1
-                to_delete.append(row['id'])
-                print(f"  ✗ Відсутній: {row['filename']} ({row['post_id']})")
-
-                if not dry_run:
-                    with self.db.cursor() as cur:
-                        cur.execute("DELETE FROM files WHERE id=%s", (row['id'],))
-
-            # Прогрес кожні 500 файлів
-            if checked % 500 == 0:
-                pct = checked * 100 // total
-                print(f"  [{pct:3d}%] {checked}/{total} перевірено, відсутніх: {missing}")
-
-        if not dry_run:
-            self.db.commit()
-
-        empty_artists = 0
-        if not dry_run:
-            empty_artists = self._cleanup_empty_artists()
-
-        print(f"\n{'='*60}")
-        print(f"  {'[DRY RUN] ' if dry_run else ''}CLEANUP ЗАВЕРШЕНО")
-        print(f"{'='*60}")
-        print(f"Перевірено:  {checked}")
-        print(f"Відсутніх:   {missing}")
-        print(f"Помилок:     {errors}")
-        if dry_run:
-            print(f"\n→ Запусти з --cleanup (без --cleanup-dry) щоб реально видалити")
-        else:
-            print(f"Видалено з БД: {missing}")
-            print(f"Видалено порожніх авторів: {empty_artists}")
-
     def _cleanup_empty_artists(self) -> int:
         """
         Видаляє з БД авторів, у яких більше не лишилось ЖОДНОГО файлу —
@@ -3361,14 +2734,14 @@ class FurryArchiver:
     def sync_all_files(self, dry_run: bool = False, compute_hashes: bool = True):
         """
         'Синхронізація' — рекурсивно обходить кореневу папку сховища
-        (Nextcloud або локальний диск) і всі каталоги в ній.
+        (локальну теку) і всі каталоги в ній.
 
         compute_hashes=True (за замовчуванням у CLI):
             Для нових файлів і для тих, що вже в БД але без хешу — реально
             читає вміст (паралельно, кілька файлів одночасно) і рахує MD5,
             pHash та розміри в пікселях. Для впізнаних імен файлів (e621_XXXX,
             ib_XXXX-pN) джерело теж проставляється. Це точно, але для дуже
-            великих бібліотек (сотні тисяч файлів на Nextcloud) може тривати
+            великих бібліотек (сотні тисяч файлів) може тривати
             дуже довго, бо кожен файл треба реально скачати по мережі.
 
         compute_hashes=False ("швидкий" режим):
@@ -3383,21 +2756,13 @@ class FurryArchiver:
         print(f"  {mode}СИНХРОНІЗАЦІЯ ({hmode}): сканування кореневої папки сховища ({self.storage_mode})")
         print("="*60 + "\n")
 
-        if self.storage_mode == 'nextcloud':
-            nc_conn = self._get_nc_db()
-            if nc_conn:
-                self._sync_all_via_db(nc_conn, dry_run, compute_hashes)
-            else:
-                print("  ⚠ nextcloud_db не налаштована — використовую повільний WebDAV-метод")
-                print("    (рекомендую заповнити Nextcloud DB в Конфізі дашборда для швидкого сканування)\n")
-                self._sync_all_via_webdav(dry_run, compute_hashes)
-        elif self.storage_mode == 'local':
+        if self.config.get('local', 'path'):
             self._sync_all_via_local(dry_run, compute_hashes)
         else:
-            print("  ✗ Не налаштовано ні Nextcloud, ні локальну папку — перевір Конфіг")
+            print("  ✗ Не налаштовано локальну папку — перевір Конфіг")
 
     def _sync_all_via_local(self, dry_run: bool, compute_hashes: bool):
-        """Сканує локальну папку на диску сервера (сховище без Nextcloud)."""
+        """Сканує локальну папку на диску сервера ."""
         root = self.config.get('local', 'path')
         print(f"Сканую локальну папку: {root}")
         if not root or not os.path.isdir(root):
@@ -3459,7 +2824,7 @@ class FurryArchiver:
         """
         Для вже наявних у БД файлів цього автора з джерелом e621, які ще не
         лежать у підпапці pool (subfolder IS NULL) — переносить у
-        @автор/НазваPool/ (на диску/Nextcloud) і оновлює БД.
+        @автор/НазваPool/ (на диску) і оновлює БД.
 
         Замість окремого запиту на КОЖЕН файл (повільно і б'є по rate-limit),
         один раз забираємо ВСІ пости автора через search_artist_posts —
@@ -3537,13 +2902,8 @@ class FurryArchiver:
                 errors.append(f"{row['filename']} (в «{row['subfolder']}», очікувалось «{pool_folder}»)")
                 continue
 
-            if self.storage_mode == 'nextcloud':
-                base = self.config.get('nextcloud', 'base_folder').strip('/')
-                old_rel = f"{base}/{folder_name}/{row['filename']}"
-                new_rel = f"{base}/{folder_name}/{pool_folder}/{row['filename']}"
-            else:
-                old_rel = f"{folder_name}/{row['filename']}"
-                new_rel = f"{folder_name}/{pool_folder}/{row['filename']}"
+            old_rel = f"{folder_name}/{row['filename']}"
+            new_rel = f"{folder_name}/{pool_folder}/{row['filename']}"
             if self.nc_scanner.move_file(old_rel, new_rel):
                 with self.db.cursor() as cur:
                     cur.execute("UPDATE furry_posts SET subfolder=%s, pool_order=%s WHERE file_id=%s",
@@ -3660,13 +3020,8 @@ class FurryArchiver:
                 errors.append(f"{row['filename']} (в «{row['subfolder']}», очікувалось «{pool_folder}»)")
                 continue
 
-            if self.storage_mode == 'nextcloud':
-                base = self.config.get('nextcloud', 'base_folder').strip('/')
-                old_rel = f"{base}/{folder_name}/{row['filename']}"
-                new_rel = f"{base}/{folder_name}/{pool_folder}/{row['filename']}"
-            else:
-                old_rel = f"{folder_name}/{row['filename']}"
-                new_rel = f"{folder_name}/{pool_folder}/{row['filename']}"
+            old_rel = f"{folder_name}/{row['filename']}"
+            new_rel = f"{folder_name}/{pool_folder}/{row['filename']}"
             if self.nc_scanner.move_file(old_rel, new_rel):
                 with self.db.cursor() as cur:
                     cur.execute("UPDATE furry_posts SET subfolder=%s, pool_order=%s WHERE file_id=%s",
@@ -3852,109 +3207,6 @@ class FurryArchiver:
         self.db.commit()
         return added, len(files) - added
 
-    def _sync_all_via_db(self, nc_conn, dry_run: bool, compute_hashes: bool):
-        """Швидкий шлях — бере повний список файлів одним запитом до Nextcloud DB
-        (oc_filecache), замість тисяч окремих WebDAV-запитів для самого списку."""
-        root = self.config.get('nextcloud', 'base_folder').strip('/')
-
-        print(f"Завантажую список файлів з Nextcloud DB (корінь: {root})...")
-        with nc_conn.cursor() as cur:
-            cur.execute("""
-                SELECT fc.path FROM oc_filecache fc
-                WHERE fc.path LIKE %s
-                  AND fc.mimetype != (SELECT id FROM oc_mimetypes WHERE mimetype='httpd/unix-directory')
-                  AND fc.name != 'download.txt'
-            """, (f"files/{root}/%",))
-            rows = cur.fetchall()
-        nc_conn.close()
-        print(f"  → знайдено {len(rows)} файлів на Nextcloud під {root}\n")
-
-        by_folder: dict = {}
-        root_prefix = f"files/{root}/"
-        for row in rows:
-            p = row['path']
-            # Перевіряємо ПЕРШИЙ сегмент шляху ПІСЛЯ кореня — а не найближчу
-            # папку — інакше підпапки виключеної папки (Private/SubFolder/…)
-            # проходили б перевірку під власною назвою SubFolder, а не Private
-            if self.excluded_folders and p.startswith(root_prefix):
-                top_segment = p[len(root_prefix):].split('/', 1)[0]
-                if top_segment in self.excluded_folders:
-                    continue
-            parts = p.split('/')
-            if len(parts) < 2:
-                continue
-            filename = parts[-1]
-            # Перший сегмент шляху ПІСЛЯ кореня — завжди "автор", усе між
-            # ним і файлом — subfolder (може бути кілька рівнів одразу).
-            # Замінює стару перевірку лише найближчого рівня, яка ламалась
-            # на вкладеності глибше 2 рівнів.
-            rel_after_root = p[len(root_prefix):] if p.startswith(root_prefix) else "/".join(parts[-2:])
-            rel_parts = rel_after_root.split('/')
-            folder_name = rel_parts[0]
-            subfolder   = "/".join(rel_parts[1:-1]) if len(rel_parts) > 2 else None
-            # 'files/' — внутрішній префікс Nextcloud, у WebDAV-шляху його нема
-            rel = p[len('files/'):] if p.startswith('files/') else p
-            by_folder.setdefault(folder_name, []).append({'name': filename, 'rel': rel, 'subfolder': subfolder})
-
-        self._sync_finish(by_folder, dry_run, via="NC DB", compute_hashes=compute_hashes)
-
-    def _sync_all_via_webdav(self, dry_run: bool, compute_hashes: bool):
-        """Повільний fallback — рекурсивно обходить папки через WebDAV."""
-        base = self.config.get('nextcloud', 'base_folder').strip('/')
-        print(f"Рекурсивно сканую {base} через WebDAV (це може зайняти час)...")
-        items = self._walk_webdav(base)
-        print(f"  → знайдено {len(items)} файлів\n")
-
-        by_folder: dict = {}
-        for it in items:
-            by_folder.setdefault(it['folder_name'], []).append(
-                {'name': it['name'], 'rel': it['rel'], 'subfolder': it.get('subfolder')})
-
-        self._sync_finish(by_folder, dry_run, via="WebDAV", compute_hashes=compute_hashes)
-
-    def _walk_webdav(self, path: str, artist_folder: str | None = None, sub_parts: list | None = None) -> list:
-        """
-        Рекурсивно обходить папку через WebDAV. Перший рівень під коренем
-        сховища завжди стає "автором" (artist_folder), усе глибше
-        накопичується в sub_parts і йде як subfolder (може містити кілька
-        рівнів одразу, напр. "pool/серія2") — узгоджено з локальним і
-        DB-варіантами синхронізації. Раніше перевірявся лише НАЙБЛИЖЧИЙ
-        рівень на '@', що ламалось на будь-якій вкладеності глибше 2 рівнів.
-        """
-        results = []
-        try:
-            items = self.nc_scanner.client.list(path)
-        except Exception as e:
-            print(f"  ⚠ Не вдалося прочитати {path}: {e}")
-            return results
-
-        if artist_folder is None:
-            sub_parts = []
-
-        for item in items:
-            if item.strip('/') == path.strip('/'):
-                continue
-            name = item.rstrip('/').split('/')[-1]
-            if item.endswith('/'):
-                if artist_folder is None:
-                    # Прямий нащадок кореня сховища — стає новим "автором"
-                    if name in self.excluded_folders:
-                        continue
-                    results.extend(self._walk_webdav(f"{path.rstrip('/')}/{name}", name, []))
-                else:
-                    results.extend(self._walk_webdav(f"{path.rstrip('/')}/{name}", artist_folder, sub_parts + [name]))
-            else:
-                if name == 'download.txt':
-                    continue
-                rel = f"{path.rstrip('/')}/{name}"
-                if artist_folder is None:
-                    # Файл прямо в корені сховища, без окремої папки автора
-                    results.append({'folder_name': '_root', 'name': name, 'rel': rel, 'subfolder': None})
-                else:
-                    this_sub = "/".join(sub_parts) if sub_parts else None
-                    results.append({'folder_name': artist_folder, 'name': name, 'rel': rel, 'subfolder': this_sub})
-        return results
-
     def _sync_finish(self, by_folder: dict, dry_run: bool, via: str, compute_hashes: bool = True):
         total_folders = len(by_folder)
         total_added   = 0
@@ -3993,7 +3245,7 @@ class FurryArchiver:
             ok, fail = self.nc_scanner._direct_ok, self.nc_scanner._direct_fail
             if ok or fail:
                 print(f"Прочитано напряму з диска: {ok}")
-                print(f"Довантажено через WebDAV:  {fail}")
+                print(f"Довантажено з сховища:  {fail}")
                 if fail and not ok:
                     print("  ⚠ Жодного файлу не вдалось прочитати напряму — перевір шлях у Конфізі")
 
@@ -4112,7 +3364,6 @@ def main():
     parser = argparse.ArgumentParser(description='Furry Art Archiver v2')
     parser.add_argument('--dry-run',       action='store_true', help='Тестовый запуск без скачивания')
     parser.add_argument('--setup',         action='store_true', help='Создать шаблон конфига')
-    parser.add_argument('--migrate',       action='store_true', help='Перенести download.txt → MariaDB')
     parser.add_argument('--migrate-tags',  action='store_true', help='Скачать теги из e621/Inkbunny для уже скачанных файлов')
     parser.add_argument('--sync-all',      action='store_true', help='Просканувати всю кореневу папку і каталоги в ній, додати всі знайдені файли в БД')
     parser.add_argument('--artist',        type=str, default=None, help='Завантажити всю бібліотеку одного конкретного автора (створює папку якщо треба)')
@@ -4121,24 +3372,22 @@ def main():
     parser.add_argument('--recheck-pools', action='store_true', help='Разом з --artist: перенести наявні файли в pool, забути автоматичні відмови й перекачати автора з перевагою сторінок pool. Без --artist — для всіх авторів лише розкласти файли по пулах і додати роботи в усі їхні пули (нічого не скачує)')
     parser.add_argument('--subfolder',     type=str, default=None, help='Обмежити --find-duplicates конкретним pool усередині автора')
     parser.add_argument('--backfill-sizes', action='store_true', help='Довантажити вагу (size_bytes) для файлів, скачаних до появи цього відстежування')
-    parser.add_argument('--cleanup',       action='store_true', help='Видалити з БД записи файлів яких немає на Nextcloud')
+    parser.add_argument('--cleanup',       action='store_true', help='Видалити з БД записи файлів яких немає в сховищі')
     parser.add_argument('--cleanup-dry',   action='store_true', help='Показати що буде видалено без реального видалення')
     parser.add_argument('--user-id', type=int, default=1,
-                        help='ID користувача (з таблиці users), чиї nextcloud/e621/inkbunny налаштування використовувати. За замовчуванням 1 (адмін).')
+                        help='ID користувача (з таблиці users), чиї e621/inkbunny налаштування використовувати. За замовчуванням 1 (адмін).')
     args = parser.parse_args()
 
     if args.setup:
         Config()
         print(f"✓ Создан шаблон конфига: {CONFIG_FILE}")
         print("  Заполните секцию [database].")
-        print("  Решта параметрів (nextcloud/e621/inkbunny) налаштовуються через дашборд.")
+        print("  Решта параметрів (сховище/e621/inkbunny) налаштовуються через дашборд.")
         return
 
     archiver = FurryArchiver(user_id=args.user_id)
     try:
-        if args.migrate:
-            archiver.migrate_from_txt()
-        elif args.migrate_tags:
+        if args.migrate_tags:
             archiver.migrate_tags()
         elif args.sync_all:
             archiver.sync_all_files(dry_run=args.dry_run)
