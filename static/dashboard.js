@@ -88,60 +88,9 @@ function refreshCurrent() {
 }
 
 
-// ── Nextcloud stats ───────────────────────────────────────────────────────
-async function loadNcStats() {
-  const dot   = document.getElementById('nc-dot');
-  const label = document.getElementById('nc-label');
-  if (!dot) return;
-
-  const ids = ['nc-artists','nc-total','nc-e621','nc-inkbunny'];
-  const setCards = (s) => {
-    document.getElementById('nc-artists').textContent  = s.nc_artists  != null ? fmt(s.nc_artists)  : '—';
-    document.getElementById('nc-total').textContent    = s.nc_total    != null ? fmt(s.nc_total)    : '—';
-    document.getElementById('nc-e621').textContent     = s.nc_e621     != null ? fmt(s.nc_e621)     : '—';
-    document.getElementById('nc-inkbunny').textContent = s.nc_inkbunny != null ? fmt(s.nc_inkbunny) : '—';
-  };
-
-  dot.className = 'db-dot'; label.textContent = '…';
-  try {
-    const sectionLabel = document.getElementById('nc-section-label');
-    const statsRow     = document.getElementById('nc-stats-row');
-    // Ця секція рахує теки авторів і файли e621/Inkbunny — тобто дані
-    // застосунку furry. Немає застосунку — немає й секції.
-    const resp = await fetch(`${API}/api/nc-stats`);
-    if (resp.status === 404) {
-      if (sectionLabel) sectionLabel.style.display = 'none';
-      if (statsRow)     statsRow.style.display = 'none';
-      return;
-    }
-    const s = await resp.json();
-    if (s.nc_status === 'not_configured') {
-      // Nextcloud не налаштований — не показуємо секцію взагалі, замість
-      // порожніх "—" по всіх картках
-      if (sectionLabel) sectionLabel.style.display = 'none';
-      if (statsRow)     statsRow.style.display = 'none';
-      return;
-    }
-    if (sectionLabel) sectionLabel.style.display = '';
-    if (statsRow)     statsRow.style.display = '';
-    if (s.nc_status !== 'online') {
-      dot.className = 'db-dot offline';
-      label.textContent = s.error ? `✗ ${s.error.slice(0,80)}` : t('ov.unavailable');
-      setCards({}); return;
-    }
-    dot.className = 'db-dot online'; label.textContent = 'Nextcloud online';
-    setCards(s);
-  } catch(e) {
-    dot.className = 'db-dot offline'; label.textContent = t('ov.connerror2');
-    setCards({});
-  }
-}
-
 // ── Overview ──────────────────────────────────────────────────────────────
 async function loadOverview() {
   const errBanner = document.getElementById('db-err');
-  // NC stats запускаємо паралельно — він може бути повільним
-  loadNcStats();
   try {
     const s = await fetch(`${API}/api/stats`).then(r => r.json());
 
@@ -3200,20 +3149,7 @@ async function loadConfig() {
   const cfg = await fetch(`${API}/api/config`).then(r=>r.json()).catch(()=>({}));
   const v = (...p) => { let o=cfg; for(const k of p)o=o?.[k]; return o??''; };
 
-  const ncHasUrl = !!v('nextcloud','webdav_url');
-  const ncEnabled = v('nextcloud','enabled') === '' ? ncHasUrl : v('nextcloud','enabled') !== false;
-
-  document.getElementById('cfg-nc-enabled').checked = ncEnabled;
   document.getElementById('cfg-local-path').value  = v('local','path')||'';
-  document.getElementById('cfg-nc-url').value      = v('nextcloud','webdav_url');
-  document.getElementById('cfg-nc-folder').value   = v('nextcloud','base_folder');
-  document.getElementById('cfg-nc-user').value     = v('nextcloud','username');
-  document.getElementById('cfg-nc-share').value    = v('nextcloud','share_token')||'';
-  document.getElementById('cfg-nc-datapath').value = v('nextcloud','local_data_path')||'';
-  document.getElementById('cfg-ncdb-host').value   = v('nextcloud_db','host')||'';
-  document.getElementById('cfg-ncdb-port').value   = v('nextcloud_db','port')||'';
-  document.getElementById('cfg-ncdb-user').value   = v('nextcloud_db','user')||'';
-  document.getElementById('cfg-ncdb-name').value   = v('nextcloud_db','database')||'';
   document.getElementById('cfg-db-host').value     = v('database','host');
   document.getElementById('cfg-db-port').value     = v('database','port');
   document.getElementById('cfg-db-user').value     = v('database','user');
@@ -3227,11 +3163,8 @@ async function loadConfig() {
     appsConfigLoad(cfg);
   }
 
-  toggleStorageSection();
   // Секрети — завжди порожні, placeholder показує статус
   const secrets = [
-    ['cfg-nc-pass',   ['nextcloud','password']],
-    ['cfg-ncdb-pass', ['nextcloud_db','password']],
     ['cfg-db-pass',   ['database','password']],
   ];
   secrets.forEach(([id, path]) => {
@@ -3248,12 +3181,6 @@ async function loadConfig() {
   });
 }
 
-function toggleStorageSection() {
-  const ncOn = document.getElementById('cfg-nc-enabled').checked;
-  document.getElementById('cfg-nextcloud-fields').style.display = ncOn ? '' : 'none';
-  document.getElementById('cfg-local-fields').style.display     = ncOn ? 'none' : '';
-}
-
 async function saveConfig(e) {
   e.preventDefault();
   const g   = id => document.getElementById(id).value.trim();
@@ -3265,24 +3192,8 @@ async function saveConfig(e) {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
     body: JSON.stringify({
-      nextcloud: {
-        enabled:      chk('cfg-nc-enabled'),
-        webdav_url:   g('cfg-nc-url'),
-        base_folder:  g('cfg-nc-folder'),
-        username:     g('cfg-nc-user'),
-        password:     sec('cfg-nc-pass'),
-        share_token:  g('cfg-nc-share') || null,
-        local_data_path: g('cfg-nc-datapath') || null,
-      },
       local: {
         path: g('cfg-local-path') || null,
-      },
-      nextcloud_db: {
-        host:     g('cfg-ncdb-host') || null,
-        port:     parseInt(g('cfg-ncdb-port')) || 3306,
-        user:     g('cfg-ncdb-user') || null,
-        password: sec('cfg-ncdb-pass'),
-        database: g('cfg-ncdb-name') || null,
       },
       database: {
         host:     g('cfg-db-host'),
@@ -5415,30 +5326,6 @@ async function showAppShell() {
 
 // ── Setup wizard ──────────────────────────────────────────────────────────
 
-let _setupMode = 'nextcloud';
-
-function setupSelectMode(mode) {
-  _setupMode = mode;
-  document.getElementById('mode-nextcloud').classList.toggle('selected', mode === 'nextcloud');
-  document.getElementById('mode-local').classList.toggle('selected', mode === 'local');
-}
-
-function setupGoStep1() {
-  document.getElementById('setup-step-1').classList.add('active');
-  document.getElementById('setup-step-2').classList.remove('active');
-  document.getElementById('sp-dot-1').classList.add('done');
-  document.getElementById('sp-dot-2').classList.remove('done');
-}
-
-function setupGoStep2() {
-  document.getElementById('setup-step-1').classList.remove('active');
-  document.getElementById('setup-step-2').classList.add('active');
-  document.getElementById('sp-dot-1').classList.add('done');
-  document.getElementById('sp-dot-2').classList.add('done');
-  document.getElementById('setup-fields-nextcloud').style.display = _setupMode === 'nextcloud' ? 'block' : 'none';
-  document.getElementById('setup-fields-local').style.display     = _setupMode === 'local'     ? 'block' : 'none';
-}
-
 function setupShowError(msg) {
   const el = document.getElementById('setup-error');
   el.textContent = msg;
@@ -5449,29 +5336,13 @@ async function setupFinish() {
   const btn = document.getElementById('btn-setup-finish');
   document.getElementById('setup-error').classList.remove('show');
 
-  if (_setupMode === 'nextcloud') {
-    const url = document.getElementById('setup-nc-url').value.trim();
-    if (!url) { setupShowError(t('err.needwebdav')); return; }
-  } else {
-    const path = document.getElementById('setup-local-path').value.trim();
-    if (!path) { setupShowError(t('err.needpath')); return; }
-  }
+  const path = document.getElementById('setup-local-path').value.trim();
+  if (!path) { setupShowError(t('err.needpath')); return; }
 
   btn.disabled = true;
   try {
-    // Зберігаємо вибір сховища через наявний /api/config ендпоінт,
-    // щоб не дублювати логіку запису конфігу.
-    const cfgBody = _setupMode === 'nextcloud'
-      ? { storage_mode: 'nextcloud', nextcloud: {
-            enabled:     true,
-            webdav_url:  document.getElementById('setup-nc-url').value.trim(),
-            base_folder: document.getElementById('setup-nc-folder').value.trim(),
-            username:    document.getElementById('setup-nc-user').value.trim(),
-            password:    document.getElementById('setup-nc-pass').value,
-          } }
-      : { storage_mode: 'local', nextcloud: { enabled: false }, local: {
-            path: document.getElementById('setup-local-path').value.trim(),
-          } };
+    // Сховище ядра — локальна тека (Nextcloud — окремий застосунок)
+    const cfgBody = { storage_mode: 'local', local: { path } };
 
     await _origFetch('/api/config', {
       method: 'POST',

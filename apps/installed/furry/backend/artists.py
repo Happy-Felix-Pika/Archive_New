@@ -8,7 +8,7 @@ from flask import Blueprint, jsonify, request as flask_request
 from .pools import _invalidate_pools_cache
 from . import poolstore
 from blueprints.tags import _invalidate_tags_cache
-from core.auth import admin_required, moderator_required, get_user_nc_config, login_required, current_user_id
+from core.auth import admin_required, moderator_required, login_required, current_user_id
 from core import modlog
 from core.db import get_db, q, qq
 from core.warmcache import WarmCache
@@ -572,20 +572,7 @@ def api_artists_merge(source_id):
                 dup_log_rows.append((target_id, best_match["post_id"], best_match["filename"],
                                       row["post_id"], row["filename"], best_dist))
 
-        storage_mode = get_storage_mode()
         moved, skipped_dup, failed = 0, 0, 0
-        client = None
-        base = ""
-        if storage_mode != "local":
-            from webdav3.client import Client
-            nc = get_user_nc_config()
-            base = nc.get("base_folder", "").strip("/")
-            client = Client({
-                "webdav_hostname": nc.get("webdav_url"),
-                "webdav_login":    nc.get("username"),
-                "webdav_password": nc.get("password"),
-                "disable_check":   True,
-            })
 
         for row in rows:
             sub = f"{row['subfolder']}/" if row.get("subfolder") else ""
@@ -599,36 +586,21 @@ def api_artists_merge(source_id):
                 # щоб не зберігати той самий арт двічі
                 skipped_dup += 1
                 try:
-                    if storage_mode == "local":
-                        src_path = local_file_path(src["folder_name"], row["filename"], row.get("subfolder"))
-                        if os.path.isfile(src_path):
-                            os.remove(src_path)
-                    else:
-                        src_nc = f"{base}/{src['folder_name']}/{sub}{row['filename']}"
-                        client.clean(src_nc)
+                    src_path = local_file_path(src["folder_name"], row["filename"], row.get("subfolder"))
+                    if os.path.isfile(src_path):
+                        os.remove(src_path)
                 except Exception as e:
                     print(f"  ⚠ Не вдалося прибрати дублікат {row['filename']}: {e}")
                 continue
             try:
-                if storage_mode == "local":
-                    src_path = local_file_path(src["folder_name"], row["filename"], row.get("subfolder"))
-                    dst_path = local_file_path(tgt["folder_name"], row["filename"], target_subfolder or row.get("subfolder"))
-                    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
-                    if os.path.isfile(src_path) and not os.path.isfile(dst_path):
-                        # shutil.move витримує перенесення між різними
-                        # файловими системами, os.rename — ні
-                        shutil.move(src_path, dst_path)
-                    moved += 1
-                else:
-                    src_nc = f"{base}/{src['folder_name']}/{sub}{row['filename']}"
-                    dst_nc = f"{base}/{tgt['folder_name']}/{dst_sub}{row['filename']}"
-                    dst_dir = dst_nc.rsplit("/", 1)[0]
-                    try:
-                        client.mkdir(dst_dir)
-                    except Exception:
-                        pass
-                    client.move(remote_path_from=src_nc, remote_path_to=dst_nc)
-                    moved += 1
+                src_path = local_file_path(src["folder_name"], row["filename"], row.get("subfolder"))
+                dst_path = local_file_path(tgt["folder_name"], row["filename"], target_subfolder or row.get("subfolder"))
+                os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+                if os.path.isfile(src_path) and not os.path.isfile(dst_path):
+                    # shutil.move витримує перенесення між різними
+                    # файловими системами, os.rename — ні
+                    shutil.move(src_path, dst_path)
+                moved += 1
             except Exception as e:
                 failed += 1
                 print(f"  ⚠ Не вдалося перенести {row['filename']}: {e}")

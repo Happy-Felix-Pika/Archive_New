@@ -6,7 +6,7 @@ import mimetypes, os
 from flask import Blueprint, Response, jsonify, request as flask_request, send_file
 
 
-from core.auth import admin_required, moderator_required, current_user_id, get_user_nc_config, get_user_settings, is_current_user_admin, merge_user_settings
+from core.auth import admin_required, moderator_required, current_user_id, get_user_settings, is_current_user_admin, merge_user_settings
 from core.db import get_db, qq
 from core.imgcache import _IMG_CACHE_DIR
 from core.storage_api import StorageError, get_storage
@@ -131,7 +131,7 @@ def api_catalog_list(hidden_folders_override=None):
             if top_segment and top_segment in hidden_folders:
                 return jsonify({"error": "Немає доступу до цієї папки"}), 403
 
-    # Одне сховище на обидва режими: розбір відповіді WebDAV і обхід
+    # Одне сховище: обхід
     # локальної теки живуть тепер у core/storage_api.py, а тут лишається
     # тільки те, що справді стосується каталогу — приховані теки,
     # службовий download.txt і сортування.
@@ -520,50 +520,7 @@ def api_catalog_thumb(external: bool = False):
         return send_file(out, mimetype="image/jpeg", conditional=True,
                          max_age=86400)
 
-    # ── Nextcloud ────────────────────────────────────────────────────
-    nc_cfg     = get_user_nc_config()
-    webdav_url = nc_cfg.get("webdav_url", "").rstrip("/")
-    base       = nc_cfg.get("base_folder", "").strip("/")
-    full_path  = f"{base}/{rel_path}".strip("/")
-    file_url   = f"{webdav_url}/{full_path}"
-    user, pwd  = nc_cfg.get("username", ""), nc_cfg.get("password", "")
-
-    out = _thumb_cache_path(full_path)
-    if os.path.exists(out):
-        return send_file(out, mimetype="image/jpeg", conditional=True, max_age=86400)
-
-    if is_video:
-        # ffmpeg читає WebDAV по HTTP сам і забирає лише потрібні шматки —
-        # качати ролик цілком заради одного кадру не треба.
-        import base64 as _b64
-        auth = _b64.b64encode(f"{user}:{pwd}".encode()).decode()
-        ok = _make_video_thumb(file_url, out, headers=f"Authorization: Basic {auth}\r\n")
-        if not ok:
-            return jsonify({"error": "thumb failed"}), 404
-        return send_file(out, mimetype="image/jpeg", conditional=True, max_age=86400)
-
-    import tempfile
-    import requests as req
-    tmp = None
-    try:
-        r = req.get(file_url, auth=(user, pwd), stream=True, timeout=30)
-        r.raise_for_status()
-        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as fh:
-            tmp = fh.name
-            for chunk in r.iter_content(65536):
-                if chunk:
-                    fh.write(chunk)
-        if not _make_image_thumb(tmp, out):
-            return jsonify({"error": "thumb failed"}), 404
-    except Exception as e:
-        return jsonify({"error": str(e)}), 404
-    finally:
-        if tmp and os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
-    return send_file(out, mimetype="image/jpeg", conditional=True, max_age=86400)
+    return jsonify({"error": "Сховище не налаштоване"}), 400
 
 
 @bp.route("/api/catalog/file")
@@ -595,41 +552,5 @@ def api_catalog_file(external: bool = False):
             return jsonify({"error": "not found"}), 404
         return send_file(fpath, mimetype=mime, conditional=True)
 
-    elif mode == "nextcloud":
-        nc_cfg     = get_user_nc_config()
-        webdav_url = nc_cfg.get("webdav_url", "").rstrip("/")
-        base       = nc_cfg.get("base_folder", "").strip("/")
-        full_path  = f"{base}/{rel_path}".strip("/")
-        file_url   = f"{webdav_url}/{full_path}"
-        is_video   = mime.startswith("video/")
-
-        import requests as req
-
-        if not is_video:
-            cache_key  = hashlib.md5(f"catalog:{full_path}".encode()).hexdigest()
-            cache_path = os.path.join(_IMG_CACHE_DIR, cache_key)
-            if not os.path.exists(cache_path):
-                r = req.get(file_url, auth=(nc_cfg.get("username", ""), nc_cfg.get("password", "")),
-                            stream=True, timeout=30)
-                r.raise_for_status()
-                with open(cache_path, "wb") as f:
-                    for chunk in r.iter_content(65536):
-                        if chunk: f.write(chunk)
-            return send_file(cache_path, mimetype=mime, conditional=True)
-
-        # відео — стрім напряму, без кешу
-        range_header = flask_request.headers.get("Range")
-        headers = {"Range": range_header} if range_header else {}
-        nc_resp = req.get(file_url, auth=(nc_cfg.get("username", ""), nc_cfg.get("password", "")),
-                          headers=headers, stream=True, timeout=30)
-
-        def gen():
-            for chunk in nc_resp.iter_content(chunk_size=131072):
-                if chunk: yield chunk
-
-        resp_headers = {"Content-Type": mime, "Accept-Ranges": "bytes", "Cache-Control": "no-store"}
-        if "Content-Length" in nc_resp.headers: resp_headers["Content-Length"] = nc_resp.headers["Content-Length"]
-        if "Content-Range" in nc_resp.headers:  resp_headers["Content-Range"]  = nc_resp.headers["Content-Range"]
-        return Response(gen(), status=nc_resp.status_code, headers=resp_headers)
 
     return jsonify({"error": "Сховище не налаштоване"}), 400

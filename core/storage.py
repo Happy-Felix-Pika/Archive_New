@@ -7,13 +7,9 @@ import os
 
 
 def get_storage_mode() -> str | None:
-    """'nextcloud' | 'local' | None — залежно від того, що налаштовано і увімкнено."""
-    settings = get_user_settings()
-    nc = settings.get("nextcloud", {})
-    nc_enabled = nc.get("enabled", bool(nc.get("webdav_url")))
-    if nc_enabled and nc.get("webdav_url"):
-        return "nextcloud"
-    if settings.get("local", {}).get("path"):
+    """'local' | None. Ядро зберігає файли лише в локальній теці; Nextcloud —
+    окремий застосунок і сховищем ядра не є."""
+    if get_user_settings().get("local", {}).get("path"):
         return "local"
     return None
 

@@ -140,16 +140,6 @@ def api_auth_complete_setup():
         if storage_mode not in ("own", "shared"):
             storage_mode = "shared"
 
-        if storage_mode == "own":
-            nc = body.get("nextcloud", {})
-            merge_user_settings({"nextcloud": {
-                "webdav_url":  nc.get("webdav_url", ""),
-                "base_folder": nc.get("base_folder", "").strip("/"),
-                "username":    nc.get("username", ""),
-                "password":    nc.get("password", ""),
-                "share_token": nc.get("share_token") or None,
-            }}, session["user_id"])
-
         db = get_db()
         with db.cursor() as cur:
             cur.execute(
@@ -163,62 +153,12 @@ def api_auth_complete_setup():
         return jsonify({"error": str(e)}), 500
 
 
-@bp.route("/api/auth/storage-config", methods=["GET"])
-@admin_required
-def api_auth_get_storage_config():
-    """Повертає поточні налаштування сховища юзера (для редагування в Конфігу)."""
-    try:
-        db = get_db()
-        u  = q(db, "SELECT storage_mode FROM users WHERE id=%s", (session["user_id"],))
-        db.close()
-        if not u:
-            return jsonify({"error": "not found"}), 404
-        own_cfg = dict(get_user_settings(session["user_id"]).get("nextcloud", {}))
-        if own_cfg.get("password"):
-            own_cfg["password"] = ""  # не віддаємо пароль назад
-        return jsonify({"storage_mode": u.get("storage_mode", "shared"), "nextcloud": own_cfg})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@bp.route("/api/auth/storage-config", methods=["POST"])
-@admin_required
-def api_auth_save_storage_config():
-    """Змінює режим сховища юзера пізніше (не тільки на онбордингу)."""
-    try:
-        body         = flask_request.get_json(silent=True) or {}
-        storage_mode = body.get("storage_mode", "shared")
-        if storage_mode not in ("own", "shared"):
-            return jsonify({"error": "bad storage_mode"}), 400
-
-        if storage_mode == "own":
-            nc = body.get("nextcloud", {})
-            old_pwd = get_user_settings(session["user_id"]).get("nextcloud", {}).get("password", "")
-            merge_user_settings({"nextcloud": {
-                "webdav_url":  nc.get("webdav_url", ""),
-                "base_folder": nc.get("base_folder", "").strip("/"),
-                "username":    nc.get("username", ""),
-                "password":    nc.get("password") or old_pwd,
-                "share_token": nc.get("share_token") or None,
-            }}, session["user_id"])
-
-        db = get_db()
-        with db.cursor() as cur:
-            cur.execute("UPDATE users SET storage_mode=%s WHERE id=%s",
-                        (storage_mode, session["user_id"]))
-        db.commit()
-        db.close()
-        return jsonify({"ok": True})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
 @bp.route("/api/user-settings", methods=["GET"])
 @admin_required
 def api_user_settings_get():
     """
-    Повертає ВСІ налаштування поточного юзера (nextcloud, nextcloud_db, e621,
-    inkbunny, download) — замінює собою старий /api/config для все, окрім
+    Повертає ВСІ налаштування поточного юзера (e621, inkbunny, download, а
+    також секції застосунків — напр. nextcloud) — замінює собою старий /api/config для все, окрім
     підключення до основної БД (те лишається в archiver_config.json/env).
     Паролі/ключі маскуються зірочками.
     """

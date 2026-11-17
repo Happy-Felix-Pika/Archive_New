@@ -4,10 +4,8 @@
 from flask import Blueprint, jsonify
 
 
-from core.auth import get_user_nc_config
 from core import events
 from core.db import get_db, q, qq
-from core.nextcloud import get_nc_db
 from core.warmcache import WarmCache
 
 bp = Blueprint("stats", __name__)

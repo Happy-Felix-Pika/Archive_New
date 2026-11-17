@@ -13,7 +13,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/dashboard.css?v=60">
+<link rel="stylesheet" href="/static/dashboard.css?v=61">
 <script src="https://unpkg.com/@ruffle-rs/ruffle"></script>
 </head>
 <body>
@@ -127,50 +127,16 @@
       <div class="auth-logo-sub" data-i18n="setup.sub">Ще пара кроків і все готово</div>
     </div>
 
-    <div class="setup-progress">
-      <div class="setup-progress-dot done" id="sp-dot-1"></div>
-      <div class="setup-progress-dot" id="sp-dot-2"></div>
-    </div>
-
-    <!-- Step 1: storage mode -->
-    <div class="setup-step active" id="setup-step-1">
-      <div class="auth-field">
-        <label data-i18n="setup.source">Звідки брати файли?</label>
-      </div>
-      <div class="setup-radio-group">
-        <div class="setup-radio selected" id="mode-nextcloud" onclick="setupSelectMode('nextcloud')">
-          <div class="setup-radio-icon">☁️</div>
-          <div class="setup-radio-title" data-i18n="setup.nc.title">Nextcloud</div>
-          <div class="setup-radio-desc" data-i18n="setup.nc.desc">Файли зберігаються у вашому Nextcloud</div>
-        </div>
-        <div class="setup-radio" id="mode-local" onclick="setupSelectMode('local')">
-          <div class="setup-radio-icon">💾</div>
-          <div class="setup-radio-title" data-i18n="setup.local.title">Без Nextcloud</div>
-          <div class="setup-radio-desc" data-i18n="setup.local.desc">Сервер сам зберігає файли локально</div>
-        </div>
-      </div>
-      <div class="setup-actions">
-        <button class="auth-btn" onclick="setupGoStep2()" data-i18n="setup.next">Далі →</button>
-      </div>
-    </div>
-
-    <!-- Step 2: connection details -->
-    <div class="setup-step" id="setup-step-2">
+    <!-- Сховище ядра — локальна тека на сервері. Nextcloud — окремий
+         застосунок «Nextcloud» (вкладка в меню), налаштовується потім. -->
+    <div class="setup-step active" id="setup-step-2">
       <div class="auth-error" id="setup-error"></div>
 
-      <div id="setup-fields-nextcloud">
-        <div class="auth-field"><label data-i18n="setup.webdav">WebDAV URL</label><input type="text" id="setup-nc-url" placeholder="https://cloud.example.com/remote.php/dav/files/user"></div>
-        <div class="auth-field"><label data-i18n="setup.basefolder">Базова папка</label><input type="text" id="setup-nc-folder" placeholder="Furry/Artists"></div>
-        <div class="auth-field"><label data-i18n="setup.login">Логін</label><input type="text" id="setup-nc-user"></div>
-        <div class="auth-field"><label data-i18n="setup.pass">Пароль / App password</label><input type="password" id="setup-nc-pass"></div>
-      </div>
-
-      <div id="setup-fields-local" style="display:none">
+      <div id="setup-fields-local">
         <div class="auth-field"><label data-i18n="setup.localpath">Шлях до папки на сервері</label><input type="text" id="setup-local-path" placeholder="/data/library"></div>
       </div>
 
       <div class="setup-actions">
-        <button class="auth-btn auth-btn-ghost" onclick="setupGoStep1()" data-i18n="setup.back">← Назад</button>
         <button class="auth-btn" id="btn-setup-finish" onclick="setupFinish()" data-i18n="setup.finish">Завершити</button>
       </div>
     </div>
@@ -232,21 +198,6 @@
     <!-- OVERVIEW -->
     <div class="page active" id="page-overview">
       <div id="db-err" class="err-banner"></div>
-
-      <div class="stats-section-label" id="nc-section-label" data-i18n="ov.nc">Nextcloud — реальний архів</div>
-      <div class="stats-row" id="nc-stats-row">
-        <div class="stat-card"><div class="stat-label" data-i18n="ov.artists">Авторів</div><div class="stat-value" id="nc-artists" style="color:var(--text)">…</div></div>
-        <div class="stat-card"><div class="stat-label" data-i18n="ov.total">Всього файлів</div><div class="stat-value" id="nc-total" style="color:var(--text)">…</div></div>
-        <div class="stat-card"><div class="stat-label">E621</div><div class="stat-value" id="nc-e621" style="color:var(--blue)">…</div></div>
-        <div class="stat-card"><div class="stat-label">Inkbunny</div><div class="stat-value" id="nc-inkbunny" style="color:var(--yellow)">…</div></div>
-        <div class="stat-card" id="nc-status-card">
-          <div class="stat-label" data-i18n="ov.status">Статус</div>
-          <div style="display:flex;align-items:center;gap:8px;margin-top:6px">
-            <div class="db-dot" id="nc-dot"></div>
-            <span id="nc-label" style="font-family:var(--mono);font-size:12px;color:var(--muted)" data-i18n="ov.scanning">Сканування…</span>
-          </div>
-        </div>
-      </div>
 
       <div class="stats-section-label" data-i18n="ov.db">Архів</div>
       <div class="stats-row">
@@ -678,36 +629,8 @@
         </div>
 
         <div class="section-header" data-i18n="cfg.storage">// Сховище файлів</div>
-        <div class="config-grid">
-          <div class="field" style="grid-column:1/-1">
-            <label class="toggle-row">
-              <span class="toggle-switch"><input type="checkbox" id="cfg-nc-enabled" onchange="toggleStorageSection()"><span class="toggle-slider"></span></span>
-              <span><span data-i18n="cfg.usenc">Використовувати Nextcloud</span> <small style="color:var(--muted)" data-i18n="cfg.usenc.hint">(вимкнено — файли зберігаються локально на сервері)</small></span>
-            </label>
-          </div>
-        </div>
-
-        <div id="cfg-local-fields" class="config-grid" style="display:none">
+        <div id="cfg-local-fields" class="config-grid">
           <div class="field" style="grid-column:1/-1"><label data-i18n="cfg.localfolder">Локальна папка на сервері</label><input type="text" id="cfg-local-path" placeholder="/data/library"></div>
-        </div>
-
-        <div id="cfg-nextcloud-fields">
-          <div class="config-grid">
-            <div class="field"><label data-i18n="setup.webdav">WebDAV URL</label><input type="text" id="cfg-nc-url"></div>
-            <div class="field"><label data-i18n="setup.basefolder">Базова папка</label><input type="text" id="cfg-nc-folder"></div>
-            <div class="field"><label data-i18n="setup.login">Логін</label><input type="text" id="cfg-nc-user"></div>
-            <div class="field"><label data-i18n="auth.password">Пароль</label><input type="password" id="cfg-nc-pass" data-i18n-ph="cfg.nochange" placeholder="(без змін)"></div>
-            <div class="field"><label>Share Token <small style="color:var(--muted)" data-i18n="cfg.sharehint">(для швидкого показу картинок)</small></label><input type="text" id="cfg-nc-share" placeholder="AbCdEf123…"></div>
-            <div class="field" style="grid-column:1/-1"><label><span data-i18n="cfg.datapath">Прямий шлях до даних Nextcloud на диску</span> <small style="color:var(--muted)" data-i18n="cfg.datapath.hint">(заповнюй тільки якщо цей сервер — той самий, де стоїть Nextcloud; прискорює синхронізацію, обходячи мережу)</small></label><input type="text" id="cfg-nc-datapath" data-i18n-ph="cfg.datapath.ph" placeholder="/var/nextcloud-data (залиш пустим якщо Nextcloud на іншому сервері)"></div>
-          </div>
-          <div class="section-header"><span>// Nextcloud DB</span> <small style="color:var(--muted);font-size:10px;text-transform:none;letter-spacing:0" data-i18n="cfg.readonly.hint">(тільки читання — для статистики)</small></div>
-          <div class="config-grid">
-            <div class="field"><label>Host</label><input type="text" id="cfg-ncdb-host" placeholder="localhost"></div>
-            <div class="field"><label>Port</label><input type="number" id="cfg-ncdb-port" placeholder="3306"></div>
-            <div class="field"><label><span data-i18n="auth.user">Користувач</span> <small style="color:var(--green)">readonly</small></label><input type="text" id="cfg-ncdb-user"></div>
-            <div class="field"><label data-i18n="auth.password">Пароль</label><input type="password" id="cfg-ncdb-pass" data-i18n-ph="cfg.nochange" placeholder="(без змін)"></div>
-            <div class="field"><label data-i18n="cfg.ncdbname">База даних Nextcloud</label><input type="text" id="cfg-ncdb-name" placeholder="nextcloud"></div>
-          </div>
         </div>
 
         <!-- Сюди застосунки додають свої налаштування: вимкнув застосунок —
@@ -969,7 +892,7 @@
 
 <script src="/i18n.js"></script>
 <script src="/static/i18n.js?v=1"></script>
-<script src="/static/dashboard.js?v=77"></script>
+<script src="/static/dashboard.js?v=78"></script>
 <script src="/static/apps.js?v=6"></script>
 
 </body>

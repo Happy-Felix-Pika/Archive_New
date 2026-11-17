@@ -1,0 +1,26 @@
+{
+  "id": "nextcloud",
+  "name": "Nextcloud",
+  "version": "1.0.0",
+  "description": "Налаштування підключення до Nextcloud (WebDAV і база Nextcloud). Ядро архіву від Nextcloud не залежить — файли зберігаються в локальній теці.",
+  "author": "Felix",
+  "core_api_version": 1,
+  "min_core_version": "1.0.0",
+  "dependencies": {},
+  "permissions": [],
+  "backend": "backend",
+  "table_prefix": "nextcloud_",
+  "menu": [
+    {
+      "id": "settings",
+      "label": {"uk": "Nextcloud", "ru": "Nextcloud", "en": "Nextcloud"},
+      "icon": "☁️",
+      "order": 90,
+      "admin_only": true,
+      "roles": ["admin"]
+    }
+  ],
+  "pages": [
+    {"id": "settings", "js": "static/nextcloud.js", "init": "nextcloudPageInit"}
+  ]
+}

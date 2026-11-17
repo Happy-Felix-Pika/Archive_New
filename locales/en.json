@@ -1381,5 +1381,6 @@
  "♥ Улюблений автор": "♥ Favorite artist",
  "Улюблений автор": "Favorite artist",
  "Прибрано з улюблених авторів": "Removed from favorite artists",
- "Улюблені автори": "Favorite artists"
+ "Улюблені автори": "Favorite artists",
+ "Сховище не налаштовано: вкажи локальну теку (Конфіг → Сховище файлів)": "Storage is not configured: set a local folder (Config → File storage)"
 }
