@@ -56,9 +56,18 @@ def _file_meta(data, file_id, db, **_):
         "pool_order": row["pool_order"],
         "pool_total": next((p["total"] for p in file_pools if not p["linked"]), None) if row["subfolder"] else None,
         "pools":      file_pools,
+        "artist_fav": row["artist_id"] in artists.favorite_artist_ids(_uid()),
         "share_url":  share_url,
     })
     return data
+
+
+def _uid():
+    try:
+        from core.auth import current_user_id
+        return current_user_id()
+    except Exception:
+        return None
 
 
 def _snapshot_for_trash(snap, file_id, db, **_):
