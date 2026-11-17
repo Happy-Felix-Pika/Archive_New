@@ -8,7 +8,7 @@ from flask import Blueprint, jsonify, request as flask_request
 from .pools import _invalidate_pools_cache
 from . import poolstore
 from blueprints.tags import _invalidate_tags_cache
-from core.auth import admin_required, moderator_required, get_user_nc_config
+from core.auth import admin_required, moderator_required, get_user_nc_config, login_required, current_user_id
 from core import modlog
 from core.db import get_db, q, qq
 from core.warmcache import WarmCache
@@ -95,10 +95,79 @@ def api_artists():
             rows = artists_cache.get()
             if sort == "size":
                 rows = sorted(rows, key=lambda r: (-r["total_size"], r["id"]))
-            return jsonify(rows)
-        return jsonify(_artist_rows(get_db(), f, tag_ids, sort))
+        else:
+            rows = _artist_rows(get_db(), f, tag_ids, sort)
+        return jsonify(_with_favorites(rows))
     except Exception as e:
         return jsonify({"error": str(e)}), 503
+
+
+# ── Улюблені автори (у кожного користувача свої) ─────────────────────
+
+def favorite_artist_ids(user_id) -> set:
+    if not user_id:
+        return set()
+    try:
+        return {r["artist_id"] for r in qq(get_db(), "SELECT artist_id FROM furry_favorite_artists WHERE user_id=%s",
+                                           (user_id,))}
+    except Exception:
+        return set()       # таблиці ще немає
+
+
+def _with_favorites(rows):
+    """Позначка «улюблений» для поточного користувача; улюблені — першими.
+    Рядки з кешу спільні для всіх — тож копії, а не зміна на місці."""
+    fav = favorite_artist_ids(current_user_id())
+    out = [dict(r, is_fav=r["id"] in fav) for r in rows]
+    out.sort(key=lambda r: not r["is_fav"])        # стабільне: решта порядку не змінюється
+    return out
+
+
+@bp.route("/api/favorite-artists")
+@login_required
+def api_favorite_artists():
+    """Улюблені автори поточного користувача (для каталогу й галереї)."""
+    try:
+        rows = qq(get_db(), """SELECT a.id, a.folder_name, a.artist_name FROM furry_favorite_artists fa
+                               JOIN artists a ON a.id = fa.artist_id
+                               WHERE fa.user_id=%s ORDER BY a.artist_name""", (current_user_id(),))
+        return jsonify(rows)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/api/favorite-artists", methods=["POST"])
+@login_required
+def api_favorite_artist_by_folder():
+    """♥ автора за текою (каталог): {"folder": "@нік", "fav": true|false}."""
+    body = flask_request.get_json(silent=True) or {}
+    row = q(get_db(), "SELECT id FROM artists WHERE folder_name=%s", ((body.get("folder") or "").strip(),))
+    if not row:
+        return jsonify({"error": "Це не тека автора"}), 404
+    return api_artist_favorite(row["id"])
+
+
+@bp.route("/api/artists/<int:artist_id>/favorite", methods=["POST"])
+@login_required
+def api_artist_favorite(artist_id):
+    """♥ автора: {"fav": true|false}; без тіла — перемкнути."""
+    body = flask_request.get_json(silent=True) or {}
+    uid = current_user_id()
+    try:
+        db = get_db()
+        if not q(db, "SELECT 1 AS x FROM artists WHERE id=%s", (artist_id,)):
+            return jsonify({"error": "Автора не знайдено"}), 404
+        now = q(db, "SELECT 1 AS x FROM furry_favorite_artists WHERE user_id=%s AND artist_id=%s", (uid, artist_id))
+        want = bool(body["fav"]) if "fav" in body else not now
+        with db.cursor() as cur:
+            if want:
+                cur.execute("INSERT IGNORE INTO furry_favorite_artists (user_id, artist_id) VALUES (%s,%s)", (uid, artist_id))
+            else:
+                cur.execute("DELETE FROM furry_favorite_artists WHERE user_id=%s AND artist_id=%s", (uid, artist_id))
+        db.commit()
+        return jsonify({"ok": True, "fav": want})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @bp.route("/api/artist/<int:artist_id>/downloads")

@@ -261,11 +261,60 @@ async function artistsBulkAutoUpdate(enabled) {
   }
 }
 
+// ── ♥ Улюблені автори (у кожного користувача свої) ──────────────────
+// ★ — улюблений арт, ♥ — улюблений автор. Улюблені автори завжди вгорі:
+// у каталозі, у вкладці «Автори», у виборі автора в «Артах».
+let _favArtistFolders = new Set();
+
+async function loadFavArtists() {
+  try {
+    const r = await fetch(`${API}/api/favorite-artists`);
+    if (!r.ok) return;
+    const rows = await r.json();
+    _favArtistFolders = new Set((rows || []).map(a => a.folder_name));
+  } catch {}
+}
+
+function favArtistHeart(on, attrs = '') {
+  return `<span class="fav-artist${on ? ' on' : ''}" ${attrs} title="${on ? 'Улюблений автор — клік, щоб прибрати' : 'Зробити улюбленим автором'}">${on ? '♥' : '♡'}</span>`;
+}
+
+async function toggleFavArtist({ id, folder }, on) {
+  try {
+    const r = await fetch(id ? `${API}/api/artists/${id}/favorite` : `${API}/api/favorite-artists`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(id ? { fav: on } : { folder, fav: on })
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) { toast(d.error || 'Помилка', 'err'); return null; }
+    toast(d.fav ? '♥ Улюблений автор' : 'Прибрано з улюблених авторів', 'ok');
+    await loadFavArtists();
+    // перемальовуємо все, де видно автора
+    if (currentPage === 'catalog' && typeof catalogRender === 'function') catalogRender();
+    if (currentPage === 'artists') loadArtists();
+    if (typeof _galArtists !== 'undefined' && _galArtists.length) {
+      const a = _galArtists.find(x => x.id === id || x.folder_name === folder);
+      if (a) a.is_fav = d.fav;
+      _galArtists.sort((x, y) => (y.is_fav === true) - (x.is_fav === true));
+      galRenderArtistList(document.getElementById('gal-artist-search')?.value || '');
+    }
+    return d.fav;
+  } catch { toast('Помилка мережі', 'err'); return null; }
+}
+
+async function galToggleFavArtist(id, el) {
+  const on = !el.classList.contains('on');
+  const res = await toggleFavArtist({ id }, on);
+  if (res === null) return;
+  el.classList.toggle('on', res); el.textContent = res ? '♥' : '♡';
+  Object.values(_galMeta || {}).forEach(m => { if (m && m.artist_id === id) m.artist_fav = res; });
+}
+
 async function loadArtists() {
   const data = await fetch(`${API}/api/artists?sort=${_artistsSort}`).then(r => r.json()).catch(() => []);
   _lastArtistsData = data;
-  document.getElementById('artists-tbody').innerHTML = data.map(a => `<tr data-artist-row-id="${a.id}" data-artist-row-name="${esc(a.artist_name)}">
-    <td style="font-weight:500;cursor:pointer">${esc(a.artist_name)}</td>
+  document.getElementById('artists-tbody').innerHTML = (Array.isArray(data) ? data : []).map(a => `<tr data-artist-row-id="${a.id}" data-artist-row-name="${esc(a.artist_name)}"${a.is_fav ? ' class="fav-artist-row"' : ''}>
+    <td style="font-weight:500;cursor:pointer">${favArtistHeart(a.is_fav, `data-fav-artist="${a.id}"`)} ${esc(a.artist_name)}</td>
     <td style="color:var(--muted)">${esc(a.folder_name)}</td>
     <td><span class="badge badge-e621">${a.e621_files}</span></td>
     <td><span class="badge badge-inkbunny">${a.ib_files}</span></td>
@@ -285,6 +334,12 @@ function artistsSetSort(sort) {
   loadArtists();
 }
 document.getElementById('artists-tbody')?.addEventListener('click', async e => {
+  const heart = e.target.closest('[data-fav-artist]');
+  if (heart) {
+    e.stopPropagation();
+    toggleFavArtist({ id: parseInt(heart.dataset.favArtist) }, !heart.classList.contains('on'));
+    return;
+  }
   const toggle = e.target.closest('[data-auto-update-id]');
   if (toggle) {
     e.stopPropagation();
@@ -1402,22 +1457,32 @@ function galRenderArtistList(search) {
     a.artist_name.toLowerCase().includes(search.toLowerCase())
   );
   const totalFiles = _galArtists.reduce((s,a)=>s+a.total_files,0);
+  const favs = _galArtists.filter(a => a.is_fav);
+  const favFiles = favs.reduce((s,a)=>s+a.total_files,0);
   list.innerHTML = `<div class="artist-opt ${_galSelectedArtistId===''?'active':''}" data-artist-id="" data-artist-label="${esc(t('gal.allartists.plain'))}">
     <span>${t('gal.allartists.plain')}</span><span style="color:var(--muted);font-size:11px;font-family:var(--mono)">${fmt(totalFiles)}</span>
-  </div>` + filtered.map(a => `
-    <div class="artist-opt ${String(_galSelectedArtistId)===String(a.id)?'active':''}" data-artist-id="${a.id}" data-artist-label="${esc(a.artist_name)}">
-      <span>${esc(a.artist_name)}</span>
+  </div>` + (favs.length ? `<div class="artist-opt fav-all ${_galSelectedArtistId==='fav'?'active':''}" data-artist-id="fav" data-artist-label="♥ Улюблені автори">
+    <span>♥ Улюблені автори <span class="muted">(${favs.length})</span></span><span style="color:var(--muted);font-size:11px;font-family:var(--mono)">${fmt(favFiles)}</span>
+  </div>` : '') + filtered.map(a => `
+    <div class="artist-opt ${String(_galSelectedArtistId)===String(a.id)?'active':''}${a.is_fav ? ' is-fav' : ''}" data-artist-id="${a.id}" data-artist-label="${esc(a.artist_name)}">
+      <span>${favArtistHeart(a.is_fav, `data-fav-artist="${a.id}"`)} ${esc(a.artist_name)}</span>
       <span style="color:var(--muted);font-size:11px;font-family:var(--mono)">${fmt(a.total_files)}</span>
     </div>`).join('');
 }
 document.getElementById('gal-artist-list')?.addEventListener('click', e => {
+  const heart = e.target.closest('[data-fav-artist]');
+  if (heart) {
+    e.stopPropagation();
+    toggleFavArtist({ id: parseInt(heart.dataset.favArtist) }, !heart.classList.contains('on'));
+    return;
+  }
   const box = e.target.closest('[data-artist-id]');
   if (box) galSelectArtist(box.dataset.artistId, box.dataset.artistLabel);
 });
 
 function galSelectArtist(id, label) {
   _galSelectedArtistId = String(id);
-  document.getElementById('gal-artist-label').textContent = id ? `👤 ${label}` : t('gal.allartists');
+  document.getElementById('gal-artist-label').textContent = id === 'fav' ? label : (id ? `👤 ${label}` : t('gal.allartists'));
   document.getElementById('gal-artist-picker').style.display = 'none';
   galRenderArtistList('');
   galSelectPool('', false);  // скидаємо пул — список пулів залежить від автора
@@ -2011,6 +2076,7 @@ async function galleryShow(idx) {
         <div class="gallery-info-left">
           <span class="catalog-crumb" style="font-size:17px" onclick="galToggleFavorite(${id})" id="gal-fav-${id}" title="${t('gal.favorite')}">${d.is_favorite ? '★' : '☆'}</span>
           <span class="gallery-artist-name">${esc(d.artist)}</span>
+          ${d.artist_id ? favArtistHeart(d.artist_fav, `onclick="galToggleFavArtist(${d.artist_id}, this)"`) : ''}
           ${d.source ? `<span class="badge badge-${d.source}">${d.source}</span>` : ''}
         </div>
         ${d.post_url ? `<a href="${d.post_url}" target="_blank" class="gallery-info-link">↗ ${t('gal.original')}</a>` : ''}
@@ -4492,6 +4558,7 @@ async function catalogLoad(path = '') {
   const grid = document.getElementById('catalog-grid');
   grid.innerHTML = `<div style="opacity:.6">${t('catalog.loading')}</div>`;
   try {
+    if (!_catalogPath) await loadFavArtists();     // у корені — улюблені автори першими
     const d = await fetch(_catalogListUrl(_catalogPath)).then(r=>r.json());
     if (d.error) {
       grid.innerHTML = `<div style="opacity:.6">${esc(d.error)}</div>`;
@@ -4519,8 +4586,9 @@ function catalogSortedFiltered() {
   let items = _catalogItems;
   if (q) items = items.filter(i => i.name.toLowerCase().includes(q));
 
+  const isFav = i => !_catalogPath && _favArtistFolders.has(i.name);
   const folders = items.filter(i => i.type === 'folder')
-    .sort((a,b) => a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1);
+    .sort((a,b) => (isFav(b) - isFav(a)) || (a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1));
   const files = items.filter(i => i.type === 'file');
 
   const [field, dir] = sortVal.split('-');
@@ -4595,10 +4663,15 @@ function catalogRender() {
       const folderPath = _catalogPath ? `${_catalogPath}/${item.name}` : item.name;
       const delBtn = _catalogCanEdit()
         ? `<span class="catalog-folder-del" title="Видалити теку (файли — у кошик)">🗑</span>` : '';
-      return `<div class="catalog-item" data-idx="${idx}" data-drop-folder="${esc(folderPath)}" style="position:relative;${isExcluded?'opacity:.55':''}">
+      // тека автора в корені — ♥ (улюблені завжди першими й виділені)
+      const favOn = isRoot && _favArtistFolders.has(item.name);
+      const heartBtn = (isRoot && item.name.startsWith('@'))
+        ? favArtistHeart(favOn, `data-fav-folder="${esc(item.name)}" style="position:absolute;bottom:6px;left:8px"`) : '';
+      return `<div class="catalog-item${favOn ? ' catalog-fav' : ''}" data-idx="${idx}" data-drop-folder="${esc(folderPath)}" style="position:relative;${isExcluded?'opacity:.55':''}">
         ${excludeBtn}
         ${accessBtn}
         ${delBtn}
+        ${heartBtn}
         <div class="catalog-icon">📁</div>
         <div class="catalog-name">${esc(item.name)}${isExcluded ? ' <span style="font-size:10px;color:var(--red)">(виключено)</span>' : ''}</div>
       </div>`;
@@ -4638,6 +4711,12 @@ function catalogRender() {
 }
 
 document.getElementById('catalog-grid')?.addEventListener('click', e => {
+  const heart = e.target.closest('[data-fav-folder]');
+  if (heart) {
+    e.stopPropagation();
+    toggleFavArtist({ folder: heart.dataset.favFolder }, !heart.classList.contains('on'));
+    return;
+  }
   const excludeToggle = e.target.closest('.catalog-exclude-toggle');
   if (excludeToggle) {
     e.stopPropagation();

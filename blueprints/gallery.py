@@ -89,7 +89,11 @@ def _gallery_ids_query(f, artist_id, subfolder, tag_ids, hide_tag_ids, favorites
         else:
             where.append(folder_ok)
 
-    if artist_id:
+    if artist_id == "fav":
+        # роботи всіх улюблених авторів цього користувача
+        where.append("fp.artist_id IN (SELECT artist_id FROM furry_favorite_artists WHERE user_id=%s)")
+        args.append(user_id)
+    elif artist_id:
         where.append("fp.artist_id = %s")
         args.append(int(artist_id))
 
@@ -99,9 +103,10 @@ def _gallery_ids_query(f, artist_id, subfolder, tag_ids, hide_tag_ids, favorites
         # що привʼязані до нього додатково). Назва могла прийти будь-яка з
         # назв пулу (e621 / Inkbunny / тека) — шукаємо серед усіх.
         pdb = get_db()
-        pargs = [subfolder] + ([int(artist_id)] if artist_id else [])
+        one_artist = artist_id if artist_id and artist_id != "fav" else None
+        pargs = [subfolder] + ([int(one_artist)] if one_artist else [])
         pool_ids = [r["pool_id"] for r in qq(pdb, "SELECT DISTINCT pool_id FROM furry_pool_names WHERE name=%s"
-                                              + (" AND artist_id=%s" if artist_id else ""), pargs)]
+                                              + (" AND artist_id=%s" if one_artist else ""), pargs)]
         if not pool_ids:
             return jsonify({"ids": []})
         pool_join = (" JOIN furry_pool_items pi ON pi.file_id = f.id AND pi.pool_id IN ("

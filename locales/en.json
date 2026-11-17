@@ -1375,5 +1375,11 @@
  "Код, за яким можна зареєструватись в архіві": "A code someone can register in the archive with",
  "Скопійовано: {0}": "Copied: {0}",
  "Скопіювати": "Copy",
- "вільний": "free"
+ "вільний": "free",
+ "Улюблений автор — клік, щоб прибрати": "Favorite artist — click to remove",
+ "Зробити улюбленим автором": "Make a favorite artist",
+ "♥ Улюблений автор": "♥ Favorite artist",
+ "Улюблений автор": "Favorite artist",
+ "Прибрано з улюблених авторів": "Removed from favorite artists",
+ "Улюблені автори": "Favorite artists"
 }

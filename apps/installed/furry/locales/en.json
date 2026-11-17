@@ -51,5 +51,6 @@
  "пул «{0}» ({1} стор": "pool «{0}» ({1} pg",
  "скачування": "downloading",
  "у кошик: {0} файл(ів), скачаних цим запуском": "to trash: {0} file(s) downloaded by this run",
- "увімкнено": "enabled"
+ "увімкнено": "enabled",
+ "Це не тека автора": "This is not an artist folder"
 }
