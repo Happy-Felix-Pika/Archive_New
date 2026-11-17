@@ -151,7 +151,7 @@
 <aside class="sidebar" id="sidebar">
   <div class="logo">
     <div class="logo-title" data-brand>ARCHIVE</div>
-    <div class="logo-sub">dashboard v2.2</div>
+    <div class="logo-sub" id="logo-version">dashboard v2.2</div>
   </div>
   <nav>
     <div class="nav-item active" data-page="overview" data-admin-only="1"><span class="nav-icon">◈</span> <span data-i18n="nav.overview">Огляд</span></div>
@@ -611,6 +611,12 @@
 
     <!-- CONFIG -->
     <div class="page" id="page-config">
+      <div class="section-header">// ВЕРСІЯ АРХІВУ</div>
+      <div class="card" id="cfg-version" style="margin-bottom:18px;display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+        <div id="cfg-version-text" style="font-family:var(--mono);font-size:13px">…</div>
+        <div id="cfg-version-status" style="font-size:13px"></div>
+        <button type="button" class="btn btn-sm btn-ghost" style="margin-left:auto" onclick="checkVersion(true)">Перевірити оновлення</button>
+      </div>
       <form onsubmit="saveConfig(event)">
         <div class="section-header">// ЗАГАЛЬНЕ</div>
         <div class="field">
@@ -892,7 +898,7 @@
 
 <script src="/i18n.js"></script>
 <script src="/static/i18n.js?v=1"></script>
-<script src="/static/dashboard.js?v=78"></script>
+<script src="/static/dashboard.js?v=79"></script>
 <script src="/static/apps.js?v=6"></script>
 
 </body>

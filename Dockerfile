@@ -22,4 +22,11 @@ COPY migrations/  ./migrations/
 # застосунки (furry, дублікати, чат, онлайн, e621, inkbunny)
 COPY apps/        ./apps/
 
+# Версія збірки — показується в «Конфігу» (там же перевірка, чи є новіша)
+ARG BUILD_NUMBER=dev
+ARG BUILD_SHA=
+ARG BUILD_IMAGE=
+RUN printf '{"build":"%s","sha":"%s","image":"%s","date":"%s"}' \
+      "$BUILD_NUMBER" "$BUILD_SHA" "$BUILD_IMAGE" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /app/VERSION.json
+
 CMD ["python", "-u", "main.py"]

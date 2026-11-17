@@ -1382,5 +1382,18 @@
  "Улюблений автор": "Favorite artist",
  "Прибрано з улюблених авторів": "Removed from favorite artists",
  "Улюблені автори": "Favorite artists",
- "Сховище не налаштовано: вкажи локальну теку (Конфіг → Сховище файлів)": "Storage is not configured: set a local folder (Config → File storage)"
+ "Сховище не налаштовано: вкажи локальну теку (Конфіг → Сховище файлів)": "Storage is not configured: set a local folder (Config → File storage)",
+ "// ВЕРСІЯ АРХІВУ": "// ARCHIVE VERSION",
+ "Перевірити оновлення": "Check for updates",
+ "Перевіряю…": "Checking…",
+ "✓ Актуальна версія": "✓ Up to date",
+ "⬆ Є новіша збірка від {0} — онови контейнер": "⬆ A newer build from {0} is available — update the container",
+ "Не вдалося перевірити": "Couldn't check",
+ "Не вдалося перевірити: {0}": "Couldn't check: {0}",
+ "Збірка не з Docker-образу — перевірка недоступна": "Not a Docker build — checking is unavailable",
+ "збірка #{0}": "build #{0}",
+ "збірка #{0} · {1}": "build #{0} · {1}",
+ "розробка": "development",
+ "розробка · {0}": "development · {0}",
+ "Не вдалося перевірити: Docker Hub недоступний або образ приватний": "Couldn't check: Docker Hub is unreachable or the image is private"
 }
