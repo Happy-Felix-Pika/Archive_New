@@ -1061,8 +1061,11 @@ def _recover_pending_file(row: dict, user_id: int | None = None) -> str | None:
                 auth = (e621_user, e621_key)
             r = req.get(api_url, headers=headers, auth=auth, timeout=15)
             if r.ok:
-                post     = r.json().get("post", {})
-                file_url = post.get("file", {}).get("url")
+                data     = r.json()
+                post     = data.get("post", data) if isinstance(data, dict) else {}
+                # старий формат — file.url, новий (з 11.2026) — files.original.url
+                file_url = ((post.get("file") or {}).get("url")
+                            or ((post.get("files") or {}).get("original") or {}).get("url"))
                 if file_url:
                     r2 = req.get(file_url, headers=headers, auth=auth, timeout=30)
                     if r2.ok:

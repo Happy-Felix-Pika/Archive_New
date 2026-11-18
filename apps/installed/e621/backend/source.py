@@ -146,9 +146,8 @@ def build(LiveSourceBase):
 
         def toggle_favorite(self, post_id):
             dl = self._downloader()
-            r = dl.session.get(f"https://e621.net/posts/{post_id}.json")
-            r.raise_for_status()
-            currently_fav = bool(r.json().get("post", {}).get("is_favorited", False))
+            post = dl.get_post(post_id) or {}
+            currently_fav = bool(post.get("is_favorited", False))
             ok = dl.remove_favorite(post_id) if currently_fav else dl.add_favorite(post_id)
             if not ok:
                 raise RuntimeError("Не вдалося звернутись до e621")

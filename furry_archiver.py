@@ -1021,6 +1021,89 @@ class LocalStorage:
 # E621
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Категорії тегів e621 (номери з їхнього довідника тегів)
+E621_TAG_CATEGORIES = {0: 'general', 1: 'artist', 3: 'copyright', 4: 'character',
+                       5: 'species', 6: 'invalid', 7: 'meta', 8: 'lore'}
+_e621_tag_cat = {}            # назва тегу -> категорія (спільно для всіх, росте за потреби)
+_e621_tag_cat_lock = threading.Lock()
+_e621_tag_cat_loaded = False
+# Зберігається на диску поруч із конфігом — спільно для дашборда й архіватора,
+# тож довідник e621 питаємо лише про теги, яких ще ніхто не бачив.
+_E621_TAG_CAT_FILE = _os.path.join(_os.path.dirname(CONFIG_FILE) or ".", "e621_tag_categories.json")
+
+
+def _e621_tag_cat_load():
+    global _e621_tag_cat_loaded
+    if _e621_tag_cat_loaded:
+        return
+    _e621_tag_cat_loaded = True
+    try:
+        with open(_E621_TAG_CAT_FILE, encoding="utf-8") as f:
+            _e621_tag_cat.update(json.load(f))
+    except (OSError, ValueError):
+        pass
+
+
+def _e621_tag_cat_save():
+    try:
+        try:
+            with open(_E621_TAG_CAT_FILE, encoding="utf-8") as f:
+                on_disk = json.load(f)        # інший процес міг дописати своє
+        except (OSError, ValueError):
+            on_disk = {}
+        on_disk.update(_e621_tag_cat)
+        tmp = _E621_TAG_CAT_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(on_disk, f, ensure_ascii=False, separators=(",", ":"))
+        _os.replace(tmp, _E621_TAG_CAT_FILE)
+    except Exception as e:
+        print(f"  ⚠ E621: не вдалося зберегти категорії тегів: {e}")
+
+
+def e621_posts_list(data) -> list:
+    """Список постів з відповіді e621: новий формат — голий масив,
+    старий — {"posts": [...]}."""
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        return data.get('posts') or []
+    return []
+
+
+def e621_norm_post(p: dict) -> dict:
+    """
+    Пост e621 у старому вигляді, з яким працює решта коду (file / preview /
+    sample, score, fav_count, is_favorited, tags за категоріями).
+
+    З листопада 2026 e621 віддає інакше: files{meta, original, preview,
+    sample}, stats{score, fav_count, is_favorited}, а tags — плоский список
+    без категорій (їх дописує e621_categorize). Старий формат — без змін.
+    """
+    if not isinstance(p, dict) or 'files' not in p or 'file' in p:
+        return p
+    files = p.get('files') or {}
+    meta  = files.get('meta') or {}
+    orig  = files.get('original') or {}
+    prev  = files.get('preview') or {}
+    samp  = files.get('sample') or {}
+    stats = p.get('stats') or {}
+    out = dict(p)
+    out['file'] = {'url': orig.get('url'), 'ext': meta.get('ext'), 'md5': meta.get('md5'),
+                   'size': meta.get('size'), 'width': orig.get('width'), 'height': orig.get('height')}
+    out['preview'] = {'url': prev.get('jpg') or prev.get('webp') or prev.get('url'),
+                      'width': prev.get('width'), 'height': prev.get('height')}
+    out['sample'] = {'has': bool(meta.get('has_sample') or samp),
+                     'url': samp.get('jpg') or samp.get('webp') or samp.get('url'),
+                     'width': samp.get('width'), 'height': samp.get('height')}
+    out['score'] = stats.get('score') or {}
+    out['fav_count'] = stats.get('fav_count')
+    out['is_favorited'] = bool(stats.get('is_favorited', p.get('is_favorited', False)))
+    tags = p.get('tags')
+    if isinstance(tags, list):
+        out['tags'] = {'_flat': list(tags)}      # категорії — у e621_categorize
+    return out
+
+
 class E621Downloader:
     def __init__(self, config: Config, username_override: str | None = None, api_key_override: str | None = None):
         self.config = config
@@ -1043,7 +1126,7 @@ class E621Downloader:
         try:
             r = self.session.get(f"{E621_API_BASE}/favorites.json", params={'limit': limit, 'page': page})
             r.raise_for_status()
-            return r.json().get('posts', [])
+            return self._posts(r.json())
         except Exception as e:
             print(f"  ✗ E621 улюблене: {e}")
             return []
@@ -1074,6 +1157,65 @@ class E621Downloader:
             time.sleep(E621_RATE_LIMIT - elapsed)
         self.last_request = time.time()
 
+    def _posts(self, data) -> list:
+        """Пости з відповіді (будь-якого формату) — у старому вигляді й з категоріями тегів."""
+        posts = [e621_norm_post(p) for p in e621_posts_list(data)]
+        self.categorize(posts)
+        return posts
+
+    def categorize(self, posts: list):
+        """
+        Новий формат e621 дає теги без категорій. Категорії (автор, персонаж,
+        вид…) беремо з довідника тегів e621 — пакетно, лише для тегів, яких
+        ще не бачили (решта з пам'яті). Не вдалося — теги лишаються «general».
+        """
+        flat = [p for p in posts if isinstance(p.get('tags'), dict) and '_flat' in p['tags']]
+        if not flat:
+            return
+        with _e621_tag_cat_lock:
+            _e621_tag_cat_load()
+            unknown = sorted({t for p in flat for t in p['tags']['_flat'] if t not in _e621_tag_cat})
+        learned = False
+        for i in range(0, len(unknown), 300):
+            chunk = unknown[i:i + 300]
+            self._rate_limit()
+            try:
+                r = self.session.get(f"{E621_API_BASE}/tags.json",
+                                     params={'search[name]': ','.join(chunk), 'limit': 320})
+                r.raise_for_status()
+                data = r.json()
+                rows = data if isinstance(data, list) else (data.get('tags') or [])
+                found = {}
+                for t in rows:
+                    if isinstance(t, dict) and t.get('name') is not None:
+                        found[t['name']] = E621_TAG_CATEGORIES.get(t.get('category'), 'general')
+                with _e621_tag_cat_lock:
+                    _e621_tag_cat.update(found)
+                    for name in chunk:                      # невідомі довіднику — загальні
+                        _e621_tag_cat.setdefault(name, 'general')
+                learned = True
+            except Exception as e:
+                print(f"  ⚠ E621: категорії тегів не отримано ({e}) — теги без категорій")
+                break
+        if learned:
+            with _e621_tag_cat_lock:
+                _e621_tag_cat_save()
+        for p in flat:
+            by_cat = {}
+            for t in p['tags']['_flat']:
+                by_cat.setdefault(_e621_tag_cat.get(t, 'general'), []).append(t)
+            p['tags'] = by_cat
+
+    def get_post(self, post_id) -> dict | None:
+        """Один пост: новий формат — голий об'єкт, старий — {"post": {...}}."""
+        self._rate_limit()
+        r = self.session.get(f"{E621_API_BASE}/posts/{post_id}.json")
+        r.raise_for_status()
+        data = r.json()
+        if isinstance(data, dict) and isinstance(data.get('post'), dict):
+            data = data['post']
+        return e621_norm_post(data) if isinstance(data, dict) else None
+
     def search_posts(self, tags_query: str, limit: int = 60, page: int = 1) -> list:
         """
         Пошук постів за довільним рядком тегів e621 (той самий синтаксис, що й
@@ -1086,7 +1228,7 @@ class E621Downloader:
             r = self.session.get(f"{E621_API_BASE}/posts.json",
                                  params={'tags': tags_query, 'limit': limit, 'page': page})
             r.raise_for_status()
-            return r.json().get('posts', [])
+            return self._posts(r.json())
         except Exception as e:
             print(f"  ✗ E621 live-пошук: {e}")
             return []
@@ -1106,7 +1248,7 @@ class E621Downloader:
             try:
                 r = self.session.get(f"{E621_API_BASE}/posts.json", params=params)
                 r.raise_for_status()
-                posts = r.json().get('posts', [])
+                posts = self._posts(r.json())
                 if not posts:
                     break
                 all_posts.extend(posts)
@@ -1167,6 +1309,10 @@ class E621Downloader:
                 r = self.session.get(f"{E621_API_BASE}/pools/{pool_id}.json")
                 r.raise_for_status()
                 data = r.json()
+                if isinstance(data, list):
+                    data = data[0] if data else {}
+                if isinstance(data.get('pool'), dict):
+                    data = data['pool']
                 name = data.get('name', '') or f"pool_{pool_id}"
                 post_ids = data.get('post_ids', []) or []
             except Exception as e:
@@ -1198,6 +1344,10 @@ class E621Downloader:
                 r = self.session.get(f"{E621_API_BASE}/pools/{pool_id}.json")
                 r.raise_for_status()
                 data = r.json()
+                if isinstance(data, list):
+                    data = data[0] if data else {}
+                if isinstance(data.get('pool'), dict):
+                    data = data['pool']
                 name = data.get('name', '') or f"pool_{pool_id}"
                 post_ids = data.get('post_ids', []) or []
             except Exception as e:
@@ -1216,7 +1366,7 @@ class E621Downloader:
             r = self.session.get(f"{E621_API_BASE}/posts.json",
                                  params={'tags': f'pool:{pool_id}', 'limit': 320})
             r.raise_for_status()
-            posts = r.json().get('posts', [])
+            posts = self._posts(r.json())
         except Exception as e:
             print(f"  ✗ Не вдалося отримати пости pool {pool_id}: {e}")
             return info['name'], []
