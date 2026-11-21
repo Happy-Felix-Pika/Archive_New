@@ -478,6 +478,13 @@ body.furry-absent .furry-col { display: none; }
 .trash-thumb img{width:100%;height:100%;object-fit:contain;display:block}
 .trash-thumb-empty{flex-direction:column;gap:4px;color:var(--yellow);font-size:22px}
 .trash-thumb-empty span{font-size:11px;color:var(--muted)}
+.trash-folder{border-color:var(--accent)}
+.trash-folder-thumb{flex-direction:column;cursor:pointer}
+.trash-folder-files{grid-column:1/-1;background:var(--surface);border:1px dashed var(--accent);border-radius:8px;padding:10px}
+.user-badge{display:flex;align-items:center;gap:2px;margin-bottom:10px}
+.user-badge-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono);font-size:11px;color:var(--muted)}
+.user-badge-btn{flex:none;width:26px;height:26px;display:flex;align-items:center;justify-content:center;border-radius:6px;cursor:pointer;color:var(--muted);font-size:13px;line-height:1}
+.user-badge-btn:hover{background:var(--surface2);color:var(--text)}
 .trash-ext{font-family:var(--mono);font-size:14px;color:var(--muted);letter-spacing:.05em}
 .trash-play{position:absolute;right:6px;bottom:6px;background:rgba(0,0,0,.65);color:#fff;font-size:11px;padding:2px 6px;border-radius:4px}
 .trash-info{padding:8px 10px 4px;min-width:0}

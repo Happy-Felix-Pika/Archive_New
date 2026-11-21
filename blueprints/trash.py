@@ -9,8 +9,8 @@ from flask import Blueprint, jsonify, request, send_file
 from core.auth import admin_required, moderator_required
 from core import modlog
 from core.files_api import (TrashError, empty_trash, list_trash, list_trash_orphans,
-                            purge_trash, purge_trash_orphan, restore_trash,
-                            restore_trash_orphan, trash_item, TRASH_DIR, local_path)
+                            purge_trash, purge_trash_folder, purge_trash_orphan, restore_trash,
+                            restore_trash_folder, restore_trash_orphan, trash_item, TRASH_DIR, local_path)
 from core.storage import get_storage_mode
 
 bp = Blueprint("trash", __name__)
@@ -44,6 +44,31 @@ def api_trash_purge(trash_id):
         return jsonify({"ok": True})
     except TrashError as e:
         return jsonify({"ok": False, "error": str(e)}), 409
+
+
+@bp.route("/api/trash/folder/<batch>/restore", methods=["POST"])
+@moderator_required
+def api_trash_folder_restore(batch):
+    try:
+        res = restore_trash_folder(batch)
+    except TrashError as e:
+        return jsonify({"ok": False, "error": str(e)}), 409
+    if res["restored"]:
+        modlog.record("trash.restore_folder", f"тека {res['folder']} ({res['restored']} файл(ів))",
+                      {"folder": res["folder"], "count": res["restored"]})
+    if res["errors"] and not res["restored"]:
+        return jsonify({"ok": False, "error": "; ".join(res["errors"][:3])}), 409
+    return jsonify({"ok": True, **res})
+
+
+@bp.route("/api/trash/folder/<batch>", methods=["DELETE"])
+@admin_required
+def api_trash_folder_purge(batch):
+    try:
+        res = purge_trash_folder(batch)
+    except TrashError as e:
+        return jsonify({"ok": False, "error": str(e)}), 409
+    return jsonify({"ok": True, **res})
 
 
 @bp.route("/api/trash/empty", methods=["POST"])

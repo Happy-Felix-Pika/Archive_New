@@ -167,6 +167,13 @@ ENSURE_TABLES_SQL = [
         INDEX idx_deleted_at (deleted_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
 
+    # Видалена тека: усі її файли в кошику мають спільну позначку, щоб кошик
+    # показував теку одним рядком і відновлював/стирав її цілком.
+    """ALTER TABLE trash_items
+        ADD COLUMN IF NOT EXISTS folder_rel   VARCHAR(1024) NULL,
+        ADD COLUMN IF NOT EXISTS folder_batch VARCHAR(32)   NULL,
+        ADD INDEX IF NOT EXISTS idx_folder_batch (folder_batch)""",
+
     """CREATE TABLE IF NOT EXISTS tags (
         id         INT AUTO_INCREMENT PRIMARY KEY,
         name       VARCHAR(100) NOT NULL UNIQUE,

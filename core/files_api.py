@@ -254,6 +254,8 @@ def trash_folder(rel_path, user_id=None) -> dict:
     if not storage.exists(rel_path):
         raise TrashError("Теку не знайдено")
 
+    import secrets
+    batch = secrets.token_hex(8)
     done, errors, ids = 0, [], []
     for f in storage.walk_files(rel_path):
         try:
@@ -261,12 +263,25 @@ def trash_folder(rel_path, user_id=None) -> dict:
             done += 1
         except Exception as e:
             errors.append({"path": f, "error": str(e)})
+    if ids:
+        # у кошику ці файли — одна тека
+        db = get_db()
+        try:
+            with db.cursor() as cur:
+                ph = ",".join(["%s"] * len(ids))
+                cur.execute(f"UPDATE trash_items SET folder_rel=%s, folder_batch=%s WHERE id IN ({ph})",
+                            [rel_path, batch] + [tid for _, tid in ids])
+            db.commit()
+        except Exception as e:
+            print(f"  ⚠ Кошик: не вдалося позначити теку {rel_path}: {e}")
+        finally:
+            db.close()
     removed = False
     if not errors:
         removed = storage.remove_empty_dir(rel_path)
         if not removed:
             errors.append({"path": rel_path, "error": "Файли в кошику, але саму теку прибрати не вдалося"})
-    return {"trashed": done, "folder_removed": removed, "errors": errors, "trash_ids": ids}
+    return {"trashed": done, "folder_removed": removed, "errors": errors, "trash_ids": ids, "batch": batch}
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -346,9 +361,15 @@ def list_trash():
     """
     db = get_db()
     try:
-        rows = qq(db, """SELECT id, file_id, name, ext, size_bytes, original_rel_path,
-                                trash_rel_path, deleted_by, deleted_at
-                         FROM trash_items ORDER BY deleted_at DESC, id DESC""")
+        try:
+            rows = qq(db, """SELECT id, file_id, name, ext, size_bytes, original_rel_path,
+                                    trash_rel_path, deleted_by, deleted_at, folder_rel, folder_batch
+                             FROM trash_items ORDER BY deleted_at DESC, id DESC""")
+        except Exception:
+            # колонок теки ще немає (сервер не оновив таблиці)
+            rows = qq(db, """SELECT id, file_id, name, ext, size_bytes, original_rel_path,
+                                    trash_rel_path, deleted_by, deleted_at
+                             FROM trash_items ORDER BY deleted_at DESC, id DESC""")
     finally:
         db.close()
     check = _storage_is_local()
@@ -464,6 +485,51 @@ def restore_trash(trash_id):
         return item["file_id"]
     finally:
         db.close()
+
+
+def _folder_ids(batch) -> list:
+    db = get_db()
+    try:
+        return [r["id"] for r in qq(db, "SELECT id FROM trash_items WHERE folder_batch=%s ORDER BY id", (batch,))]
+    finally:
+        db.close()
+
+
+def restore_trash_folder(batch) -> dict:
+    """Відновити видалену теку: усі її файли — на старі місця."""
+    from core.storage_api import get_storage
+    ids = _folder_ids(batch)
+    if not ids:
+        raise TrashError("У кошику такої теки немає")
+    item = trash_item(ids[0])
+    done, errors = 0, []
+    for tid in ids:
+        try:
+            restore_trash(tid)
+            done += 1
+        except TrashError as e:
+            errors.append(str(e))
+    folder = item.get("folder_rel") if item else None
+    if folder:
+        try:
+            get_storage().mkdir(folder)          # тека повертається, навіть якщо файли не всі
+        except Exception:
+            pass
+    return {"folder": folder, "restored": done, "errors": errors}
+
+
+def purge_trash_folder(batch) -> dict:
+    ids = _folder_ids(batch)
+    if not ids:
+        raise TrashError("У кошику такої теки немає")
+    done, errors = 0, []
+    for tid in ids:
+        try:
+            purge_trash(tid)
+            done += 1
+        except TrashError as e:
+            errors.append(str(e))
+    return {"removed": done, "errors": errors}
 
 
 def purge_trash(trash_id):

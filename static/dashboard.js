@@ -5513,6 +5513,7 @@ async function showAppShell() {
   const label = document.getElementById('current-user-label');
   if (label && _currentUser) {
     label.textContent = _currentUser.email || _currentUser.display_name || '';
+    label.title = label.textContent;
   }
 
   // Вкладки: звичайний користувач бачить тільки "Арти", адмін — усе + "Коди допуску"
@@ -5919,6 +5920,7 @@ function fmtBytes(n) {
 // можуть бути тисячі файлів.
 const TRASH_PAGE = 60;
 let _trashItems = [], _trashShown = 0, _trashOrphans = [];
+let _trashEntries = [];      // що показується: файли й видалені теки (тека — один запис)
 
 function _trashThumb(src, fullUrl, ext, missing) {
   const vid = /^(webm|mp4|mov|mkv|avi|m4v|ogv|flv|wmv|mpg|mpeg|ts|m2ts|mts|3gp|asf|divx)$/i.test(ext || '');
@@ -5946,15 +5948,98 @@ function _trashCard(x) {
     </div>`;
 }
 
+// Файли видаленої теки йдуть одним записом-текою на місці першого з них
+function _trashBuildEntries() {
+  const byBatch = new Map();
+  _trashEntries = [];
+  for (const x of _trashItems) {
+    if (x.folder_batch) {
+      let f = byBatch.get(x.folder_batch);
+      if (!f) {
+        f = { folder: true, batch: x.folder_batch, folder_rel: x.folder_rel || '', items: [], deleted_at: x.deleted_at };
+        byBatch.set(x.folder_batch, f);
+        _trashEntries.push(f);
+      }
+      f.items.push(x);
+    } else {
+      _trashEntries.push(x);
+    }
+  }
+}
+
+function _trashFolderInner(f) {
+  const size = f.items.reduce((s, x) => s + (Number(x.size_bytes) || 0), 0);
+  const name = f.folder_rel.split('/').pop() || f.folder_rel;
+  const parent = f.folder_rel.includes('/') ? f.folder_rel.slice(0, f.folder_rel.lastIndexOf('/')) : '(корінь)';
+  return `
+      <div class="trash-thumb trash-folder-thumb" onclick="trashFolderToggle('${f.batch}')" title="Показати файли">
+        <div style="font-size:46px;line-height:1">📁</div>
+        <div class="muted" style="font-size:12px;margin-top:4px">${f.items.length} файл(ів)</div>
+      </div>
+      <div class="trash-info">
+        <div class="trash-name" title="${esc(f.folder_rel)}">${esc(name)}</div>
+        <div class="trash-from" title="${esc(f.folder_rel)}">${esc(parent)}</div>
+        <div class="trash-meta">тека · ${fmtBytes(size)} · ${f.deleted_at ? new Date(f.deleted_at).toLocaleString('uk-UA') : '—'}</div>
+      </div>
+      <div class="trash-actions">
+        <button class="btn btn-sm" onclick="trashFolderRestore('${f.batch}')">↩ Відновити теку</button>
+        <button class="btn btn-sm btn-ghost" onclick="trashFolderToggle('${f.batch}')">Файли</button>
+        <button class="btn btn-sm btn-danger" data-admin onclick="trashFolderPurge('${f.batch}')">Видалити назавжди</button>
+      </div>`;
+}
+
+function _trashEntryHtml(e) {
+  if (!e.folder) return _trashCard(e);
+  return `<div class="trash-card trash-folder" id="trash-folder-${e.batch}">${_trashFolderInner(e)}</div>`;
+}
+
+function trashFolderToggle(batch) {
+  const open = document.getElementById(`trash-folder-files-${batch}`);
+  if (open) { open.remove(); return; }
+  const f = _trashEntries.find(e => e.folder && e.batch === batch);
+  const card = document.getElementById(`trash-folder-${batch}`);
+  if (!f || !card) return;
+  card.insertAdjacentHTML('afterend', `
+    <div class="trash-folder-files" id="trash-folder-files-${batch}">
+      <div class="muted" style="font-size:12px;margin-bottom:8px">📁 ${esc(f.folder_rel)} — файли окремо можна відновити чи видалити й поодинці</div>
+      <div class="trash-grid">${f.items.map(_trashCard).join('')}</div>
+    </div>`);
+}
+
+async function trashFolderRestore(batch) {
+  const f = _trashEntries.find(e => e.folder && e.batch === batch);
+  const r = await fetch(`${API}/api/trash/folder/${batch}/restore`, {method: 'POST', credentials: 'include'});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) { toast(j.error || 'Не вдалося відновити', 'err'); return; }
+  if (j.errors && j.errors.length) {
+    alert(`Теку «${f?.folder_rel || ''}» відновлено частково: ${j.restored} з ${j.restored + j.errors.length}.\n\n` +
+          j.errors.slice(0, 5).join('\n'));
+  } else {
+    toast(`Теку відновлено (${j.restored} файл(ів))`, 'ok');
+  }
+  loadTrashPage();
+}
+
+async function trashFolderPurge(batch) {
+  const f = _trashEntries.find(e => e.folder && e.batch === batch);
+  if (!confirm(`Видалити назавжди теку «${f?.folder_rel || ''}» (${f?.items.length || 0} файл(ів))? Відновити її вже не вийде.`)) return;
+  const r = await fetch(`${API}/api/trash/folder/${batch}`, {method: 'DELETE', credentials: 'include'});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) { toast(j.error || 'Не вдалося видалити', 'err'); return; }
+  if (j.errors && j.errors.length) toast(`Видалено ${j.removed}, не вдалося: ${j.errors.length}`, 'err');
+  else toast('Теку видалено назавжди', 'ok');
+  loadTrashPage();
+}
+
 function _trashRenderMore() {
   const grid = document.getElementById('trash-grid');
   if (!grid) return;
-  const next = _trashItems.slice(_trashShown, _trashShown + TRASH_PAGE);
-  grid.insertAdjacentHTML('beforeend', next.map(_trashCard).join(''));
+  const next = _trashEntries.slice(_trashShown, _trashShown + TRASH_PAGE);
+  grid.insertAdjacentHTML('beforeend', next.map(_trashEntryHtml).join(''));
   _trashShown += next.length;
   const more = document.getElementById('trash-more');
   if (more) {
-    const left = _trashItems.length - _trashShown;
+    const left = _trashEntries.length - _trashShown;
     more.style.display = left > 0 ? '' : 'none';
     more.textContent = `Показати ще ${Math.min(left, TRASH_PAGE)} (залишилось ${left})`;
   }
@@ -6023,15 +6108,33 @@ async function loadTrashPage() {
       <button class="btn btn-sm" id="trash-more" onclick="_trashRenderMore()" style="display:none"></button>
     </div>`;
   _trashShown = 0;
+  _trashBuildEntries();
   _trashRenderMore();
 }
 
 // Після дії прибираємо одну картку, а не перемальовуємо весь кошик:
 // інакше на тисячах файлів сторінка стрибала б угору після кожного кліку.
 function _trashDrop(id) {
+  const it = _trashItems.find(x => x.id === id);
   _trashItems = _trashItems.filter(x => x.id !== id);
-  _trashShown = Math.max(0, _trashShown - 1);
   document.getElementById(`trash-card-${id}`)?.remove();
+  const f = it && it.folder_batch && _trashEntries.find(e => e.folder && e.batch === it.folder_batch);
+  if (f) {
+    // файл з видаленої теки — тека лишається, у ній на один менше
+    f.items = f.items.filter(x => x.id !== id);
+    const card = document.getElementById(`trash-folder-${f.batch}`);
+    if (!f.items.length) {
+      _trashEntries = _trashEntries.filter(e => e !== f);
+      _trashShown = Math.max(0, _trashShown - 1);
+      card?.remove();
+      document.getElementById(`trash-folder-files-${f.batch}`)?.remove();
+    } else if (card) {
+      card.innerHTML = _trashFolderInner(f);
+    }
+  } else {
+    _trashEntries = _trashEntries.filter(e => e.folder || e.id !== id);
+    _trashShown = Math.max(0, _trashShown - 1);
+  }
   const total = _trashItems.reduce((s, x) => s + (Number(x.size_bytes) || 0), 0);
   const sum = document.getElementById('trash-summary');
   if (sum) sum.textContent = _trashItems.length ? `${_trashItems.length} файлів · ${fmtBytes(total)}` : '';

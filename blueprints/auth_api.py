@@ -85,7 +85,7 @@ def api_auth_login():
 
     try:
         db   = get_db()
-        user = q(db, "SELECT id, password_hash, is_admin, setup_done, role FROM users WHERE email=%s", (email,))
+        user = q(db, "SELECT id, email, display_name, password_hash, is_admin, setup_done, role FROM users WHERE email=%s", (email,))
         if not user or not check_password_hash(user["password_hash"], pwd):
             db.close()
             return jsonify({"error": "Невірний email або пароль"}), 401
@@ -98,6 +98,7 @@ def api_auth_login():
         session.permanent = True
         session["user_id"] = user["id"]
         return jsonify({"ok": True, "user_id": user["id"],
+                        "email": user["email"], "display_name": user["display_name"],
                         "is_admin": bool(user["is_admin"]),
                         "role": "admin" if user["is_admin"] else (user.get("role") or "user"),
                         "is_owner": user["id"] == 1,
