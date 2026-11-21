@@ -96,6 +96,15 @@ def _undo_trash_restore(p):
     return "файл знову в кошику"
 
 
+def _undo_trash_restore_folder(p):
+    from core.files_api import TrashError, trash_folder
+    try:
+        res = trash_folder(p["folder"])
+    except TrashError as e:
+        raise UndoError(str(e))
+    return f"тека знову в кошику ({res['trashed']} файл(ів))"
+
+
 # ── Картка файлу ─────────────────────────────────────────────────────
 
 def _undo_meta(p):
@@ -197,6 +206,7 @@ def register_all():
     modlog.register("file.move",     _undo_move,          "Перемістив")
     modlog.register("folder.create", _undo_mkdir,         "Створив теку")
     modlog.register("trash.restore", _undo_trash_restore, "Відновив з кошика")
+    modlog.register("trash.restore_folder", _undo_trash_restore_folder, "Відновив теку з кошика")
     modlog.register("file.meta",     _undo_meta,          "Змінив картку файлу")
     modlog.register("tag.add",       _undo_tag_add,       "Додав тег")
     modlog.register("tag.remove",    _undo_tag_remove,    "Прибрав тег")

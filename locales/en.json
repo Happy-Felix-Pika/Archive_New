@@ -1453,5 +1453,17 @@
  "Якщо заповнити — «Забули пароль?» надсилатиме лист із посиланням": "If filled in, «Forgot password?» will send an email with a link",
  "Якщо заповнити — «Забули пароль?» надсилатиме лист із посиланням. Без пошти запити на відновлення приходять тобі у вкладку користувачів": "If filled in, «Forgot password?» will send an email with a link. Without mail, recovery requests come to you in the users tab",
  "Якщо такий акаунт є, на його пошту надіслано лист із посиланням для нового пароля. Перевір і папку «Спам». Якщо лист так і не прийде — звернись до адміністратора архіву": "If such an account exists, an email with a link to set a new password has been sent to it. Check the Spam folder too. If the email never arrives, contact the archive administrator",
- "збережено (залиш пустим)": "saved (leave empty)"
+ "збережено (залиш пустим)": "saved (leave empty)",
+ "Відновити теку": "Restore folder",
+ "тека": "folder",
+ "(корінь)": "(root)",
+ "Показати файли": "Show files",
+ "файли окремо можна відновити чи видалити й поодинці": "files can also be restored or deleted one by one",
+ "Теку «{0}» відновлено частково: {1} з {2}": "Folder «{0}» partly restored: {1} of {2}",
+ "Теку відновлено ({0} файл(ів))": "Folder restored ({0} file(s))",
+ "Видалити назавжди теку «{0}» ({1} файл(ів))? Відновити її вже не вийде": "Delete folder «{0}» ({1} file(s)) permanently? It can't be restored",
+ "Видалено {0}, не вдалося: {1}": "Deleted {0}, failed: {1}",
+ "Теку видалено назавжди": "Folder deleted permanently",
+ "Відновив теку з кошика": "Restored a folder from the trash",
+ "У кошику такої теки немає": "No such folder in the trash"
 }
