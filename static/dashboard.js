@@ -3190,6 +3190,14 @@ async function loadConfig() {
   const v = (...p) => { let o=cfg; for(const k of p)o=o?.[k]; return o??''; };
 
   document.getElementById('cfg-local-path').value  = v('local','path')||'';
+  document.getElementById('cfg-mail-host').value = v('mail','host');
+  document.getElementById('cfg-mail-port').value = v('mail','port');
+  document.getElementById('cfg-mail-user').value = v('mail','user');
+  document.getElementById('cfg-mail-pass').value = '';
+  document.getElementById('cfg-mail-pass').placeholder = v('mail','password') ? '● збережено (залиш пустим)' : '';
+  document.getElementById('cfg-mail-from').value = v('mail','from_addr');
+  document.getElementById('cfg-mail-security').value = v('mail','security') || 'starttls';
+  document.getElementById('cfg-mail-base').value = v('mail','base_url');
   document.getElementById('cfg-db-host').value     = v('database','host');
   document.getElementById('cfg-db-port').value     = v('database','port');
   document.getElementById('cfg-db-user').value     = v('database','user');
@@ -3243,6 +3251,7 @@ async function saveConfig(e) {
         database: g('cfg-db-name'),
       },
       ui: { title: (document.getElementById('cfg-ui-title')?.value || '').trim() },
+      mail: _mailCollect(),
       ...(typeof appsConfigCollect === 'function' ? appsConfigCollect() : {}),
     })
   });
@@ -3404,6 +3413,7 @@ function chatStartConversation() {
 }
 
 async function loadUsersFull() {
+  loadPasswordRequests();
   const tbody = document.getElementById('users-full-tbody');
   tbody.innerHTML = `<tr><td colspan="7" class="empty-row">${t('common.loading')}</td></tr>`;
   try {
@@ -3487,7 +3497,7 @@ function _userRowHtml(u, group, closed) {
         <td>${userRoleCell(u)}</td>
         <td style="color:var(--muted)">${fmtDate(u.created_at)}</td>
         <td style="color:var(--muted)">${u.last_login_at ? fmtDate(u.last_login_at) : '— ще не заходив —'}</td>
-        <td>${u.id !== _currentUser?.user_id && !u.is_owner && (u.role !== 'admin' || _currentUser?.is_owner) ? `<span class="catalog-crumb" style="color:var(--red)" onclick="deleteUserAccount(${u.id}, '${esc(u.display_name || u.email)}')" title="Видалити обліковий запис">🗑</span>` : ''}</td>
+        <td style="white-space:nowrap">${u.id !== _currentUser?.user_id && !u.is_owner && (u.role !== 'admin' || _currentUser?.is_owner) ? `<span class="catalog-crumb" onclick="adminSetPassword(${u.id}, '${esc(u.display_name || u.email)}')" title="Задати новий пароль">🔑</span> <span class="catalog-crumb" style="color:var(--red)" onclick="deleteUserAccount(${u.id}, '${esc(u.display_name || u.email)}')" title="Видалити обліковий запис">🗑</span>` : ''}</td>
       </tr>`;
 }
 
@@ -5206,11 +5216,191 @@ window.fetch = async function(...args) {
 };
 
 function authSwitchTab(tab) {
-  document.getElementById('tab-login').classList.toggle('active', tab === 'login');
+  document.getElementById('tab-login').classList.toggle('active', tab === 'login' || tab === 'forgot');
   document.getElementById('tab-register').classList.toggle('active', tab === 'register');
   document.getElementById('form-login').style.display    = tab === 'login'    ? 'block' : 'none';
   document.getElementById('form-register').style.display = tab === 'register' ? 'block' : 'none';
+  document.getElementById('form-forgot').style.display   = tab === 'forgot'   ? 'block' : 'none';
+  document.getElementById('form-reset').style.display    = tab === 'reset'    ? 'block' : 'none';
+  document.querySelector('.auth-tabs').style.display     = tab === 'reset'    ? 'none'  : '';
   document.getElementById('auth-error').classList.remove('show');
+}
+
+// ── Відновлення пароля ───────────────────────────────────────────────
+function authShowForgot() {
+  authSwitchTab('forgot');
+  const em = document.getElementById('login-email').value.trim();
+  if (em) document.getElementById('forgot-email').value = em;
+  document.getElementById('forgot-done').style.display = 'none';
+  document.getElementById('btn-forgot').disabled = false;
+}
+
+async function authForgotSubmit() {
+  const email = document.getElementById('forgot-email').value.trim();
+  const btn = document.getElementById('btn-forgot');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/auth/forgot', { method: 'POST', headers: {'Content-Type': 'application/json'},
+                                               body: JSON.stringify({ email }) });
+    const d = await r.json();
+    if (!r.ok) { authShowError(d.error || 'Помилка'); btn.disabled = false; return; }
+    const done = document.getElementById('forgot-done');
+    done.textContent = d.message;
+    done.style.display = '';
+  } catch { authShowError('Сервер недоступний'); btn.disabled = false; }
+}
+
+let _resetToken = null;
+async function authOpenReset(token) {
+  _resetToken = token;
+  showAuthScreen();
+  authSwitchTab('reset');
+  const info = document.getElementById('reset-for');
+  try {
+    const d = await fetch(`/api/auth/reset/check?token=${encodeURIComponent(token)}`).then(r => r.json());
+    if (!d.ok) {
+      info.textContent = '';
+      authShowError(d.error || 'Посилання недійсне');
+      document.getElementById('btn-reset').disabled = true;
+      return;
+    }
+    info.textContent = `Новий пароль для ${d.email}`;
+  } catch { authShowError('Сервер недоступний'); }
+}
+
+async function authResetSubmit() {
+  const p1 = document.getElementById('reset-password').value;
+  const p2 = document.getElementById('reset-password2').value;
+  if (p1 !== p2) { authShowError('Паролі не збігаються'); return; }
+  try {
+    const r = await fetch('/api/auth/reset', { method: 'POST', headers: {'Content-Type': 'application/json'},
+                                              body: JSON.stringify({ token: _resetToken, password: p1 }) });
+    const d = await r.json();
+    if (!r.ok) { authShowError(d.error || 'Помилка'); return; }
+    history.replaceState(null, '', location.pathname);
+    _resetToken = null;
+    authSwitchTab('login');
+    toast('Пароль змінено — увійди з новим', 'ok');
+  } catch { authShowError('Сервер недоступний'); }
+}
+
+// ── Свій пароль ──────────────────────────────────────────────────────
+function openChangePassword() {
+  let m = document.getElementById('chpwd-modal');
+  if (!m) {
+    m = document.createElement('div');
+    m.id = 'chpwd-modal';
+    m.style.cssText = 'display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:200;align-items:center;justify-content:center;padding:16px';
+    m.innerHTML = `
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:22px;width:360px;max-width:100%">
+        <div style="font-weight:600;margin-bottom:14px">🔑 Змінити пароль</div>
+        <div class="field"><label>Поточний пароль</label><input type="password" id="chpwd-old" autocomplete="current-password"></div>
+        <div class="field"><label>Новий пароль</label><input type="password" id="chpwd-new" autocomplete="new-password" placeholder="Щонайменше 8 символів"></div>
+        <div class="field"><label>Ще раз</label><input type="password" id="chpwd-new2" autocomplete="new-password"></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px">
+          <button class="btn btn-ghost btn-sm" onclick="document.getElementById('chpwd-modal').style.display='none'">Скасувати</button>
+          <button class="btn btn-primary btn-sm" onclick="changePasswordSubmit()">Зберегти</button>
+        </div>
+      </div>`;
+    document.body.appendChild(m);
+  }
+  ['chpwd-old', 'chpwd-new', 'chpwd-new2'].forEach(id => document.getElementById(id).value = '');
+  m.style.display = 'flex';
+  document.getElementById('chpwd-old').focus();
+}
+
+async function changePasswordSubmit() {
+  const old_password = document.getElementById('chpwd-old').value;
+  const new_password = document.getElementById('chpwd-new').value;
+  if (new_password !== document.getElementById('chpwd-new2').value) { toast('Паролі не збігаються', 'err'); return; }
+  const r = await fetch(`${API}/api/auth/change-password`, { method: 'POST', headers: {'Content-Type': 'application/json'},
+                                                            body: JSON.stringify({ old_password, new_password }) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { toast(d.error || 'Помилка', 'err'); return; }
+  document.getElementById('chpwd-modal').style.display = 'none';
+  toast('Пароль змінено', 'ok');
+}
+
+// ── Адмін: новий пароль користувачу, запити на відновлення ───────────
+function _genPassword() {
+  const abc = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const a = new Uint32Array(12); crypto.getRandomValues(a);
+  return Array.from(a, x => abc[x % abc.length]).join('');
+}
+
+function _askNewPassword(who) {
+  const pwd = prompt(`Новий пароль для ${who}\n(запропоновано випадковий — можна змінити; щонайменше 8 символів):`, _genPassword());
+  if (pwd === null) return null;
+  if (pwd.length < 8) { toast('Пароль має містити щонайменше 8 символів', 'err'); return null; }
+  return pwd;
+}
+
+function _passwordDone(who, pwd) {
+  try { navigator.clipboard.writeText(pwd); } catch {}
+  alert(`Пароль для ${who} змінено.\n\nНовий пароль: ${pwd}\n(скопійовано в буфер обміну)\n\nПередай його особисто й попроси змінити на свій (🔑 внизу меню).`);
+}
+
+async function adminSetPassword(userId, who) {
+  const pwd = _askNewPassword(who);
+  if (!pwd) return;
+  const r = await fetch(`${API}/api/users/${userId}/password`, { method: 'POST', headers: {'Content-Type': 'application/json'},
+                                                                body: JSON.stringify({ password: pwd }) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { toast(d.error || 'Помилка', 'err'); return; }
+  _passwordDone(who, pwd);
+  loadPasswordRequests();
+}
+
+async function loadPasswordRequests() {
+  const box = document.getElementById('pwd-requests');
+  if (!box) return;
+  let rows = [];
+  try { rows = await fetch(`${API}/api/password-requests`).then(r => r.ok ? r.json() : []); } catch {}
+  if (!Array.isArray(rows) || !rows.length) { box.innerHTML = ''; return; }
+  box.innerHTML = `
+    <div class="card" style="margin-bottom:14px;border-color:var(--yellow, #d90)">
+      <div style="font-weight:600;margin-bottom:8px">🔑 Запити на відновлення пароля (${rows.length})</div>
+      ${rows.map(r => `
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:6px 0;border-top:1px solid var(--border)">
+          <div><b>${esc(r.display_name || '—')}</b> <span class="muted">${esc(r.email)}</span></div>
+          <div class="muted" style="font-size:12px">${fmtDate(r.created_at)}</div>
+          <div style="margin-left:auto;display:flex;gap:6px">
+            <button class="btn btn-primary btn-sm" onclick="resolvePasswordRequest(${r.id}, 'set', '${esc(r.display_name || r.email)}')">Задати новий пароль</button>
+            <button class="btn btn-ghost btn-sm" onclick="resolvePasswordRequest(${r.id}, 'reject')">Відхилити</button>
+          </div>
+        </div>`).join('')}
+    </div>`;
+}
+
+async function resolvePasswordRequest(id, action, who) {
+  const body = { action };
+  if (action === 'set') {
+    const pwd = _askNewPassword(who);
+    if (!pwd) return;
+    body.password = pwd;
+  } else if (!confirm('Відхилити запит? Пароль лишиться старим.')) return;
+  const r = await fetch(`${API}/api/password-requests/${id}`, { method: 'POST', headers: {'Content-Type': 'application/json'},
+                                                               body: JSON.stringify(body) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { toast(d.error || 'Помилка', 'err'); loadPasswordRequests(); return; }
+  if (action === 'set') _passwordDone(who, body.password); else toast('Запит відхилено', 'ok');
+  loadPasswordRequests();
+}
+
+async function mailTest() {
+  // спершу зберігаємо поля пошти, щоб тест ішов з тим, що зараз у формі
+  await fetch(`${API}/api/config`, { method: 'POST', headers: {'Content-Type': 'application/json'},
+                                    body: JSON.stringify({ mail: _mailCollect() }) });
+  const r = await fetch(`${API}/api/mail/test`, { method: 'POST' });
+  const d = await r.json().catch(() => ({}));
+  if (r.ok) toast(`Тестовий лист надіслано на ${d.to}`, 'ok'); else toast(d.error || 'Помилка', 'err');
+}
+
+function _mailCollect() {
+  const g = id => (document.getElementById(id)?.value || '').trim();
+  return { host: g('cfg-mail-host'), port: g('cfg-mail-port'), user: g('cfg-mail-user'),
+           password: g('cfg-mail-pass') || null, from_addr: g('cfg-mail-from'),
+           security: g('cfg-mail-security') || 'starttls', base_url: g('cfg-mail-base') };
 }
 
 function authShowError(msg) {
@@ -5508,6 +5698,10 @@ async function startAuthFlow() {
     dbSetupShowError('Сервер недоступний. Перевірте що dashboard_server.py запущено.');
     return;
   }
+
+  // посилання з листа «відновлення пароля»
+  const resetToken = new URLSearchParams(location.search).get('reset');
+  if (resetToken) { authOpenReset(resetToken); return; }
 
   await startAuthFlow();
 

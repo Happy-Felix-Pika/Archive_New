@@ -47,6 +47,9 @@ _PUBLIC_PATHS = {
     "/api/db/status",
     "/api/db/setup",
     "/api/branding",
+    "/api/auth/forgot",
+    "/api/auth/reset",
+    "/api/auth/reset/check",
 }
 
 # Порядок не має значення — кожен blueprint самодостатній.
@@ -54,7 +57,7 @@ _PUBLIC_PATHS = {
 # джерела чи дублікати тут немає — усе це застосунки в apps/installed/.
 BLUEPRINT_MODULES = [
     "apps", "auth_api", "catalog", "federation", "files", "gallery",
-    "jobs", "settings_api", "stats", "tags", "trash", "upload", "users", "version",
+    "jobs", "settings_api", "stats", "tags", "trash", "upload", "users", "version", "password",
 ]
 
 

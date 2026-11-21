@@ -211,6 +211,24 @@ ENSURE_TABLES_SQL = [
         FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE CASCADE,
         FOREIGN KEY (used_by)    REFERENCES users(id) ON DELETE SET NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+
+    # Запити на відновлення пароля: лист з одноразовим посиланням або —
+    # якщо пошта не налаштована — запит до адміна. Токен зберігається лише
+    # як sha256, саме посилання знає тільки адресат листа.
+    """CREATE TABLE IF NOT EXISTS password_resets (
+        id          INT AUTO_INCREMENT PRIMARY KEY,
+        user_id     INT NOT NULL,
+        token_hash  CHAR(64) DEFAULT NULL,
+        status      ENUM('pending','emailed','done','rejected') NOT NULL DEFAULT 'pending',
+        ip          VARCHAR(64) DEFAULT NULL,
+        created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+        expires_at  DATETIME DEFAULT NULL,
+        resolved_by INT DEFAULT NULL,
+        resolved_at DATETIME DEFAULT NULL,
+        INDEX idx_token (token_hash),
+        INDEX idx_status (status),
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
 ]
 
 
