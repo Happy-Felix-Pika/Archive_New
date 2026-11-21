@@ -263,7 +263,7 @@ async function loadArtists() {
   const data = await fetch(`${API}/api/artists?sort=${_artistsSort}`).then(r => r.json()).catch(() => []);
   _lastArtistsData = data;
   document.getElementById('artists-tbody').innerHTML = (Array.isArray(data) ? data : []).map(a => `<tr data-artist-row-id="${a.id}" data-artist-row-name="${esc(a.artist_name)}"${a.is_fav ? ' class="fav-artist-row"' : ''}>
-    <td style="font-weight:500;cursor:pointer">${favArtistHeart(a.is_fav, `data-fav-artist="${a.id}"`)} ${esc(a.artist_name)}</td>
+    <td style="font-weight:500;cursor:pointer">${favArtistHeart(a.is_fav, `data-fav-artist="${a.id}"`)} ${esc(a.artist_name)}${(a.aliases || []).length ? `<div class="muted" style="font-size:11px;font-weight:400" title="Інші назви автора">також: ${esc(a.aliases.join(', '))}</div>` : ''}</td>
     <td style="color:var(--muted)">${esc(a.folder_name)}</td>
     <td><span class="badge badge-e621">${a.e621_files}</span></td>
     <td><span class="badge badge-inkbunny">${a.ib_files}</span></td>
@@ -588,6 +588,36 @@ async function artistResolveDuplicate(resultId, action) {
   }
 }
 
+async function artistLoadAliases(id) {
+  const box = document.getElementById('artist-aliases');
+  if (!box) return;
+  let rows = [];
+  try { rows = await fetch(`${API}/api/artists/${id}/aliases`).then(r => r.json()); } catch {}
+  const mod = canModerate();
+  box.innerHTML = `<span class="muted" style="font-size:12px">Інші назви:</span> ` +
+    ((Array.isArray(rows) && rows.length) ? rows.map(a => `<span class="tag-chip" style="margin-right:4px">${esc(a.alias_name)}${mod ?
+      ` <span style="cursor:pointer;opacity:.7" title="Прибрати" onclick="artistRemoveAlias(${id}, ${a.id}, '${esc(a.alias_name)}')">✕</span>` : ''}</span>`).join('')
+      : '<span class="muted" style="font-size:12px">немає</span>') +
+    (mod ? ` <span class="catalog-crumb" style="font-size:12px" onclick="artistAddAlias(${id})" title="Той самий автор під іншим ніком (на іншому сайті)">+ додати</span>` : '');
+}
+
+async function artistAddAlias(id) {
+  const name = prompt('Інша назва цього автора (нік на іншому сайті):');
+  if (!name || !name.trim()) return;
+  const r = await fetch(`${API}/api/artists/${id}/aliases`, { method: 'POST',
+    headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ name: name.trim() }) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { toast(d.error || 'Не вдалося', 'err'); return; }
+  toast('Назву додано', 'ok');
+  artistLoadAliases(id);
+}
+
+async function artistRemoveAlias(id, aliasId, name) {
+  if (!confirm(`Прибрати «${name}» з інших назв автора? Архіватор більше не шукатиме роботи під цим ніком.`)) return;
+  await fetch(`${API}/api/artists/${id}/aliases/${aliasId}`, { method: 'DELETE' });
+  artistLoadAliases(id);
+}
+
 async function loadArtistDetail(id, name, page=1) {
   showPage('artist-detail');
   document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.page==='artists'));
@@ -595,7 +625,9 @@ async function loadArtistDetail(id, name, page=1) {
   _artistDetailName = name;
   document.getElementById('artist-detail-header').innerHTML = `
     <div class="card-title">${t('th.artist')}</div>
-    <div style="font-size:18px;font-weight:600;font-family:var(--mono);color:var(--accent2)">${esc(name)}</div>`;
+    <div style="font-size:18px;font-weight:600;font-family:var(--mono);color:var(--accent2)">${esc(name)}</div>
+    <div id="artist-aliases" style="margin-top:8px"></div>`;
+  artistLoadAliases(id);
   artistLoadDuplicates(id);
   const data = await fetch(`${API}/api/artist/${id}/downloads?page=${page}&limit=100`).then(r=>r.json()).catch(()=>({items:[],total:0}));
   document.getElementById('artist-detail-tbody').innerHTML = data.items.map(r => `<tr>
@@ -3841,6 +3873,8 @@ async function liveSearch(page = 1) {
   grid.innerHTML = `<div style="opacity:.6">${t('common.loading')}</div>`;
   document.getElementById('live-download-btn').style.display =
     (canModerate() && liveGetCurrentArtist()) ? '' : 'none';
+  document.getElementById('live-attach-btn').style.display =
+    (canModerate() && liveGetCurrentArtist()) ? '' : 'none';
 
   // id поля = ім'я параметра. Ядро не перелічує поля поіменно —
   // бере те, що оголосило джерело.
@@ -3923,15 +3957,16 @@ function liveRenderResults() {
   }
   grid.innerHTML = _liveResults.map((r, idx) => {
     const isImg = !r.is_video;
-    const thumb = r.in_library
+    const thumb = (r.in_library && r.download_id)
       ? `${API}/api/gallery/stream/${r.download_id}`
       : liveMediaUrl(r.thumb_url);
     const inner = isImg
       ? `<img class="catalog-thumb" src="${thumb}" loading="lazy">`
       : `<div class="catalog-icon">🎬</div>`;
-    return `<div class="catalog-item" data-live-idx="${idx}">
+    return `<div class="catalog-item${r.in_library ? ' live-in-lib' : ''}" data-live-idx="${idx}"${r.in_library ? ` title="${r.library_copy ? 'Вже в архіві (копія з іншого сайту)' : 'Вже в архіві'}"` : ''}>
       ${inner}
-      <div class="catalog-name">${esc((r.artists||[]).join(', ') || r.source)}${r.in_library ? ' ✓' : ''}${r.pool_id ? ' 📦' : ''}</div>
+      ${r.in_library ? '<span class="live-lib-badge">✓</span>' : ''}
+      <div class="catalog-name">${_liveArtistsHtml(r) || esc(r.source)}${r.pool_id ? ' 📦' : ''}</div>
     </div>`;
   }).join('');
 }
@@ -4112,7 +4147,7 @@ function liveShowItem(idx) {
   idx = ((idx % _liveResults.length) + _liveResults.length) % _liveResults.length;
   _liveIdx = idx;
   const r = _liveResults[idx];
-  const url = r.in_library
+  const url = (r.in_library && r.download_id)
     ? `${API}/api/gallery/stream/${r.download_id}`
     : liveMediaUrl(r.file_url);
   const mediaEl = r.is_flash
@@ -4144,7 +4179,9 @@ function liveShowItem(idx) {
           <a href="${r.post_url}" target="_blank" class="gallery-info-link">↗ ${t('gal.original')}</a>
         </div>
       </div>
-      ${r.in_library ? `<div class="gallery-info-secondary"><span style="color:var(--green)">✓ ${t('live.inlibrary')}</span></div>` : ''}
+      ${r.in_library ? `<div class="gallery-info-secondary"><span style="color:var(--green)">✓ ${t('live.inlibrary')}${r.library_copy ? ' (копія з іншого сайту)' : ''}</span></div>` : ''}
+      ${Object.keys(r.artists_in_archive || {}).length ? `<div class="gallery-info-secondary"><span style="color:var(--green)">✓ Автор в архіві: ${
+          Object.entries(r.artists_in_archive).map(([n, a]) => n.toLowerCase() === a.toLowerCase() ? `«${esc(a)}»` : `«${esc(a)}» (тут — ${esc(n)})`).join(', ')}</span></div>` : ''}
       ${r.pool_id ? `<div class="pool-progress-badge" data-pool-link="${r.pool_id}" data-pool-name="${esc(r.pool_name||'')}" title="${t('live.viewpool')}">
         <i>📖</i>
         <span class="pool-progress-title">${esc(r.pool_name||'')}</span>
@@ -4159,7 +4196,8 @@ function liveShowItem(idx) {
     </div>
     <div style="display:flex;gap:8px;justify-content:center;margin-top:10px">
       <button class="btn btn-ghost" onclick="liveBackToResults()">← ${t('live.backtoresults')}</button>
-      ${canModerate() ? `<button class="btn btn-primary" onclick="liveDownloadArtistFromViewer()">⬇ ${t('live.downloadthisartist')}</button>` : ''}
+      ${canModerate() ? `<button class="btn btn-primary" onclick="liveDownloadArtistFromViewer()">⬇ ${t('live.downloadthisartist')}</button>
+        <button class="btn btn-ghost" onclick="liveAttachArtistFromViewer()" title="Той самий автор уже є в архіві під іншою назвою">🔗 Приєднати до автора…</button>` : ''}
     </div>
     <div class="gallery-nav prev" onclick="liveGo(-1)" style="position:absolute;left:-64px;top:calc(50% - 60px)">‹</div>
     <div class="gallery-nav next" onclick="liveGo(1)"  style="position:absolute;right:-64px;top:calc(50% - 60px)">›</div>
@@ -4420,15 +4458,95 @@ async function liveDownloadArtist() {
   try {
     const check = await fetch(`${API}/api/artists/check-name?name=${encodeURIComponent(artist)}`).then(r => r.json());
     if (check.exists) {
-      const ok = confirm(
-        `⚠ "${artist}" вже є в бібліотеці як автор "${check.artist_name}" (${check.folder_name}).\n\n` +
-        `Це можливо той самий автор під іншим ніком. Продовжити завантаження як окремого автора?`
-      );
-      if (!ok) return;
+      // нік — це вже автор в архіві (сам або його інша назва): оновлюємо його
+      if (!confirm(`«${artist}» — це автор «${check.artist_name}» в архіві.\n\n` +
+                   `Завантажити нове в «${check.artist_name}»? Шукатиме за всіма його назвами, копії відсіються.`)) return;
+      _liveRunArtist(check.artist_name);
+      return;
     }
   } catch {}
 
   if (!confirm(`${t('live.confirmdl')} «${artist}»?`)) return;
+  _liveRunArtist(artist);
+}
+
+// Автори картки: той, що вже є в архіві (сам чи під іншою назвою), — з ✓
+function _liveArtistsHtml(r) {
+  const known = r.artists_in_archive || {};
+  return (r.artists || []).map(a => known[a]
+    ? `<span class="live-artist-known" title="В архіві: ${esc(known[a])}">${esc(a)} ✓</span>`
+    : esc(a)).join(', ');
+}
+
+// ── Приєднати нік до автора, який уже є в архіві ─────────────────────
+function liveAttachArtist(name) {
+  name = name || liveGetCurrentArtist();
+  if (!name) return;
+  _attachPickArtist(name);
+}
+
+function liveAttachArtistFromViewer() {
+  const r = _liveResults[_liveIdx];
+  const names = (r.artists || []).filter(Boolean);
+  if (!names.length) { toast(t('live.noartist'), 'err'); return; }
+  const name = names.length === 1 ? names[0]
+    : prompt(`Який нік приєднати?\n${names.join(', ')}`, names[0]);
+  if (name) _attachPickArtist(name.trim());
+}
+
+async function _attachPickArtist(name) {
+  let artists = [];
+  try { artists = await fetch(`${API}/api/artists?filter=all`).then(r => r.json()); } catch {}
+  if (!Array.isArray(artists)) artists = [];
+  document.getElementById('attach-modal')?.remove();
+  const m = document.createElement('div');
+  m.id = 'attach-modal';
+  m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:200;display:flex;align-items:center;justify-content:center;padding:16px';
+  m.innerHTML = `
+    <div class="card" style="width:420px;max-width:100%;max-height:85vh;display:flex;flex-direction:column">
+      <div style="font-weight:600;margin-bottom:4px">🔗 Приєднати «${esc(name)}» до автора</div>
+      <div class="muted" style="font-size:12px;margin-bottom:10px">Обери, хто це в архіві. Нік запишеться як інша назва автора,
+        і архіватор шукатиме нові роботи й під ним — у ту саму теку, копії відсіюються.</div>
+      <input type="text" id="attach-search" placeholder="Пошук автора…" style="margin-bottom:8px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text)">
+      <div id="attach-list" style="overflow:auto;flex:1;min-height:120px"></div>
+      <div style="display:flex;justify-content:flex-end;margin-top:10px">
+        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('attach-modal').remove()">Скасувати</button>
+      </div>
+    </div>`;
+  document.body.appendChild(m);
+  const render = () => {
+    const q = document.getElementById('attach-search').value.trim().toLowerCase();
+    const rows = artists.filter(a => !q || a.artist_name.toLowerCase().includes(q)
+                                     || (a.aliases || []).some(x => x.toLowerCase().includes(q))).slice(0, 200);
+    document.getElementById('attach-list').innerHTML = rows.map(a => `
+      <div class="artist-opt" data-attach-id="${a.id}" data-attach-name="${esc(a.artist_name)}">
+        ${a.is_fav ? '♥ ' : ''}${esc(a.artist_name)} <span class="muted" style="font-size:11px">${a.total_files}${(a.aliases || []).length ? ' · також ' + esc(a.aliases.join(', ')) : ''}</span>
+      </div>`).join('') || '<div class="muted" style="padding:8px">Нікого не знайдено</div>';
+  };
+  document.getElementById('attach-search').addEventListener('input', render);
+  document.getElementById('attach-list').addEventListener('click', e => {
+    const opt = e.target.closest('[data-attach-id]');
+    if (opt) _attachConfirm(name, +opt.dataset.attachId, opt.dataset.attachName);
+  });
+  render();
+  document.getElementById('attach-search').focus();
+}
+
+async function _attachConfirm(name, artistId, artistName) {
+  const r = await fetch(`${API}/api/artists/${artistId}/aliases`, { method: 'POST',
+    headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ name }) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { toast(d.error || 'Не вдалося', 'err'); return; }
+  document.getElementById('attach-modal')?.remove();
+  toast(`«${name}» — тепер інша назва автора «${artistName}»`, 'ok');
+  if (confirm(`Завантажити зараз нове для «${artistName}» (разом з роботами під «${name}»)?\n\nУже наявне не качається, копії з іншого сайту відсіюються.`)) {
+    _liveRunArtist(artistName);
+  } else if (typeof liveSearch === 'function' && document.getElementById('live-grid')) {
+    liveSearch(_livePage || 1);       // оновити позначки ✓
+  }
+}
+
+async function _liveRunArtist(artist) {
   try {
     const r = await fetch(`${API}/api/run`, {
       method: 'POST', headers: {'Content-Type': 'application/json'},

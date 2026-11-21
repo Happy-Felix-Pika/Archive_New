@@ -474,12 +474,7 @@ def api_live_favorites_list():
         for r in results:
             r["is_favorite"] = (username.lower() == get_user_live_credentials(current_user_id()).get(source_id, {}).get("username", "").lower())
         if results:
-            post_ids = [_lib_key(src, r) for r in results]
-            existing_map = _resolve_in_library(post_ids)
-            for r in results:
-                dl_id = existing_map.get(_lib_key(src, r))
-                r["in_library"]  = dl_id is not None
-                r["download_id"] = dl_id
+            _decorate(src, results)
         return jsonify({"results": results})
 
     if src and src.supports_real_favorites:
@@ -492,12 +487,7 @@ def api_live_favorites_list():
         for r in results:
             r["is_favorite"] = True
         if results:
-            post_ids = [_lib_key(src, r) for r in results]
-            existing_map = _resolve_in_library(post_ids)
-            for r in results:
-                dl_id = existing_map.get(_lib_key(src, r))
-                r["in_library"]  = dl_id is not None
-                r["download_id"] = dl_id
+            _decorate(src, results)
         return jsonify({"results": results})
 
     # Джерело без власного API улюбленого — спільна локальна таблиця
@@ -551,12 +541,7 @@ def api_live_favorites_list():
 
         if results and source_id in all_sources():
             prefix = all_sources()[source_id].id_prefix
-            post_ids = [f"{prefix}{r['id']}" for r in results]
-            existing_map = _resolve_in_library(post_ids)
-            for r in results:
-                dl_id = existing_map.get(f"{prefix}{r['id']}")
-                r["in_library"]  = dl_id is not None
-                r["download_id"] = dl_id
+            _decorate(all_sources()[source_id], results)
 
         return jsonify({"results": results})
     except Exception as e:
@@ -577,6 +562,71 @@ def _lib_key(src, r) -> str:
         except Exception:
             pass
     return f"{src.id_prefix}{r['id']}"
+
+
+def _known_artists(names) -> dict:
+    """{нік з сайту: назва автора в архіві} — за текою, назвою чи іншою назвою."""
+    names = sorted({n for n in names if n})
+    if not names:
+        return {}
+    db = get_db()
+    try:
+        if not table_exists(db, "artists"):
+            return {}
+        ph = ",".join(["%s"] * len(names))
+        low = {n.lower(): n for n in names}
+        out = {}
+        for r in qq(db, f"""SELECT artist_name, folder_name FROM artists
+                            WHERE artist_name IN ({ph}) OR folder_name IN ({ph})""",
+                    names + [f"@{n}" for n in names]):
+            for key in (r["artist_name"], r["folder_name"].lstrip("@")):
+                if key.lower() in low:
+                    out[low[key.lower()]] = r["artist_name"]
+        for r in qq(db, f"""SELECT al.alias_name, a.artist_name FROM artist_aliases al
+                            JOIN artists a ON a.id = al.artist_id WHERE al.alias_name IN ({ph})""", names):
+            if r["alias_name"].lower() in low:
+                out.setdefault(low[r["alias_name"].lower()], r["artist_name"])
+        return out
+    except Exception:
+        return {}
+    finally:
+        db.close()
+
+
+def _decorate(src, results):
+    """Позначки для карток: робота вже в архіві, автор уже в архіві."""
+    if not results:
+        return
+    post_ids = [_lib_key(src, r) for r in results]
+    existing_map = _resolve_in_library(post_ids)
+    copies = _cross_site_copies([p for p in post_ids if p not in existing_map])
+    known = _known_artists([a for r in results for a in (r.get("artists") or [])])
+    for r in results:
+        key = _lib_key(src, r)
+        dl_id = existing_map.get(key)
+        r["in_library"]  = dl_id is not None or key in copies
+        r["download_id"] = dl_id
+        r["library_copy"] = dl_id is None and key in copies
+        r["artists_in_archive"] = {a: known[a] for a in (r.get("artists") or []) if a in known}
+
+
+def _cross_site_copies(post_ids) -> set:
+    """Пости, які архіватор свідомо не скачав: та сама робота вже є з іншого сайту."""
+    if not post_ids:
+        return set()
+    db = get_db()
+    try:
+        if not table_exists(db, "rejected_duplicates"):
+            return set()
+        ph = ",".join(["%s"] * len(post_ids))
+        try:
+            rows = qq(db, f"""SELECT DISTINCT post_id FROM rejected_duplicates
+                              WHERE post_id IN ({ph}) AND (reason='auto' OR reason IS NULL)""", post_ids)
+        except Exception:
+            return set()
+        return {r["post_id"] for r in rows}
+    finally:
+        db.close()
 
 
 def _resolve_in_library(post_ids: list) -> dict:
@@ -683,10 +733,6 @@ def api_live_search():
         # зі свого сховища замість зовнішнього посилання (включно з тими,
         # що зникли через об'єднання авторів — merge_duplicate_log)
         if results:
-            prefix = src.id_prefix
-            post_ids = [_lib_key(src, r) for r in results]
-            existing_map = _resolve_in_library(post_ids)
-
             # Улюблене для джерел без власного API улюбленого — окрема
             # таблиця, не пов'язана з тим, чи робота вже завантажена
             fav_ids = set()
@@ -699,10 +745,8 @@ def api_live_search():
                 db2.close()
                 fav_ids = {row["post_id"] for row in favs}
 
+            _decorate(src, results)
             for r in results:
-                dl_id = existing_map.get(_lib_key(src, r))
-                r["in_library"]  = dl_id is not None
-                r["download_id"] = dl_id
                 if not src.supports_real_favorites:
                     r["is_favorite"] = r['id'] in fav_ids
 

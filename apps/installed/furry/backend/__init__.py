@@ -329,6 +329,15 @@ def _undo_auto_update(p):
     db.commit()
 
 
+def _undo_alias(p):
+    from core.db import get_db
+    db = get_db()
+    with db.cursor() as cur:
+        cur.execute("DELETE FROM artist_aliases WHERE artist_id=%s AND alias_name=%s", (p["artist_id"], p["name"]))
+    db.commit()
+    db.close()
+
+
 def _undo_orders(p):
     from core.db import get_db
     db = get_db()
@@ -447,6 +456,7 @@ def register(core):
     core.events.on("file.state_restore", _state_restore)
     from core import modlog
     modlog.register("artist.auto_update", _undo_auto_update, "Автооновлення автора")
+    modlog.register("artist.alias",       _undo_alias,        "Додав іншу назву автора")
     modlog.register("pool.set_page",      _undo_orders,       "Змінив сторінку в пулі")
     modlog.register("pool.resort",        _undo_orders,       "Пересортував пул")
     modlog.register("pool.assign",        _undo_pool_assign,  "Переніс у пул")

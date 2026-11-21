@@ -52,5 +52,10 @@
  "скачування": "downloading",
  "у кошик: {0} файл(ів), скачаних цим запуском": "to trash: {0} file(s) downloaded by this run",
  "увімкнено": "enabled",
- "Це не тека автора": "This is not an artist folder"
+ "Це не тека автора": "This is not an artist folder",
+ "{0}» уже записана як інша назва автора «{1}": "{0}» is already saved as another name of artist «{1}",
+ "{0}» — це окремий автор в архіві («{1}»). Об'єднай їх кнопкою 🔗 у вкладці «Автори": "{0}» is a separate artist in the archive («{1}»). Merge them with the 🔗 button in the «Artists» tab",
+ "{0}» → автор «{1}": "{0}» → artist «{1}",
+ "Вкажи назву": "Enter a name",
+ "Додав іншу назву автора": "Added another artist name"
 }

@@ -13,7 +13,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/dashboard.css?v=62">
+<link rel="stylesheet" href="/static/dashboard.css?v=63">
 <script src="https://unpkg.com/@ruffle-rs/ruffle"></script>
 </head>
 <body>
@@ -606,6 +606,7 @@
         <button class="btn btn-ghost" id="live-back-btn" onclick="liveGoBack()" style="display:none" data-i18n="live.back">← Назад</button>
         <button class="btn btn-primary" onclick="liveSearchFresh()" data-i18n="live.search">🔍 Шукати</button>
         <button class="btn btn-ghost" id="live-download-btn" onclick="liveDownloadArtist()" style="display:none" data-i18n="live.downloadall">⬇ Завантажити всю бібліотеку автора</button>
+        <button class="btn btn-ghost" id="live-attach-btn" onclick="liveAttachArtist()" style="display:none" title="Той самий автор уже є в архіві під іншою назвою — приєднати цей нік до нього">🔗 Приєднати до автора…</button>
         <button class="btn btn-ghost" onclick="liveShowFavorites()">★ Моє улюблене</button>
         <button class="btn btn-ghost btn-sm" id="live-view-favs-btn" onclick="liveShowFavoritesOfUser()">👁 Переглянути</button>
         <div id="live-status" style="flex:1 1 100%;font-family:var(--mono);font-size:11px;color:var(--muted)"></div>
@@ -948,7 +949,7 @@
 
 <script src="/i18n.js"></script>
 <script src="/static/i18n.js?v=1"></script>
-<script src="/static/dashboard.js?v=81"></script>
+<script src="/static/dashboard.js?v=82"></script>
 <script src="/static/apps.js?v=6"></script>
 
 </body>
