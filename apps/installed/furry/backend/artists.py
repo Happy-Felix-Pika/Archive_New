@@ -40,6 +40,9 @@ def _artist_rows(db):
                                           FROM artists""")}
     pending = {r["artist_id"]: int(r["n"]) for r in qq(db, """SELECT artist_id, COUNT(*) AS n
                                                              FROM pending_duplicates GROUP BY artist_id""")}
+    aliases = {}
+    for r in qq(db, "SELECT artist_id, alias_name FROM artist_aliases ORDER BY alias_name"):
+        aliases.setdefault(r["artist_id"], []).append(r["alias_name"])
     stats = {}           # artist_id -> {kind: [files, e621, ib, size]}, last
     last = {}
     for r in qq(db, f"""SELECT fp.artist_id, fp.source, {_KIND_SQL} AS k, COUNT(*) AS n,
@@ -74,6 +77,8 @@ def _artist_rows(db):
                 "total_files": tot[0], "e621_files": tot[1], "ib_files": tot[2], "total_size": tot[3],
                 "last_download": last[aid].isoformat() if last.get(aid) else None,
                 "pending_count": pending.get(aid, 0),
+                "aliases": [x for x in aliases.get(aid, [])
+                            if x.lower() not in (m["artist_name"].lower(), m["folder_name"].lstrip("@").lower())],
             })
         rows.sort(key=lambda r: (-r["total_files"], r["id"]))
         views[view] = rows
@@ -313,6 +318,75 @@ def api_artists_toggle_auto_update(artist_id):
         return jsonify({"ok": True, "auto_update": bool(enabled)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# ── Інші назви автора ─────────────────────────────────────────────────
+#
+#  Той самий автор під іншим ніком (на іншому сайті чи після перейменування).
+#  Назва записується до автора в архіві: «Онлайн» показує його як уже
+#  відомого, а архіватор під час оновлення шукає роботи й за цією назвою —
+#  нове скачується в теку автора, копії відсіюються як звичайно.
+
+def _alias_rows(db, artist_id):
+    return qq(db, "SELECT id, alias_name FROM artist_aliases WHERE artist_id=%s ORDER BY alias_name", (artist_id,))
+
+
+@bp.route("/api/artists/<int:artist_id>/aliases")
+def api_artist_aliases(artist_id):
+    db = get_db()
+    try:
+        return jsonify(list(_alias_rows(db, artist_id)))
+    finally:
+        db.close()
+
+
+@bp.route("/api/artists/<int:artist_id>/aliases", methods=["POST"])
+@moderator_required
+def api_artist_alias_add(artist_id):
+    """{"name": "інший_нік"} — приєднати назву до автора."""
+    name = ((flask_request.get_json(silent=True) or {}).get("name") or "").strip().lstrip("@").strip()
+    if not name or len(name) > 255:
+        return jsonify({"error": "Вкажи назву"}), 400
+    db = get_db()
+    try:
+        artist = q(db, "SELECT id, artist_name, folder_name FROM artists WHERE id=%s", (artist_id,))
+        if not artist:
+            return jsonify({"error": "Автора не знайдено"}), 404
+        if name.lower() in (artist["artist_name"].lower(), artist["folder_name"].lstrip("@").lower()):
+            return jsonify({"ok": True, "already": True})
+        other = q(db, """SELECT id, artist_name FROM artists
+                         WHERE (artist_name=%s OR folder_name=%s) AND id<>%s""", (name, f"@{name}", artist_id))
+        if other:
+            return jsonify({"error": f"«{name}» — це окремий автор в архіві («{other['artist_name']}»). "
+                                     f"Об'єднай їх кнопкою 🔗 у вкладці «Автори»."}), 409
+        taken = q(db, """SELECT a.artist_name FROM artist_aliases al JOIN artists a ON a.id=al.artist_id
+                         WHERE al.alias_name=%s AND al.artist_id<>%s""", (name, artist_id))
+        if taken:
+            return jsonify({"error": f"«{name}» уже записана як інша назва автора «{taken['artist_name']}»"}), 409
+        with db.cursor() as cur:
+            cur.execute("INSERT IGNORE INTO artist_aliases (artist_id, alias_name) VALUES (%s,%s)", (artist_id, name))
+        db.commit()
+    finally:
+        db.close()
+    artists_cache.invalidate()
+    from core import modlog
+    modlog.record("artist.alias", f"«{name}» → автор «{artist['artist_name']}»",
+                  {"artist_id": artist_id, "name": name})
+    return jsonify({"ok": True, "artist_name": artist["artist_name"]})
+
+
+@bp.route("/api/artists/<int:artist_id>/aliases/<int:alias_id>", methods=["DELETE"])
+@moderator_required
+def api_artist_alias_remove(artist_id, alias_id):
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute("DELETE FROM artist_aliases WHERE id=%s AND artist_id=%s", (alias_id, artist_id))
+        db.commit()
+    finally:
+        db.close()
+    artists_cache.invalidate()
+    return jsonify({"ok": True})
 
 
 @bp.route("/api/artists/check-name")

@@ -694,6 +694,15 @@ class DatabaseTracker:
         except Exception as e:
             print(f"    ! не вдалось записати відмову {post_id}: {e}")
 
+    def artist_aliases(self, artist_id: int) -> list:
+        """Інші назви автора (artist_aliases) — для пошуку на сайтах."""
+        try:
+            with self.db.cursor() as cur:
+                cur.execute("SELECT alias_name FROM artist_aliases WHERE artist_id=%s ORDER BY id", (artist_id,))
+                return [r['alias_name'] for r in cur.fetchall() if r.get('alias_name')]
+        except Exception:
+            return []
+
     def clear_auto_rejected(self, artist_id: int) -> int:
         """
         Забути автоматичні відмови автора («вже є з іншого сайту»), щоб
@@ -2430,15 +2439,29 @@ class FurryArchiver:
             if tg_only:
                 print("    джерела: лише Telegram")
 
+            # Інші назви автора (приєднані в «Онлайн» чи після об'єднання) —
+            # шукаємо й за ними: той самий автор під іншим ніком на іншому
+            # сайті. Усе йде в цю ж теку, копії відсіюються як завжди.
+            names = [artist_name] + [a for a in self.tracker.artist_aliases(artist_id)
+                                     if a.lower() != artist_name.lower()]
+            if len(names) > 1:
+                print(f"    інші назви: {', '.join(names[1:])}")
+
             e621_posts, ib_subs = [], []
             if self.e621_dl and not tg_only:
-                e621_posts = self.e621_dl.search_artist_posts(
-                    artist_name, limit=self.config.get('e621', 'max_posts_per_artist')
-                ) or []
+                seen = set()
+                for nm in names:
+                    for p in self.e621_dl.search_artist_posts(
+                            nm, limit=self.config.get('e621', 'max_posts_per_artist')) or []:
+                        if p.get('id') not in seen:
+                            seen.add(p.get('id')); e621_posts.append(p)
             if self.ib_dl and self.ib_dl.sid and not tg_only:
-                ib_subs = self.ib_dl.search_artist_submissions(
-                    artist_name, limit=self.config.get('inkbunny', 'max_submissions_per_artist')
-                ) or []
+                seen = set()
+                for nm in names:
+                    for sub in self.ib_dl.search_artist_submissions(
+                            nm, limit=self.config.get('inkbunny', 'max_submissions_per_artist')) or []:
+                        if sub.get('submission_id') not in seen:
+                            seen.add(sub.get('submission_id')); ib_subs.append(sub)
 
             def do_e621(secondary: bool):
                 nonlocal new_files, skipped, pending, autosave_counter
