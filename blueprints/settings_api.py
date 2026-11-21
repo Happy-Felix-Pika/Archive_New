@@ -30,7 +30,7 @@ def api_config_get():
     user_settings = get_user_settings()
     safe.update(json.loads(json.dumps(user_settings)))
     safe["ui"] = {"title": (file_cfg.get("ui") or {}).get("title") or "Archive"}
-    for s in ("nextcloud", "inkbunny", "nextcloud_db"):
+    for s in ("nextcloud", "inkbunny", "nextcloud_db", "mail"):
         if s in safe and safe[s].get("password"):
             safe[s]["password"] = "••••••••"
     if "e621" in safe and safe["e621"].get("api_key"):
