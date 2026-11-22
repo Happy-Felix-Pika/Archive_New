@@ -14,7 +14,12 @@ app = create_app()
 
 def _startup():
     ensure_tables()
-    recover_stuck_jobs()   # задачі, перервані попереднім запуском
+    try:
+        recover_stuck_jobs()   # задачі, перервані попереднім запуском
+    except Exception as e:
+        # нова установка без бази — сервер усе одно стартує й показує
+        # екран підключення до бази
+        print(f"  ⚠ База недоступна: {e}")
     start_worker()         # черга фонових задач ядра
     _cleanup_img_cache()
     threading.Thread(target=_cache_cleanup_loop, daemon=True).start()

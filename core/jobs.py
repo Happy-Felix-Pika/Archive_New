@@ -231,14 +231,18 @@ def _run_one(row: dict):
 
 
 def _worker_loop():
+    last_err = None
     while True:
         try:
             row = _claim_next()
+            last_err = None
             if row:
                 _run_one(row)
                 continue              # одразу дивимось, чи є наступна
         except Exception as e:
-            print(f"  ⚠ Черга задач: {e}")
+            if str(e) != last_err:    # та сама помилка (бази ще нема) — не засмічуємо лог
+                print(f"  ⚠ Черга задач: {e}")
+                last_err = str(e)
         time.sleep(POLL_SECONDS)
 
 
