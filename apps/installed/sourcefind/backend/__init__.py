@@ -5,6 +5,8 @@
 """
 
 import json
+import threading
+import time
 
 from flask import Blueprint, jsonify, request
 
@@ -160,15 +162,56 @@ def _todo(db, folder: str, recheck: bool, limit=None):
     return [r for r in rows if not is_service_path(r["rel_path"])]
 
 
+# ── «ще не перевірено» — рахується у фоні, сторінка не чекає ───────────
+_todo_cnt = {"n": None, "at": 0.0, "busy": False}
+
+
+def _count_todo():
+    from core.db import get_db
+    ph = ",".join(["%s"] * len(F.IMAGE_EXT))
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            try:
+                cur.execute(f"""SELECT COUNT(*) AS n FROM files f
+                                LEFT JOIN furry_posts fp ON fp.file_id = f.id
+                                LEFT JOIN srcfind_results r ON r.file_id = f.id
+                                WHERE LOWER(f.ext) IN ({ph}) AND (fp.post_url IS NULL OR fp.post_url='')
+                                  AND (r.file_id IS NULL OR r.status='error')
+                                  AND f.rel_path NOT LIKE '.%%' AND f.rel_path NOT LIKE '%%/.%%'""",
+                            list(F.IMAGE_EXT))
+            except Exception:
+                cur.execute(f"""SELECT COUNT(*) AS n FROM files f
+                                LEFT JOIN srcfind_results r ON r.file_id = f.id
+                                WHERE LOWER(f.ext) IN ({ph}) AND (r.file_id IS NULL OR r.status='error')""",
+                            list(F.IMAGE_EXT))
+            _todo_cnt["n"] = int(cur.fetchone()["n"])
+            _todo_cnt["at"] = time.time()
+    except Exception as e:
+        print(f"  ⚠ Пошук джерел: не вдалося порахувати файли: {e}")
+    finally:
+        _todo_cnt["busy"] = False
+        db.close()
+
+
+def todo_count():
+    """Останнє відоме число (або None) — свіже рахується у фоні раз на 2 хв."""
+    if not _todo_cnt["busy"] and time.time() - _todo_cnt["at"] > 120:
+        _todo_cnt["busy"] = True
+        threading.Thread(target=_count_todo, daemon=True).start()
+    return _todo_cnt["n"]
+
+
 # ── фонова задача ────────────────────────────────────────────────────
 
 def run_scan(job, params):
     from core.db import get_db
+    job.progress(0, "Збираю список файлів без джерела…")
     db = get_db()
     try:
         rows = _todo(db, params.get("folder") or "", bool(params.get("recheck")))
         total = len(rows)
-        job.progress(0, f"Файлів без джерела: {total}")
+        job.progress(0, f"Файлів без джерела: {total} — починаю")
         print(f"🔎 Пошук джерел: {total} файл(ів)")
         fnd = _make_finder()
         stats = {"applied": 0, "review": 0, "none": 0, "error": 0}
@@ -177,11 +220,12 @@ def run_scan(job, params):
                 break
             st = process_file(db, fnd, row)
             stats[st] = stats.get(st, 0) + 1
-            if i % 5 == 0 or i == total:
+            if i % 2 == 0 or i == total:
                 job.progress(int(i * 100 / max(total, 1)),
                              f"{i}/{total} · знайдено {stats['applied']} · на перевірку {stats['review']}"
                              f" · не знайдено {stats['none']}")
         print(f"🔎 Пошук джерел завершено: {stats}")
+        _todo_cnt["at"] = 0                      # лічильник — перерахувати
         return {"total": total, **stats}
     finally:
         db.close()
@@ -198,9 +242,9 @@ def api_status():
     db = get_db()
     try:
         counts = {r["status"]: r["n"] for r in qq(db, "SELECT status, COUNT(*) AS n FROM srcfind_results GROUP BY status")}
-        todo = len(_todo(db, "", False))
     finally:
         db.close()
+    todo = todo_count()                     # None — ще рахується
     s = _settings()
     jobs = core.jobs.list(JOB, limit=1)
     job = None

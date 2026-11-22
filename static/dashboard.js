@@ -2993,6 +2993,20 @@ async function stopArchiver() {
   const r = await fetch(`${API}/api/stop`,{method:'POST'});
   r.ok ? toast(t('toast.stopped'),'ok') : toast((await r.json()).error||t('toast.error'),'err');
 }
+const _JOB_TITLES = { 'sourcefind.scan': '🔎 Пошук джерел', 'duplicates.scan-all': '🔍 Пошук дублікатів',
+                      'duplicates.dup-auto-resolve': '🔍 Розбір дублікатів' };
+function _jobTitle(type) { return _JOB_TITLES[type] || `⏳ ${type}`; }
+let _jobPollAt = 0, _jobLast = null;
+async function _runningJob() {
+  if (Date.now() - _jobPollAt < 2500) return _jobLast;      // не частіше, ніж раз на ~3 с
+  _jobPollAt = Date.now();
+  try {
+    const rows = await fetch(`${API}/api/jobs?limit=5`).then(r => r.ok ? r.json() : []);
+    _jobLast = (Array.isArray(rows) ? rows : []).find(j => j.status === 'running' || j.status === 'pending') || null;
+  } catch { _jobLast = null; }
+  return _jobLast;
+}
+
 async function updateStatus() {
   // Запуск архіватора — це застосунок. Якщо його немає, ендпоінта теж
   // немає: ховаємо віджет і припиняємо опитування, замість того щоб
@@ -3010,9 +3024,13 @@ async function updateStatus() {
     }
     const s = await resp.json();
     const dot = document.getElementById('proc-dot'), lbl = document.getElementById('proc-label');
-    if (dot) { dot.style.background = s.running ? 'var(--green)' : 'var(--muted)';
-               dot.style.boxShadow  = s.running ? '0 0 6px var(--green)' : 'none'; }
-    if (lbl) lbl.textContent = s.running ? `Запущено (PID ${s.pid})` : 'Зупинено';
+    // Архіватор стоїть, але йде фонова задача застосунку (пошук джерел тощо) — показуємо її
+    const job = s.running ? null : await _runningJob();
+    const busy = s.running || !!job;
+    if (dot) { dot.style.background = busy ? 'var(--green)' : 'var(--muted)';
+               dot.style.boxShadow  = busy ? '0 0 6px var(--green)' : 'none'; }
+    if (lbl) lbl.textContent = s.running ? `Запущено (PID ${s.pid})`
+      : job ? `${_jobTitle(job.type)} — ${job.progress || 0}%` : 'Зупинено';
     ['btn-run','btn-dry','btn-sync','btn-migrate-tags','btn-cleanup'].forEach(id => {
       const b = document.getElementById(id); if (b) b.disabled = s.running;
     });
