@@ -313,5 +313,7 @@
  "chat.deleted": "Розмову видалено",
  "chat.note_delete_confirm": "Видалити нотатку?",
  "chat.read": "Прочитано",
- "chat.sent": "Надіслано, ще не прочитано"
+ "chat.sent": "Надіслано, ще не прочитано",
+ "pager.of": "з",
+ "live.works": "робіт"
 }

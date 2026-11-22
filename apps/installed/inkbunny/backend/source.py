@@ -146,26 +146,24 @@ def build(LiveSourceBase):
                 where = {"kw":     (True, False, False),
                          "kw_t":   (True, True,  False),
                          "kw_t_d": (True, True,  True)}.get(search_in, (True, False, False))
-                filters_used = bool(query or days or type or
-                                    (orderby and orderby != "create_datetime"))
-                if artist and not filters_used:
-                    # Лише автор — перевірений шлях: уся бібліотека автора.
-                    subs = dl.search_artist_submissions(artist, limit=limit)
-                else:
-                    # Автор разом із тегами чи фільтрами — один запит до API
-                    # з username. Раніше гілка «автор» ігнорувала теги,
-                    # виключення й сторінку, і поєднати їх було неможливо.
-                    subs = dl.search_by_keywords(
-                        query, limit=limit, page=page,
-                        orderby=orderby or "create_datetime",
-                        stringtype=match if match in ("and", "or", "exact") else "and",
-                        in_keywords=where[0], in_title=where[1], in_description=where[2],
-                        username=artist or None,
-                        dayslimit=int(days) if str(days).isdigit() else None,
-                        types=type or None)
+                # Автор (з тегами чи без) — один запит до API з username і сторінкою.
+                # Раніше «лише автор» тягнув перші N робіт бібліотеки й ігнорував
+                # сторінку: друга сторінка показувала те саме, що й перша.
+                subs = dl.search_by_keywords(
+                    query, limit=limit, page=page,
+                    orderby=orderby or "create_datetime",
+                    stringtype=match if match in ("and", "or", "exact") else "and",
+                    in_keywords=where[0], in_title=where[1], in_description=where[2],
+                    username=artist or None,
+                    dayslimit=int(days) if str(days).isdigit() else None,
+                    types=type or None)
+
 
                 sub_ids    = [str(s.get("submission_id")) for s in subs if s.get("submission_id")]
                 full_by_id = self._refetch_full_details(dl, sub_ids)
+                tot = getattr(dl, "last_totals", None)
+                if tot and tot.get("pages"):
+                    self.report_total(pages=tot["pages"], count=tot.get("count"))
 
             results = []
             for s in subs:
@@ -227,6 +225,9 @@ def build(LiveSourceBase):
                 raise ValueError("Вкажи юзернейм Inkbunny, чиє улюблене переглянути")
             dl = self._downloader()
             subs = dl.get_favorites_of_user(username, limit=limit, page=page)
+            tot = getattr(dl, "last_totals", None)
+            if tot and tot.get("pages"):
+                self.report_total(pages=tot["pages"], count=tot.get("count"))
 
             sub_ids    = [str(s.get("submission_id")) for s in subs if s.get("submission_id")]
             full_by_id = self._refetch_full_details(dl, sub_ids)
