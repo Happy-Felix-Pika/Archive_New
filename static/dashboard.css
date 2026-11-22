@@ -613,6 +613,10 @@ span.reg-code[onclick]{cursor:pointer}
 
 /* Плитки в «Артах» */
 .gal-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;width:100%;align-content:start;padding:4px}
-.gal-tile{aspect-ratio:1;background:var(--surface2);border-radius:8px;overflow:hidden;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:30px}
+.gal-tile{position:relative;aspect-ratio:1;background:var(--surface2);border-radius:8px;overflow:hidden;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:30px}
 .gal-tile img{width:100%;height:100%;object-fit:cover;transition:transform .15s}
 .gal-tile:hover img{transform:scale(1.04)}
+.gal-tile-share{position:absolute;top:6px;right:6px;z-index:2;background:rgba(0,0,0,.6);border-radius:6px;padding:3px 6px;font-size:13px;opacity:0;transition:opacity .15s}
+.gal-tile:hover .gal-tile-share{opacity:1}
+@media (hover:none){.gal-tile-share{opacity:1}}
+.gal-share-btn{padding:3px 9px;font-size:11.5px}

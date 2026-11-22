@@ -2186,6 +2186,7 @@ async function galleryShow(idx) {
       <div class="gallery-info-primary">
         <div class="gallery-info-left">
           <span class="catalog-crumb" style="font-size:17px" onclick="galToggleFavorite(${id})" id="gal-fav-${id}" title="${t('gal.favorite')}">${d.is_favorite ? '★' : '☆'}</span>
+          <button class="btn btn-ghost btn-sm gal-share-btn" onclick="shareFile(${id})" title="Публічне посилання на цей арт — відкривається без входу">🔗 Поділитися</button>
           <span class="gallery-artist-name">${esc(d.artist)}</span>
           ${d.artist_id ? favArtistHeart(d.artist_fav, `onclick="galToggleFavArtist(${d.artist_id}, this)"`) : ''}
           ${d.source ? `<span class="badge badge-${d.source}">${d.source}</span>` : ''}
@@ -2198,7 +2199,6 @@ async function galleryShow(idx) {
         ${isVideo?`<span class="gallery-info-hint">${t('gal.videohint')}</span>`:''}
         <span class="gallery-info-actions">
           ${canModerate() ? `<span class="catalog-crumb" onclick="galShowMetaEdit(${id})" title="${t('gal.edit')}">✎</span>` : ''}
-          <span class="catalog-crumb" onclick="shareFile(${id})" title="Поділитися посиланням (відкривається без входу)">🔗</span>
           <span data-zone="file.actions" data-file_id="${id}"></span>
           ${_currentUser?.is_admin ? `<span class="catalog-crumb" onclick="galKeyAccess(${id})" title="Доступ для зовнішніх ключів">🔓</span>` : ''}
           ${canModerate() ? `<span class="catalog-crumb" style="color:var(--red)" onclick="galDeleteFile(${id})" title="${t('gal.delete')}">🗑</span>` : ''}
@@ -2386,7 +2386,9 @@ function galRenderGrid(more = false) {
     const i = from + k;
     const src = it.source === 'local' ? `${API}/api/gallery/thumb/${it.id}`
                                       : `${API}/api/external-archives/${it.source}/gallery/thumb/${it.id}`;
-    return `<div class="gal-tile" onclick="galGridOpen(${i})">
+    const share = it.source === 'local'
+      ? `<span class="gal-tile-share" title="Поділитися" onclick="event.stopPropagation();shareFile(${it.id})">🔗</span>` : '';
+    return `<div class="gal-tile" onclick="galGridOpen(${i})">${share}
       <img src="${src}" loading="lazy" alt="" onerror="this.replaceWith(Object.assign(document.createElement('span'),{textContent:'🎞️'}))"></div>`;
   }).join('');
   const moreBtn = _galGridShown < items.length
