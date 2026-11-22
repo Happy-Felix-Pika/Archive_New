@@ -1570,5 +1570,9 @@
  "Посилання відкликано": "Link revoked",
  "Копіювати": "Copy",
  "Поділитися": "Share",
- "Публічне посилання на цей арт — відкривається без входу": "Public link to this art — opens without login"
+ "Публічне посилання на цей арт — відкривається без входу": "Public link to this art — opens without login",
+ "Чим поділитися?": "What to share?",
+ "Увесь пул «{0}»": "The whole pool «{0}»",
+ "Видно всі сторінки пулу по порядку.": "All pages of the pool are shown in order.",
+ "Пул не знайдено": "Pool not found"
 }
