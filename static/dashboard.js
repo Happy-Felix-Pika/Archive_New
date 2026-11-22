@@ -3906,6 +3906,11 @@ function liveSearchFresh() {
 }
 
 async function liveSearch(page = 1) {
+  // Вписано чийсь юзернейм у «чиєсь улюблене» — Enter і «Шукати» відкривають
+  // саме його улюблене (з тими самими тегами й сортуванням). Раніше це
+  // робила лише кнопка «👁 Переглянути», а Enter запускав звичайний пошук.
+  const favUser = (typeof liveFieldVal === 'function') ? (liveFieldVal('favs_username') || '').trim() : '';
+  if (favUser) { liveShowFavorites(page, favUser); return; }
   _livePage = page;
   liveBackToResults();
   const grid = document.getElementById('live-grid');
@@ -4402,6 +4407,7 @@ function liveSearchArtist(name, source) {
   _liveInPool = false;
   _liveCurrentArtistName = name;
   if (source && source !== _liveSource) liveSetSource(source);
+  liveSetField('favs_username', '');      // роботи автора, а не чиєсь улюблене
   if ((source || _liveSource) === 'inkbunny') {
     liveSetField('artist', name);
     liveSetField('tags', '');
