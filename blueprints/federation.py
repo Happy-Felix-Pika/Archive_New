@@ -438,7 +438,7 @@ def delete_external_archive(user_id: int, archive_id: str):
     db.commit(); db.close()
 
 
-def call_external_api(cfg: dict, path: str, stream: bool = False, params: dict = None):
+def call_external_api(cfg: dict, path: str, stream: bool = False, params: dict = None, timeout: int = 15):
     """
     Замість прямого підключення до чужої БД/Nextcloud — б'ємо просто в
     ЙОГО ВЛАСНИЙ дашборд по HTTP, з ключем у заголовку. Йому вже байдуже,
@@ -454,9 +454,9 @@ def call_external_api(cfg: dict, path: str, stream: bool = False, params: dict =
             "X-Access-Key": cfg.get("access_key", ""),
             "X-Identity":   cfg.get("my_identity", ""),
             "User-Agent":   "Archive-federation/1.0",
-        }, params=params, timeout=15, stream=stream)
+        }, params=params, timeout=timeout, stream=stream)
     except req.exceptions.Timeout:
-        return None, f"Архів {base} не відповів вчасно (довше 15 с)"
+        return None, f"Архів {base} не відповів вчасно (довше {timeout} с)"
     except req.exceptions.RequestException as e:
         return None, f"Архів {base} недоступний: {type(e).__name__}"
     if r.status_code < 400:
@@ -691,9 +691,10 @@ def api_external_gallery_ids(archive_id):
         v = flask_request.args.get(k)
         if v:
             params[k] = v
-    resp, err = call_external_api(cfg, "/api/external-access/gallery/ids", params=params)
+    # великий архів (особливо старої версії) може рахувати список довго
+    resp, err = call_external_api(cfg, "/api/external-access/gallery/ids", params=params, timeout=60)
     if err:
-        return jsonify({"error": err}), 403
+        return jsonify({"error": err}), 502
     return jsonify(resp.json())
 
 
