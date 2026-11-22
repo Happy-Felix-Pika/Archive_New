@@ -57,7 +57,7 @@ _PUBLIC_PATHS = {
 # джерела чи дублікати тут немає — усе це застосунки в apps/installed/.
 BLUEPRINT_MODULES = [
     "apps", "auth_api", "catalog", "federation", "files", "gallery",
-    "jobs", "settings_api", "stats", "tags", "trash", "upload", "users", "version", "password",
+    "jobs", "settings_api", "shares", "stats", "tags", "trash", "upload", "users", "version", "password",
 ]
 
 

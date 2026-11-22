@@ -179,6 +179,24 @@ def api_external_access_gallery_stream(download_id):
     return api_gallery_stream(download_id)
 
 
+@bp.route("/api/external-access/gallery/thumb/<int:download_id>")
+def api_external_access_gallery_thumb(download_id):
+    key = flask_request.args.get("key", "")
+    valid, key_id = _validate_external_key(key, flask_request.args.get("identity", ""))
+    if not valid:
+        return _key_error_response(key_id)
+    if not key_can_see_file(key_id, download_id):
+        return jsonify({"error": "Немає доступу до цієї папки"}), 403
+    from blueprints.catalog import api_catalog_thumb
+    from core.files_api import get_file
+    db = get_db()
+    row = get_file(download_id, db)
+    db.close()
+    if not row:
+        return jsonify({"error": "not found"}), 404
+    return api_catalog_thumb(external=True, rel_path=row["rel_path"])
+
+
 @bp.route("/api/external-access/catalog/list")
 def api_external_access_catalog_list():
     """Захищений ключем перегляд Каталогу — для когось ІНШОГО, хто
@@ -719,6 +737,29 @@ def api_external_gallery_stream(archive_id, remote_id):
         return Response(gen(), status=r.status_code, headers=resp_headers)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/api/external-archives/<archive_id>/gallery/thumb/<int:remote_id>")
+def api_external_gallery_thumb(archive_id, remote_id):
+    """Мініатюра файлу підключеного архіву для плиток. Старий архів мініатюр
+    за id не вміє — тоді віддаємо сам файл (повільніше, але працює)."""
+    cfg = _get_external_cfg_or_404(archive_id)
+    if not cfg:
+        return jsonify({"error": "Архів не знайдено"}), 404
+    import requests as req
+    from flask import redirect
+    base = cfg.get("base_url", "").rstrip("/")
+    try:
+        r = req.get(f"{base}/api/external-access/gallery/thumb/{remote_id}",
+                    params={"key": cfg.get("access_key", ""), "identity": cfg.get("my_identity", "")}, timeout=30)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+    if r.status_code == 404 and "json" not in (r.headers.get("Content-Type") or ""):
+        return redirect(f"/api/external-archives/{archive_id}/gallery/stream/{remote_id}")
+    if r.status_code != 200:
+        return Response(r.content, status=r.status_code, content_type=r.headers.get("Content-Type"))
+    return Response(r.content, content_type=r.headers.get("Content-Type", "image/jpeg"),
+                    headers={"Cache-Control": "private, max-age=86400"})
 
 
 @bp.route("/api/external-archives/<archive_id>/catalog/list")

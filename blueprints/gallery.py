@@ -412,6 +412,20 @@ def api_gallery_stream(download_id):
         return jsonify({"error": str(e)}), 500
 
 
+@bp.route("/api/gallery/thumb/<int:download_id>")
+def api_gallery_thumb(download_id):
+    """Мініатюра файлу за id — для плиток (улюблене тощо)."""
+    from blueprints.catalog import api_catalog_thumb
+    db = get_db()
+    row = get_file(download_id, db)
+    db.close()
+    from core.storage_api import is_service_path
+    if not row or is_service_path(row["rel_path"]):
+        return jsonify({"error": "not found"}), 404
+    resp = api_catalog_thumb(rel_path=row["rel_path"])
+    return resp
+
+
 # Псевдонім для старого ендпоінту (щоб не ламати старі запити)
 @bp.route("/api/gallery/file/<int:download_id>")
 def api_gallery_file(download_id):

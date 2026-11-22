@@ -1640,6 +1640,21 @@ function galSourceChange() {
   else galExternalShuffle();
 }
 
+async function _galKeepFavorites(items) {
+  const sources = [...new Set(items.map(i => i.source))];
+  const sets = {};
+  for (const s of sources) {
+    if (s === 'local') {
+      const r = await fetch(`${API}/api/gallery/ids?favorites=1&filter=all`).then(x => x.json()).catch(() => ({}));
+      sets[s] = new Set(r.ids || []);
+    } else {
+      delete _extFavCache[s];                    // свіже — щойно міг додати
+      sets[s] = await _extFavIds(s);
+    }
+  }
+  return items.filter(i => sets[i.source]?.has(i.id));
+}
+
 async function galExternalShuffle() {
   const wrap   = document.getElementById('gallery-wrap');
   const status = document.getElementById('gallery-status');
@@ -1677,10 +1692,12 @@ async function galExternalShuffle() {
       items = (r.ids || []).map(id => ({ source: _galSource, id }));
     }
     if (token !== _galExtListToken) return;
+    if (_galFavOnly) items = await _galKeepFavorites(items);   // ★ — лише моє улюблене
+    if (token !== _galExtListToken) return;
     if (!items.length) { wrap.innerHTML = `<div class="gallery-empty">${t('gal.nofiles')}</div>`; return; }
     _galExtItems = items;
     status.textContent = `${items.length.toLocaleString('uk-UA')} файлів`;
-    galExternalShow(0);
+    if (_galGrid) galRenderGrid(); else galExternalShow(0);
   } catch (e) {
     wrap.innerHTML = `<div class="gallery-empty">✗ ${esc(e.message)}</div>`;
   }
@@ -2098,7 +2115,7 @@ async function galleryInit() {
     _galIds = r.ids;
     const label = _galFilter==='image'?t('gal.photo.plain'):_galFilter==='video'?t('gal.video.plain'):t('gal.files.plain');
     status.textContent = `${_galIds.length.toLocaleString('uk-UA')} ${label}`;
-    galleryShow(0);
+    if (_galGrid) galRenderGrid(); else galleryShow(0);
   } catch(e) { wrap.innerHTML = `<div class="gallery-empty">✗ ${esc(e.message)}</div>`; }
 
   // Відновлюємо стан пікера
@@ -2181,6 +2198,7 @@ async function galleryShow(idx) {
         ${isVideo?`<span class="gallery-info-hint">${t('gal.videohint')}</span>`:''}
         <span class="gallery-info-actions">
           ${canModerate() ? `<span class="catalog-crumb" onclick="galShowMetaEdit(${id})" title="${t('gal.edit')}">✎</span>` : ''}
+          <span class="catalog-crumb" onclick="shareFile(${id})" title="Поділитися посиланням (відкривається без входу)">🔗</span>
           <span data-zone="file.actions" data-file_id="${id}"></span>
           ${_currentUser?.is_admin ? `<span class="catalog-crumb" onclick="galKeyAccess(${id})" title="Доступ для зовнішніх ключів">🔓</span>` : ''}
           ${canModerate() ? `<span class="catalog-crumb" style="color:var(--red)" onclick="galDeleteFile(${id})" title="${t('gal.delete')}">🗑</span>` : ''}
@@ -2332,7 +2350,54 @@ function galToggleFavFilter() {
     btn.textContent = _galFavOnly ? '★' : '☆';
     btn.classList.toggle('btn-primary', _galFavOnly);
   }
-  galleryInit();
+  _galSetGrid(_galFavOnly);            // улюблене — одразу плитками
+  galShuffleFresh();                   // і для свого, і для підключеного архіву
+}
+
+// ── Плитки: увесь поточний список картинками ────────────────────────
+let _galGrid = false, _galGridShown = 0;
+const GAL_GRID_PAGE = 120;
+
+function _galSetGrid(on) {
+  _galGrid = !!on;
+  const b = document.getElementById('gal-grid-btn');
+  if (b) b.classList.toggle('btn-primary', _galGrid);
+}
+
+function _galListItems() {
+  return _galSource === 'local' ? _galIds.map(id => ({ source: 'local', id })) : (_galExtItems || []);
+}
+
+function galToggleGrid() {
+  _galSetGrid(!_galGrid);
+  if (_galGrid) galRenderGrid();
+  else if (_galSource === 'local') { if (_galIds.length) galleryShow(_galIdx || 0); }
+  else if (_galExtItems?.length) galExternalShow(_galExtIdx || 0);
+}
+
+function galRenderGrid(more = false) {
+  const wrap = document.getElementById('gallery-wrap');
+  const items = _galListItems();
+  if (!items.length) { wrap.innerHTML = `<div class="gallery-empty">${t('gal.nofiles')}</div>`; return; }
+  const from = more ? _galGridShown : 0;
+  const chunk = items.slice(from, from + GAL_GRID_PAGE);
+  _galGridShown = from + chunk.length;
+  const tiles = chunk.map((it, k) => {
+    const i = from + k;
+    const src = it.source === 'local' ? `${API}/api/gallery/thumb/${it.id}`
+                                      : `${API}/api/external-archives/${it.source}/gallery/thumb/${it.id}`;
+    return `<div class="gal-tile" onclick="galGridOpen(${i})">
+      <img src="${src}" loading="lazy" alt="" onerror="this.replaceWith(Object.assign(document.createElement('span'),{textContent:'🎞️'}))"></div>`;
+  }).join('');
+  const moreBtn = _galGridShown < items.length
+    ? `<div style="grid-column:1/-1;text-align:center;margin:8px 0"><button class="btn btn-ghost btn-sm" onclick="this.parentElement.remove();galRenderGrid(true)">Ще (${(items.length - _galGridShown).toLocaleString('uk-UA')})</button></div>` : '';
+  if (more) document.getElementById('gal-grid')?.insertAdjacentHTML('beforeend', tiles + moreBtn);
+  else wrap.innerHTML = `<div class="gal-grid" id="gal-grid">${tiles}${moreBtn}</div>`;
+}
+
+function galGridOpen(i) {
+  _galSetGrid(false);
+  if (_galSource === 'local') galleryShow(i); else galExternalShow(i);
 }
 
 function galToggleTagsPanel(id) {
@@ -5173,6 +5238,8 @@ function catalogThumbFailed(img) {
 async function catalogLoad(path = '') {
   if ((path || '') !== _catalogPath) _catalogSelected.clear();
   _catalogPath = path || '';
+  const sfb = document.getElementById('catalog-share-folder');
+  if (sfb) sfb.style.display = (_catalogSource === 'local' && _catalogPath && canModerate()) ? '' : 'none';
   const grid = document.getElementById('catalog-grid');
   grid.innerHTML = `<div style="opacity:.6">${t('catalog.loading')}</div>`;
   try {
@@ -5797,6 +5864,7 @@ async function catalogOverlayInfo(box) {
     const d = await fetch(`${API}/api/gallery/meta/${box.fileId}`).then(r => r.json());
     if (token !== _overlayInfoToken || d.error) return;
     el.innerHTML = base(`
+      <span class="catalog-crumb" onclick="shareFile(${box.fileId})" title="Поділитися посиланням">🔗</span>
       <span class="catalog-crumb" style="font-size:17px" id="ov-fav-${box.fileId}"
             title="${t('gal.favorite')}" onclick="catalogOverlayFav(${box.fileId})">${d.is_favorite ? '★' : '☆'}</span>
       ${d.artist ? `<span class="gallery-artist-name">${esc(d.artist)}</span>` : ''}
@@ -7020,4 +7088,82 @@ async function liveDeleteCustomSource(id) {
   await fetch(`${API}/api/live/custom-sources/${encodeURIComponent(id)}`, {method:'DELETE', credentials:'include'});
   liveShowSourcesModal();
   liveLoadStatus();
+}
+
+
+// ── Поділитися: публічне посилання на файл або теку ───────────────────
+async function _shareCreate(body) {
+  const r = await fetch(`${API}/api/shares`, { method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body) }).then(x => x.json()).catch(() => ({ error: 'Помилка мережі' }));
+  if (r.error) { toast(r.error, 'err'); return; }
+  _shareShowLink(r);
+}
+function shareFile(fileId) { _shareCreate({ file_id: fileId }); }
+function shareFolder(path) { if (path) _shareCreate({ folder: path }); }
+
+function _shareModal(html) {
+  let m = document.getElementById('share-modal');
+  if (!m) {
+    m = document.createElement('div');
+    m.id = 'share-modal';
+    m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:160;display:flex;align-items:center;justify-content:center';
+    m.addEventListener('click', e => { if (e.target === m) m.remove(); });
+    document.body.appendChild(m);
+  }
+  m.innerHTML = `<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;width:min(560px,94vw);max-height:85vh;overflow-y:auto">${html}</div>`;
+  return m;
+}
+
+function _shareShowLink(s) {
+  const m = _shareModal(`
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <div style="font-weight:600">🔗 Посилання на ${s.kind === 'folder' ? 'теку' : 'файл'}</div>
+      <button class="btn btn-ghost btn-sm" onclick="document.getElementById('share-modal').remove()">✕</button>
+    </div>
+    <div class="muted" style="font-size:12px;margin-bottom:8px" data-no-i18n>${esc(s.path)}</div>
+    <div style="display:flex;gap:8px">
+      <input id="share-url" readonly value="${esc(s.url)}" onclick="this.select()"
+             style="flex:1;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-family:var(--mono);font-size:12px">
+      <button class="btn btn-primary btn-sm" onclick="shareCopy()">Копіювати</button>
+    </div>
+    <div class="muted" style="font-size:11.5px;margin-top:8px">Відкривається без входу в архів — бачить будь-хто, у кого є посилання.
+      ${s.kind === 'folder' ? 'Видно вміст теки й її підтек, вище — ні.' : ''}</div>
+    <div style="display:flex;justify-content:space-between;margin-top:14px">
+      <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="shareRevoke(${s.id}, true)">Відкликати посилання</button>
+      <a class="btn btn-ghost btn-sm" href="${esc(s.url)}" target="_blank" rel="noopener">Відкрити ↗</a>
+    </div>`);
+  m.querySelector('#share-url')?.select();
+}
+
+async function shareCopy() {
+  const inp = document.getElementById('share-url');
+  try { await navigator.clipboard.writeText(inp.value); toast('Скопійовано', 'ok'); }
+  catch { inp.select(); document.execCommand?.('copy'); toast('Скопійовано', 'ok'); }
+}
+
+async function shareRevoke(id, closeModal) {
+  if (!confirm('Відкликати посилання? Хто його має — більше не відкриє.')) return;
+  await fetch(`${API}/api/shares/${id}`, { method: 'DELETE' }).catch(() => {});
+  toast('Посилання відкликано', 'ok');
+  if (closeModal) document.getElementById('share-modal')?.remove();
+  else sharesShowMine();
+}
+
+async function sharesShowMine() {
+  const rows = await fetch(`${API}/api/shares`).then(r => r.json()).catch(() => []);
+  _shareModal(`
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <div style="font-weight:600">🔗 Мої посилання</div>
+      <button class="btn btn-ghost btn-sm" onclick="document.getElementById('share-modal').remove()">✕</button>
+    </div>
+    ${Array.isArray(rows) && rows.length ? rows.map(s => `
+      <div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border)">
+        <span>${s.kind === 'folder' ? '📁' : '📄'}</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" data-no-i18n>${esc(s.path)}</div>
+          <div class="muted" style="font-size:11px">переглядів: ${s.views} · ${fmtDate(s.created_at)}</div>
+        </div>
+        <button class="btn btn-ghost btn-sm" onclick='navigator.clipboard?.writeText(${JSON.stringify(s.url)}).then(()=>toast("Скопійовано","ok"))'>Копіювати</button>
+        <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="shareRevoke(${s.id})">✕</button>
+      </div>`).join('') : '<div class="muted" style="padding:16px 0;text-align:center">Ще немає посилань</div>'}`);
 }

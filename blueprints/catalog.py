@@ -452,9 +452,9 @@ def _make_video_thumb(src: str, out_path: str, headers: str | None = None) -> bo
 
 
 @bp.route("/api/catalog/thumb")
-def api_catalog_thumb(external: bool = False):
+def api_catalog_thumb(external: bool = False, rel_path: str | None = None):
     """Мініатюра файлу каталогу: зображення або кадр з відео."""
-    rel_path = _safe_rel_path(flask_request.args.get("path"))
+    rel_path = _safe_rel_path(rel_path if rel_path is not None else flask_request.args.get("path"))
     if not rel_path:
         return jsonify({"error": "bad path"}), 400
 

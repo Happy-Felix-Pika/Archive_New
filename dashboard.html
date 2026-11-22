@@ -13,7 +13,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/dashboard.css?v=66">
+<link rel="stylesheet" href="/static/dashboard.css?v=67">
 <script src="https://unpkg.com/@ruffle-rs/ruffle"></script>
 </head>
 <body>
@@ -375,6 +375,7 @@
         <button class="btn btn-primary" onclick="galShuffleFresh()" data-i18n="gal.shuffle">↺ Перемішати</button>
         <span id="gallery-status" style="font-family:var(--mono);font-size:12px;color:var(--muted)"></span>
         <button class="btn btn-ghost btn-sm" id="gal-fav-filter-btn" onclick="galToggleFavFilter()" title="Показати тільки улюблене">☆</button>
+        <button class="btn btn-ghost btn-sm" id="gal-grid-btn" onclick="galToggleGrid()" title="Плитками / по одному">▦</button>
         <button class="btn btn-ghost btn-sm" onclick="galManageTags()" style="margin-left:auto" data-i18n="gal.managetags">⚙ Теги</button>
         <button class="btn btn-ghost btn-sm" id="gal-upload-btn" onclick="galShowUploadModal()" style="display:none">⬆ Завантажити файли</button>
           <span data-zone="gallery.toolbar"></span>
@@ -556,6 +557,8 @@
         <button class="btn btn-ghost" onclick="catalogGoUp()" data-i18n="btn.up">⬆ Вгору</button>
         <button class="btn btn-ghost" onclick="catalogLoad(_catalogPath)" data-i18n="btn.refresh">↻ Оновити</button>
         <span data-zone="catalog.toolbar"></span>
+        <button class="btn btn-ghost btn-sm" id="catalog-share-folder" style="display:none" onclick="shareFolder(_catalogPath)" title="Публічне посилання на цю теку">🔗 Поділитися текою</button>
+        <button class="btn btn-ghost btn-sm" onclick="sharesShowMine()" title="Посилання, якими ти поділився">🔗 Мої посилання</button>
         <input id="catalog-search" data-i18n-ph="catalog.search" placeholder="Пошук за назвою…" oninput="catalogRender()"
                style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:13px;color:var(--text);outline:none;min-width:160px">
         <select id="catalog-sort" onchange="catalogRender()"
@@ -1007,7 +1010,7 @@
 
 <script src="/i18n.js"></script>
 <script src="/static/i18n.js?v=1"></script>
-<script src="/static/dashboard.js?v=95"></script>
+<script src="/static/dashboard.js?v=96"></script>
 <script src="/static/apps.js?v=8"></script>
 
 </body>
