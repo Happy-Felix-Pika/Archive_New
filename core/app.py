@@ -194,6 +194,14 @@ def create_app() -> Flask:
         mod = importlib.import_module(f"blueprints.{name}")
         app.register_blueprint(mod.bp)
 
+    # Таблиці ядра — до застосунків: на новій (порожній) базі застосунки
+    # інакше падали б на таблиці apps, якої ще немає
+    try:
+        from core.db_schema import ensure_tables
+        ensure_tables()
+    except Exception as e:
+        print(f"  ⚠ Таблиці не перевірено: {e}")
+
     # Застосунки — після ядра: вони спираються на його таблиці й API
     from core.app_manager import manager
     manager.load_all(app)

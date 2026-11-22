@@ -239,6 +239,25 @@ ENSURE_TABLES_SQL = [
 ]
 
 
+def _core_migration_tables() -> list:
+    """
+    Таблиці ядра, описані лише в migrations/ (черга задач, застосунки).
+    На вже наявних базах їх створив перехід на нову структуру, а на новій
+    установці — створюємо тут. Там лише CREATE TABLE IF NOT EXISTS.
+    """
+    import os, re
+    base = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "migrations")
+    out = []
+    for fn in ("005_jobs.sql", "006_apps.sql"):
+        try:
+            with open(os.path.join(base, fn), encoding="utf-8") as f:
+                body = re.sub(r"--[^\n]*", "", f.read())
+        except OSError:
+            continue
+        out += [st.strip() for st in body.split(";") if st.strip().upper().startswith("CREATE TABLE IF NOT EXISTS")]
+    return out
+
+
 def ensure_tables():
     """Создаём таблицы если их нет. Вызывается при старте сервера."""
     try:
@@ -258,7 +277,7 @@ def ensure_tables():
             # Таблиці зі зовнішніми ключами можуть стояти в списку РАНІШЕ за ті,
             # на які посилаються. На вже наявній БД це непомітно, а на порожній
             # MySQL відмовляє (errno 150) і решта таблиць не створюється взагалі.
-            pending = list(ENSURE_TABLES_SQL)
+            pending = list(ENSURE_TABLES_SQL) + _core_migration_tables()
             while pending:
                 failed, last_err = [], None
                 for sql in pending:
