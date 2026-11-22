@@ -39,9 +39,21 @@ _MIN_GAP = 10               # фоновий перерахунок після �
 _CHEAP = 0.3                # підрахунок, дешевший за це, можна зробити прямо в запиті
 
 
+def _persist_path(name: str) -> str:
+    import os
+    from core.paths import CONFIG_FILE
+    d = os.path.join(os.path.dirname(os.path.abspath(CONFIG_FILE)), "cache", "warm")   # підтека: чистка кешу картинок її не чіпає
+    return os.path.join(d, f"{name}.json")
+
+
 class WarmCache:
-    def __init__(self, name: str, compute, interval: int = 60):
+    """persist=True — останній результат ще й пишеться на диск (JSON), і після
+    перезапуску сервера віддається одразу, поки фон рахує свіжий. Лише для
+    даних, що без втрат переживають JSON (списки/словники рядків і чисел)."""
+
+    def __init__(self, name: str, compute, interval: int = 60, persist: bool = False):
         self.name = name
+        self.persist = persist
         self._compute = compute
         self.interval = interval
         self._data = None
@@ -54,6 +66,29 @@ class WarmCache:
         self.cost = 0.0              # скільки тривав останній підрахунок, с
         self._thread = None
         _ALL.append(self)
+        if persist:
+            self._load_saved()
+
+    def _load_saved(self):
+        import json
+        try:
+            with open(_persist_path(self.name), encoding="utf-8") as f:
+                self._data = json.load(f)
+            self._dirty = True          # збережене — лише до першого свіжого підрахунку
+        except (OSError, ValueError):
+            pass
+
+    def _save(self, data):
+        import json, os
+        try:
+            path = _persist_path(self.name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+            os.replace(tmp, path)
+        except Exception as e:
+            print(f"  ⚠ Кеш «{self.name}» не збережено на диск: {e}")
 
     # ── читання ──────────────────────────────────────────────────────
     def get(self):
@@ -94,6 +129,8 @@ class WarmCache:
                 except Exception:
                     pass
             self._data = data
+            if self.persist:
+                self._save(data)
             self.cost = time.monotonic() - t0
             self.computes += 1
             self._last_done = time.monotonic()
