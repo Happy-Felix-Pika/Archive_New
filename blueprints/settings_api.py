@@ -19,7 +19,7 @@ def api_config_get():
     """
     Застарілий ендпоінт — лишений для зворотної сумісності фронтенду.
     'database' (підключення до основної БД) береться з archiver_config.json/env,
-    решта секцій (nextcloud, e621, inkbunny, download, nextcloud_db) — з персональних
+    решта секцій (e621, inkbunny, download, mail…) — з персональних
     налаштувань поточного юзера в БД (/api/user-settings).
     """
     file_cfg = load_config()
@@ -30,7 +30,7 @@ def api_config_get():
     user_settings = get_user_settings()
     safe.update(json.loads(json.dumps(user_settings)))
     safe["ui"] = {"title": (file_cfg.get("ui") or {}).get("title") or "Archive"}
-    for s in ("nextcloud", "inkbunny", "nextcloud_db", "mail"):
+    for s in ("inkbunny", "mail"):
         if s in safe and safe[s].get("password"):
             safe[s]["password"] = "••••••••"
     if "e621" in safe and safe["e621"].get("api_key"):

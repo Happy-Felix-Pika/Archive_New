@@ -96,12 +96,12 @@ def api_chat_send():
     peer_identity       = (body_data.get("peer_identity") or "").strip()
     uid = current_user_id()
     att, att_json = None, None
-    if body_data.get("file_id"):
+    if body_data.get("file_id") or body_data.get("upload_id"):
         from .by_url import my_public_url
-        from .extras import make_attachment
-        att = make_attachment(uid, body_data.get("file_id"), my_public_url())
-        if not att:
-            return jsonify({"error": "Цей файл надіслати не можна"}), 404
+        from .extras import attachment_from_request
+        att, err = attachment_from_request(uid, body_data, my_public_url())
+        if err:
+            return jsonify({"error": err}), 404
         import json as _json
         att_json = _json.dumps(att, ensure_ascii=False)
     if not msg_text and not att:
@@ -114,7 +114,7 @@ def api_chat_send():
             return jsonify({"error": "Невірна адреса архіву (потрібна https://, http — лише в локальній мережі)"}), 400
         if len(msg_text) > MAX_LEN:
             return jsonify({"error": f"Задовге повідомлення (до {MAX_LEN} символів)"}), 400
-        ok, warning, real = send_by_url(uid, url, peer_identity, msg_text, att)
+        ok, warning, real, url = send_by_url(uid, url, peer_identity, msg_text, att)
         return jsonify({"ok": True, **({"warning": warning} if warning else {}), "peer_url": url,
                         **({"peer_identity": real} if real else {})})
     db  = get_db()

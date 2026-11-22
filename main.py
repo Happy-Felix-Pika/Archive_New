@@ -12,7 +12,22 @@ from blueprints.tags import _rebuild_tags_cache, _tags_cache_background_loop
 app = create_app()
 
 
+def _drop_old_nextcloud_settings():
+    """Nextcloud прибрано повністю — стираємо його старі налаштування (там був пароль)."""
+    try:
+        from core.config import load_config, save_config
+        cfg = load_config()
+        if any(k in cfg for k in ("nextcloud", "nextcloud_db")):
+            for k in ("nextcloud", "nextcloud_db"):
+                cfg.pop(k, None)
+            save_config(cfg)
+            print("  ✓ Старі налаштування Nextcloud прибрано з конфігу")
+    except Exception as e:
+        print(f"  ⚠ Не вдалося прибрати налаштування Nextcloud: {e}")
+
+
 def _startup():
+    _drop_old_nextcloud_settings()
     ensure_tables()
     try:
         recover_stuck_jobs()   # задачі, перервані попереднім запуском

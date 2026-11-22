@@ -730,7 +730,30 @@ def api_external_catalog_list(archive_id):
     resp, err = call_external_api(cfg, "/api/external-access/catalog/list", params={"path": path})
     if err:
         return jsonify({"error": err}), 403
-    return jsonify(resp.json())
+    data = resp.json()
+    # «★» — НАШЕ улюблене з того архіву, а не його власника
+    favs = _my_external_fav_ids(archive_id)
+    for f in data.get("files") or []:
+        f["is_favorite"] = f.get("id") in favs
+    return jsonify(data)
+
+
+def _my_external_fav_ids(archive_id) -> set:
+    db = get_db()
+    try:
+        return {r["remote_download_id"] for r in qq(db, """SELECT remote_download_id FROM external_favorites
+                                                           WHERE user_id=%s AND archive_id=%s""",
+                                                     (current_user_id(), archive_id))}
+    finally:
+        db.close()
+
+
+@bp.route("/api/external-archives/<archive_id>/favorite-ids")
+def api_external_favorite_ids(archive_id):
+    """id файлів того архіву, які я позначив ★ — щоб показати зірочку одразу."""
+    if not _get_external_cfg_or_404(archive_id):
+        return jsonify({"error": "Архів не знайдено"}), 404
+    return jsonify(sorted(_my_external_fav_ids(archive_id)))
 
 
 @bp.route("/api/external-archives/<archive_id>/catalog/file")
@@ -890,15 +913,21 @@ def api_external_favorite_toggle(archive_id):
     cfg = _get_external_cfg_or_404(archive_id)
     if not cfg:
         return jsonify({"error": "Архів не знайдено"}), 404
-    # Перевіряємо, що ключ ще дійсний, ПЕРЕД тим, як зберігати фаворит у себе
-    resp, err = call_external_api(cfg, "/api/external-access/gallery/ids")
+    body = flask_request.get_json(silent=True) or {}
+    try:
+        remote_id = int(body.get("download_id"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "download_id required"}), 400
+    # Ключ ще дійсний і цей файл нам відкритий? Питаємо лише про сам файл —
+    # повний список id великого архіву тягнувся б вічність і падав по таймауту
+    resp, err = call_external_api(cfg, f"/api/external-access/gallery/meta/{remote_id}")
     if err:
         return jsonify({"error": err}), 403
-
-    body = flask_request.get_json(silent=True) or {}
-    remote_id = body.get("download_id")
-    if not remote_id:
-        return jsonify({"error": "download_id required"}), 400
+    try:
+        if resp.json().get("error"):
+            return jsonify({"error": resp.json()["error"]}), 404
+    except ValueError:
+        pass
     try:
         db = get_db()
         with db.cursor() as cur:

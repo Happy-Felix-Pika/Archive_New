@@ -34,5 +34,10 @@
  "Порожня нотатка": "Empty note",
  "Файл більше недоступний": "The file is no longer available",
  "Файл недоступний": "File unavailable",
- "Цей файл надіслати не можна": "This file can't be sent"
+ "Цей файл надіслати не можна": "This file can't be sent",
+ "{0}: код {1}": "{0}: code {1}",
+ "Не вдалося підтвердити відправника — його архів недоступний з боку адресата ({0}). Перевір «Конфіг → Пошта → Адреса архіву» у відправника": "Couldn't verify the sender — their archive isn't reachable from the recipient's side ({0}). Check «Config → Mail → Archive address» on the sender's archive",
+ "Тека недоступна": "Folder unavailable",
+ "Файл завеликий (до 100 МБ)": "File is too large (up to 100 MB)",
+ "Файл не вибрано": "No file selected"
 }

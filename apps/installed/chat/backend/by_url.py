@@ -50,7 +50,8 @@ def _is_private_host(host: str) -> bool:
 
 
 def normalize_url(raw: str) -> str | None:
-    """Адреса архіву → «https://host[:port]». http — лише для локальної мережі."""
+    """Адреса архіву → «схема://host[:port]». Без схеми: локальна мережа — http, решта — https.
+    Явно вказану схему й порт не чіпаємо: архів може бути й на http://ip:порт."""
     raw = (raw or "").strip()
     if not raw:
         return None
@@ -64,13 +65,13 @@ def normalize_url(raw: str) -> str | None:
         return None
     if u.scheme not in ("http", "https") or not u.hostname:
         return None
-    scheme = u.scheme
-    if scheme == "http" and not _is_private_host(u.hostname):
-        # публічний архів за проксі (Cloudflare/nginx) часто «бачить» себе як http —
-        # назовні він усе одно https, тож не відкидаємо, а виправляємо схему
-        scheme = "https"
-    host = u.hostname + (f":{u.port}" if u.port and not (scheme == "https" and u.scheme == "http") else "")
-    return f"{scheme}://{host}".lower()
+    host = u.hostname + (f":{u.port}" if u.port else "")
+    return f"{u.scheme}://{host}".lower()
+
+
+def _base_of(url: str) -> str:
+    u = urlsplit(url)
+    return f"{u.scheme}://{u.netloc}".lower()
 
 
 def my_public_url() -> str:
@@ -96,8 +97,22 @@ def _my_name(db, uid) -> str:
     return (me["display_name"] or me["email"].split("@")[0]) if me else "user"
 
 
+def _move_peer(uid: int, old: str, new: str):
+    """Архів насправді живе за іншою адресою (редирект) — переносимо розмову туди."""
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute("""UPDATE chat_messages SET peer_url=%s,
+                                  peer_label=CONCAT(SUBSTRING_INDEX(peer_label,'@',1),'@',%s)
+                           WHERE owner_user_id=%s AND peer_url=%s""",
+                        (new, urlsplit(new).netloc, uid, old))
+        db.commit()
+    finally:
+        db.close()
+
+
 def send_by_url(uid: int, peer_url: str, peer_identity: str, body: str, attachment: dict | None = None):
-    """Надіслати в архів за адресою. Повертає (ok, warning|None, справжній нік адресата|None)."""
+    """Надіслати в архів за адресою. Повертає (ok, warning|None, справжній нік|None, справжня адреса)."""
     import requests as req
     token = secrets.token_urlsafe(24)
     db = get_db()
@@ -118,23 +133,32 @@ def send_by_url(uid: int, peer_url: str, peer_identity: str, body: str, attachme
     if (me_host in ("localhost", "127.0.0.1", "::1") or _is_private_host(me_host)) \
             and not _is_private_host(urlsplit(peer_url).hostname or ""):
         return True, ("Не доставлено: твій архів не знає своєї зовнішньої адреси (бачить себе як "
-                      f"{me_url}). Вкажи її в «Конфіг → Пошта → Адреса архіву»"), None
+                      f"{me_url}). Вкажи її в «Конфіг → Пошта → Адреса архіву»"), None, peer_url
     try:
+        # http → https редирект на POST губить тіло — спершу дізнаємось справжню адресу
+        try:
+            probe = req.get(f"{peer_url}/api/external-access/chat/verify", params={"token": "-"}, timeout=10)
+            real_base = _base_of(probe.url)
+            if real_base != peer_url:
+                _move_peer(uid, peer_url, real_base)
+                peer_url = real_base
+        except Exception:
+            pass
         r = req.post(f"{peer_url}/api/external-access/chat/inbox",
                      json={"sender_base_url": me_url, "sender_name": name,
                            "to_nick": peer_identity or "", "body": body, "token": token,
                            **({"attachment": {k: attachment[k] for k in ("name", "ext", "url")}} if attachment else {})},
                      timeout=20)
     except Exception as e:
-        return True, f"Збережено, але архів не відповідає: {e}", None
+        return True, f"Збережено, але архів не відповідає: {e}", None, peer_url
     if r.status_code == 404 and "json" not in (r.headers.get("Content-Type") or ""):
-        return True, "Той архів старої версії — він ще не вміє приймати повідомлення за адресою", None
+        return True, "Той архів старої версії — він ще не вміє приймати повідомлення за адресою", None, peer_url
     if r.status_code != 200:
         try:
             err = r.json().get("error")
         except ValueError:
             err = None
-        return True, err or f"Не доставлено (код {r.status_code})", None
+        return True, err or f"Не доставлено (код {r.status_code})", None, peer_url
     # «власнику» — тепер знаємо його нік: розмова одна в обидва боки
     real = (r.json() or {}).get("recipient") if "json" in (r.headers.get("Content-Type") or "") else None
     if real and real != (peer_identity or ""):
@@ -147,7 +171,7 @@ def send_by_url(uid: int, peer_url: str, peer_identity: str, body: str, attachme
             db.commit()
         finally:
             db.close()
-    return True, None, real
+    return True, None, real, peer_url
 
 
 @bp.route("/api/external-access/chat/verify")
@@ -214,14 +238,27 @@ def api_chat_inbox():
     finally:
         db.close()
 
-    # «Це справді ти?» — питаємо сам архів-відправник за його адресою
-    try:
-        v = req.get(f"{sender}/api/external-access/chat/verify", params={"token": token}, timeout=10)
-        ok = v.status_code == 200 and v.json().get("ok") and v.json().get("sender_name") == name
-    except Exception:
-        ok = False
+    # «Це справді ти?» — питаємо сам архів-відправник за його адресою.
+    # Архів за проксі може не знати своєї схеми: http → пробуємо й https;
+    # після редиректів запамʼятовуємо справжню адресу — на неї й відповідатимемо.
+    candidates = [sender]
+    if sender.startswith("http://"):
+        candidates.append("https://" + sender[7:])
+    ok, why = False, ""
+    for base in candidates:
+        try:
+            v = req.get(f"{base}/api/external-access/chat/verify", params={"token": token}, timeout=10)
+            j = v.json() if "json" in (v.headers.get("Content-Type") or "") else {}
+            if v.status_code == 200 and j.get("ok") and j.get("sender_name") == name:
+                ok, sender = True, _base_of(v.url)
+                break
+            why = f"{base}: код {v.status_code}"
+        except Exception as e:
+            why = f"{base}: {type(e).__name__}"
     if not ok:
-        return jsonify({"error": "Не вдалося підтвердити відправника — адреса архіву-відправника недоступна або не його"}), 403
+        print(f"  ✗ Чат: не підтверджено відправника {name} ({why})")
+        return jsonify({"error": f"Не вдалося підтвердити відправника — його архів недоступний з боку адресата ({why}). "
+                                 "Перевір «Конфіг → Пошта → Адреса архіву» у відправника"}), 403
 
     db = get_db()
     try:

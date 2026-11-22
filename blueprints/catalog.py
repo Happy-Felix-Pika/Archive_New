@@ -178,14 +178,15 @@ def api_catalog_list(hidden_folders_override=None):
     # Для свого каталогу — id файлу в архіві та «улюблене»: з ними перегляд
     # показує автора й посилання на оригінал, а дії працюють з базою.
     # Файл без id — лежить у сховищі, але в архів не внесений.
-    if hidden_folders_override is None and files:
+    # Для чужого архіву (ключ доступу) — теж id: щоб він міг додати файл у своє ★.
+    if files:
         try:
             from core.files_api import file_ids_by_paths
             db = get_db()
             prefix = f"{rel_path}/" if rel_path else ""
             ids = file_ids_by_paths([prefix + f["name"] for f in files], db)
             favs = set()
-            if ids:
+            if ids and hidden_folders_override is None:
                 ph = ",".join(["%s"] * len(ids))
                 favs = {r["download_id"] for r in qq(
                     db, f"SELECT download_id FROM user_favorites WHERE user_id=%s AND download_id IN ({ph})",
