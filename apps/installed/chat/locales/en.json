@@ -19,5 +19,20 @@
  "Отримувач заблокував повідомлення з цього архіву": "The recipient has blocked messages from this archive",
  "Забагато повідомлень з цього архіву — спробуй пізніше": "Too many messages from this archive — try later",
  "Не вдалося підтвердити відправника — адреса архіву-відправника недоступна або не його": "Couldn't verify the sender — the sender archive's address is unreachable or not theirs",
- "Вкажи адресу": "Enter an address"
+ "Вкажи адресу": "Enter an address",
+ "Видалити чат": "Delete chat",
+ "Додати файл з архіву": "Add a file from the archive",
+ "Надіслати файл з архіву": "Send a file from the archive",
+ "Нова нотатка": "New note",
+ "Нотатки": "Notes",
+ "Пошук за назвою файлу": "Search by file name",
+ "Файл з архіву": "File from the archive",
+ "Ця розмова більше не підтримується": "This conversation is no longer supported",
+ "Архів-відправник не знає своєї зовнішньої адреси — вкажи її в «Конфіг → Пошта → Адреса архіву»": "The sending archive doesn't know its public address — set it in «Config → Mail → Archive address»",
+ "Не доставлено: твій архів не знає своєї зовнішньої адреси (бачить себе як {0}). Вкажи її в «Конфіг → Пошта → Адреса архіву»": "Not delivered: your archive doesn't know its public address (it sees itself as {0}). Set it in «Config → Mail → Archive address»",
+ "Повідомлення не знайдено": "Message not found",
+ "Порожня нотатка": "Empty note",
+ "Файл більше недоступний": "The file is no longer available",
+ "Файл недоступний": "File unavailable",
+ "Цей файл надіслати не можна": "This file can't be sent"
 }
