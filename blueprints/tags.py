@@ -14,16 +14,21 @@ bp = Blueprint("tags", __name__)
 
 # ── Tags API ──────────────────────────────────────────────────────────────
 
+_CAT_ORDER = {"character": 0, "species": 1, "general": 2, "other": 3}
+
+
 def _compute_tags(db):
-    rows = qq(db, """
-        SELECT t.id, t.name, t.category, COUNT(dt.download_id) AS usage_count
-        FROM tags t
-        LEFT JOIN download_tags dt ON dt.tag_id = t.id
-        GROUP BY t.id
-        ORDER BY t.category, usage_count DESC, t.name ASC
-    """)
-    for r in rows:
-        r["usage_count"] = int(r["usage_count"] or 0)
+    """Два прості запити замість JOIN + GROUP BY + сортування в базі: лічильники
+    — прохід лише по індексу tag_id, назви — маленька таблиця tags; зводимо
+    й сортуємо в пам'яті. На великому архіві в рази швидше."""
+    import pymysql
+    with db.cursor(pymysql.cursors.Cursor) as cur:
+        cur.execute("SELECT tag_id, COUNT(*) FROM download_tags GROUP BY tag_id")
+        counts = dict(cur.fetchall())
+        cur.execute("SELECT id, name, category FROM tags")
+        rows = [{"id": i, "name": n, "category": c, "usage_count": int(counts.get(i, 0))}
+                for i, n, c in cur.fetchall()]
+    rows.sort(key=lambda r: (_CAT_ORDER.get(r["category"], 9), -r["usage_count"], r["name"]))
     return rows
 
 

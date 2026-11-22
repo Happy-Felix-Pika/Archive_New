@@ -132,6 +132,8 @@ class WarmCache:
             if self.persist:
                 self._save(data)
             self.cost = time.monotonic() - t0
+            if self.cost >= 3:
+                print(f"  ⏱ Кеш «{self.name}» порахувався за {self.cost:.1f} с")
             self.computes += 1
             self._last_done = time.monotonic()
 
@@ -183,6 +185,17 @@ def start_all():
         c.start()
 
 
+# Запити, які файлів, тегів, авторів і статистики не змінюють: чат, посилання,
+# вхід, налаштування, черга задач. Раніше КОЖНЕ повідомлення в чаті чи
+# позначка «прочитано» запускало перерахунок усіх кешів (тегів, авторів…) —
+# на великому архіві база безперервно щось рахувала.
+_NO_DATA_CHANGE = (
+    "/api/chat", "/api/external-access/chat", "/api/shares", "/api/auth", "/api/user-settings",
+    "/api/config", "/api/jobs", "/api/apps/sourcefind/settings", "/api/live/search",
+    "/api/external-archives/", "/api/password", "/api/branding",
+)
+
+
 def install(flask_app):
     """Підписка на зміни: успішні запити, що щось міняють, і події файлів."""
     from flask import request as flask_request
@@ -190,7 +203,8 @@ def install(flask_app):
 
     @flask_app.after_request
     def _warmcache_after(resp):
-        if flask_request.method in ("POST", "PUT", "PATCH", "DELETE") and resp.status_code < 400:
+        if (flask_request.method in ("POST", "PUT", "PATCH", "DELETE") and resp.status_code < 400
+                and not flask_request.path.startswith(_NO_DATA_CHANGE)):
             invalidate_all()
         return resp
 
