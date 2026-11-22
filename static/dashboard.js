@@ -3610,12 +3610,13 @@ async function chatUpdateUnreadBadge() {
     // Чат — застосунок, його може не бути встановлено. Тоді просто
     // ховаємо лічильник, а не сиплемо помилками щосекунди.
     const resp = await fetch(`${API}/api/chat/unread-count`);
-    if (resp.status === 404) { const b=document.getElementById('chat-unread-badge'); if (b) b.style.display='none'; return; }
+    if (resp.status === 404) { const b=document.getElementById('chat-unread-badge'); if (b) b.classList.remove('show'); return; }
     const r = await resp.json();
     const badge = document.getElementById('chat-unread-badge');
     if (badge) {
-      if (r.count > 0) { badge.textContent = r.count; badge.style.display = ''; }
-      else { badge.style.display = 'none'; }
+      // .nav-badge схований класом — показуємо класом .show (style.display='' його не перебивав)
+      badge.textContent = r.count > 0 ? (r.count > 99 ? '99+' : r.count) : '';
+      badge.classList.toggle('show', r.count > 0);
     }
     document.title = r.count > 0 ? `(${r.count}) ${_chatBaseTitle}` : _chatBaseTitle;
     _chatMaybeNotify(r.latest);
@@ -3637,10 +3638,10 @@ function _chatMaybeNotify(m) {
   _chatNotifiedId = m.id;
   try { localStorage.setItem('chatNotifiedId', String(m.id)); } catch {}
   if (_chatIsOpenThread(m)) return;                       // і так дивишся в цю розмову
-  const text = `💬 ${m.peer_label}: ${m.body}`;
-  toast(text, 'ok');
+  _chatPing();
+  _chatToast(m);
   try {
-    if ('Notification' in window && Notification.permission === 'granted' && document.hidden) {
+    if ('Notification' in window && Notification.permission === 'granted' && (document.hidden || currentPage !== 'chat')) {
       const n = new Notification(`💬 ${m.peer_label}`, { body: m.body, tag: 'chat-' + m.id, icon: '/static/icons/icon-192.png' });
       n.onclick = () => {
         window.focus(); n.close();
@@ -3652,10 +3653,73 @@ function _chatMaybeNotify(m) {
   } catch {}
 }
 
+// Короткий дзвіночок без файлів — два тони через WebAudio
+let _chatAudio = null;
+function _chatPing() {
+  try {
+    if (localStorage.getItem('chatSound') === 'off') return;
+    _chatAudio = _chatAudio || new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = _chatAudio;
+    if (ctx.state === 'suspended') ctx.resume();
+    [[880, 0], [1320, 0.13]].forEach(([f, at]) => {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = 'sine'; o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, ctx.currentTime + at);
+      g.gain.exponentialRampToValueAtTime(0.18, ctx.currentTime + at + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + at + 0.25);
+      o.connect(g).connect(ctx.destination);
+      o.start(ctx.currentTime + at); o.stop(ctx.currentTime + at + 0.3);
+    });
+  } catch {}
+}
+
+// Помітна плашка нового повідомлення: клік — відкрити розмову
+function _chatToast(m) {
+  document.getElementById('chat-pop')?.remove();
+  const el = document.createElement('div');
+  el.id = 'chat-pop';
+  el.className = 'chat-pop';
+  el.innerHTML = `<div style="font-size:20px">💬</div>
+    <div style="min-width:0;flex:1"><div style="font-weight:600;font-size:13px" data-no-i18n>${esc(m.peer_label)}</div>
+    <div style="font-size:12.5px;opacity:.85;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" data-no-i18n>${esc(m.body)}</div></div>
+    <span style="opacity:.6;padding:0 4px" onclick="event.stopPropagation();this.parentElement.remove()">✕</span>`;
+  el.onclick = () => {
+    el.remove();
+    showPage('chat');
+    chatOpenThread({ peer_local_user_id: m.peer_local_user_id, peer_url: m.peer_url,
+                     peer_identity: m.peer_identity, label: m.peer_label });
+  };
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 12000);
+}
+
+function chatToggleSound() {
+  const off = localStorage.getItem('chatSound') === 'off';
+  localStorage.setItem('chatSound', off ? 'on' : 'off');
+  _chatRenderNotifyBtn();
+  if (off) _chatPing();
+}
+
+// Дозвіл на системні сповіщення браузер дає лише після дії користувача —
+// питаємо один раз при першому кліку будь-де
+document.addEventListener('click', function _askOnce() {
+  document.removeEventListener('click', _askOnce, true);
+  try {
+    if ('Notification' in window && Notification.permission === 'default' && !localStorage.getItem('chatAskedNotif')) {
+      localStorage.setItem('chatAskedNotif', '1');
+      Notification.requestPermission().then(_chatRenderNotifyBtn);
+    }
+    // і «розбудити» звук, щоб потім він грав без кліку
+    _chatAudio = _chatAudio || new (window.AudioContext || window.webkitAudioContext)();
+  } catch {}
+}, true);
+
 function _chatRenderNotifyBtn() {
   const b = document.getElementById('chat-notify-btn');
   if (!b) return;
   b.style.display = ('Notification' in window && Notification.permission === 'default') ? '' : 'none';
+  const s = document.getElementById('chat-sound-btn');
+  if (s) s.textContent = localStorage.getItem('chatSound') === 'off' ? '🔇 Звук вимкнено' : '🔔 Звук увімкнено';
 }
 
 async function chatEnableNotifications() {

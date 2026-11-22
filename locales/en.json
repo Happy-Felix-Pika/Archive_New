@@ -1574,5 +1574,7 @@
  "Чим поділитися?": "What to share?",
  "Увесь пул «{0}»": "The whole pool «{0}»",
  "Видно всі сторінки пулу по порядку.": "All pages of the pool are shown in order.",
- "Пул не знайдено": "Pool not found"
+ "Пул не знайдено": "Pool not found",
+ "Звук увімкнено": "Sound on",
+ "Звук вимкнено": "Sound off"
 }
