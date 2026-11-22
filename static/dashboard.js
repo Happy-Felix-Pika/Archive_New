@@ -5758,7 +5758,17 @@ async function dbSetupSubmit() {
     const d = await r.json();
     if (!r.ok) { dbSetupShowError(d.error || t('err.dbconnectfail')); return; }
 
-    // Успіх — переходимо до звичайного auth flow
+    // Успіх — переходимо до звичайного auth flow. Якщо сервер
+    // перезапускається (щоб підхопити застосунки) — чекаємо, поки підніметься.
+    if (d.restarting) {
+      dbSetupShowError('База підключена. Архів перезапускається…');
+      for (let i = 0; i < 30; i++) {
+        await new Promise(res => setTimeout(res, 2500));
+        try { if ((await fetch('/api/db/status')).ok) break; } catch {}
+      }
+      location.reload();
+      return;
+    }
     await startAuthFlow();
   } catch (e) {
     dbSetupShowError(t('err.dbserverconn'));

@@ -175,7 +175,14 @@ class AppManager:
 
     def load_all(self, flask_app):
         found = self.discover()
-        db = get_db()
+        try:
+            db = get_db()
+        except Exception as e:
+            # База ще не налаштована (нова установка) або недоступна: ядро
+            # стартує саме — браузер покаже екран «Підключення до бази».
+            # Застосунки підхопляться після перезапуску з робочою базою.
+            print(f"  ⚠ База недоступна — застосунки не завантажено: {e}")
+            return
         try:
             with db.cursor() as cur:
                 cur.execute("SELECT id, status FROM apps")

@@ -259,7 +259,27 @@ def api_db_setup():
     # Створюємо таблиці одразу після успішного підключення
     ensure_tables()
 
-    return jsonify({"ok": True})
+    # Застосунки на старті не завантажились (бази не було) — перезапускаємо
+    # процес сам себе, щоб вони підхопились. Відповідь встигає піти.
+    from core.app_manager import manager
+    restarting = not manager.apps
+    if restarting:
+        import sys, threading, time
+
+        def _reexec():
+            time.sleep(1.5)
+            print("  ↻ База підключена — перезапуск, щоб завантажити застосунки")
+            # werkzeug лишає слухаючий сокет у спадок новому процесу —
+            # закриваємо, інакше новий не зможе зайняти той самий порт
+            fd = os.environ.pop("WERKZEUG_SERVER_FD", None)
+            if fd:
+                try:
+                    os.close(int(fd))
+                except OSError:
+                    pass
+            os.execv(sys.executable, getattr(sys, "orig_argv", None) or [sys.executable] + sys.argv)
+        threading.Thread(target=_reexec, daemon=True).start()
+    return jsonify({"ok": True, "restarting": restarting})
 
 
 # ── Коди допуску (тільки адмін) ────────────────────────────────────────────

@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .secret_key
 VERSION.json
+archiver_config.json
+pending_review/
+temp_downloads/
