@@ -94,6 +94,8 @@ def apply_candidate(db, fnd, file_id, cand, cands, method_status="applied") -> i
                                  "also": F.extra_links(cand, cands)}, ensure_ascii=False),
                      added))
     db.commit()
+    if added:
+        _invalidate_tags()                       # нові теги — одразу в списку тегів
     return added
 
 
@@ -202,6 +204,43 @@ def todo_count():
     return _todo_cnt["n"]
 
 
+def _retag_missing(db, job):
+    """Знайдені раніше, але без тегів (помилка з форматом e621) — дотягуємо теги."""
+    from core.db import qq
+    rows = qq(db, """SELECT file_id, site, site_id, url, method, score FROM srcfind_results
+                     WHERE status='applied' AND COALESCE(tags_added,0)=0 AND site IN ('e621','inkbunny')""")
+    if not rows:
+        return
+    job.progress(0, f"Дотягую теги для вже знайдених: {len(rows)}")
+    fnd = _make_finder()
+    fixed = 0
+    for r in rows:
+        if job.cancelled():
+            return
+        try:
+            tags = fnd.tags_for({"site": r["site"], "site_id": r["site_id"]})
+        except Exception as e:
+            print(f"  ⚠ Теги для {r['site']} {r['site_id']}: {e}")
+            continue
+        n = _save_tags(db, r["file_id"], tags)
+        if n:
+            with db.cursor() as cur:
+                cur.execute("UPDATE srcfind_results SET tags_added=%s WHERE file_id=%s", (n, r["file_id"]))
+            db.commit()
+            fixed += 1
+    if fixed:
+        print(f"🔎 Дотягнуто теги для {fixed} уже знайдених файлів")
+        _invalidate_tags()
+
+
+def _invalidate_tags():
+    try:
+        from blueprints.tags import _invalidate_tags_cache
+        _invalidate_tags_cache()
+    except Exception:
+        pass
+
+
 # ── фонова задача ────────────────────────────────────────────────────
 
 def run_scan(job, params):
@@ -209,6 +248,7 @@ def run_scan(job, params):
     job.progress(0, "Збираю список файлів без джерела…")
     db = get_db()
     try:
+        _retag_missing(db, job)
         rows = _todo(db, params.get("folder") or "", bool(params.get("recheck")))
         total = len(rows)
         job.progress(0, f"Файлів без джерела: {total} — починаю")

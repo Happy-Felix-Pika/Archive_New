@@ -1245,7 +1245,11 @@ class E621Downloader:
         data = r.json()
         if isinstance(data, dict) and isinstance(data.get('post'), dict):
             data = data['post']
-        return e621_norm_post(data) if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            return None
+        post = e621_norm_post(data)
+        self.categorize([post])        # новий формат: теги без категорій — інакше їх «не було б»
+        return post
 
     def search_posts(self, tags_query: str, limit: int = 60, page: int = 1) -> list:
         """
