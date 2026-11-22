@@ -127,7 +127,7 @@ def _stream_process(proc, job_id=None):
 # Що модератор може запускати: лише одного автора — скачати, знайти його
 # дублікати, перевірити пули. Повні проходи, синхронізація, очищення,
 # міграції — лише адмін.
-_MOD_FLAGS = {"artist", "find_duplicates", "recheck_pools", "subfolder", "dry_run"}
+_MOD_FLAGS = {"artist", "find_duplicates", "recheck_pools", "subfolder", "dry_run", "single_post"}
 _ADMIN_FLAGS = {"migrate_tags", "sync_all", "cleanup", "cleanup_dry", "backfill_sizes"}
 
 
@@ -150,6 +150,7 @@ def api_run():
         if body.get("migrate_tags"): flags.append("--migrate-tags")
         if body.get("sync_all"):     flags.append("--sync-all")
         if body.get("artist"):       flags.extend(["--artist", str(body.get("artist"))])
+        if body.get("single_post"):  flags.extend(["--single-post", str(body.get("single_post"))])
         if body.get("cleanup_dry"):  flags.append("--cleanup-dry")
         elif body.get("cleanup"):    flags.append("--cleanup")
         if body.get("find_duplicates"): flags.append("--find-duplicates")

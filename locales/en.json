@@ -1517,5 +1517,10 @@
  "Архів розблоковано": "Archive unblocked",
  "Впиши адресу архіву": "Enter the archive address",
  "заблоковано": "blocked",
- "власник": "owner"
+ "власник": "owner",
+ "Лише цей арт": "Only this art",
+ "Лише цю роботу — у теку автора, без решти його бібліотеки": "Only this work — into the artist's folder, without the rest of their library",
+ "У роботи кілька авторів: {0} У чию теку покласти?": "The work has several artists: {0} Whose folder should it go into?",
+ "Автора не вказано. У яку теку автора покласти?": "No artist given. Which artist folder should it go into?",
+ "Качаю цей арт у «{0}» — хід видно у вкладці «Запуск»": "Downloading this art into «{0}» — progress is in the «Run» tab"
 }
