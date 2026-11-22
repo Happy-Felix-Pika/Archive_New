@@ -145,6 +145,8 @@ class Finder:
 
     def _e621_cand(self, p: dict, method, score, sure):
         tags = p.get("tags") or {}
+        if not isinstance(tags, dict):
+            tags = {}
         return {"site": "e621", "site_id": str(p.get("id")), "url": page_url("e621", p.get("id")),
                 "artists": [a for a in (tags.get("artist") or []) if a not in ("conditional_dnp", "sound_warning", "unknown_artist")],
                 "method": method, "score": score, "sure": sure,
@@ -277,6 +279,10 @@ class Finder:
             if score < IQDB_MAYBE or not post.get("id"):
                 continue
             post = e621_norm_post(post)
+            try:
+                dl.categorize([post])            # теги за категоріями (новий формат e621)
+            except Exception:
+                pass
             out.append(self._e621_cand(post, "iqdb", score, score >= IQDB_SURE))
         return out
 
@@ -284,7 +290,8 @@ class Finder:
     def tags_for(self, cand: dict) -> dict | list | None:
         if cand["site"] == "e621":
             post = cand.get("_post")
-            if not post or not post.get("tags"):
+            tags = (post or {}).get("tags")
+            if not post or not tags or (isinstance(tags, dict) and "_flat" in tags):
                 post = self.e621().get_post(cand["site_id"])
             if not post:
                 return None
