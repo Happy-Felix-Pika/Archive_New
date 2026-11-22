@@ -3,8 +3,6 @@
 
 from flask import Blueprint, jsonify, request as flask_request
 
-
-from blueprints.federation import get_external_archives
 from core.auth import current_user_id
 from core.db import get_db, q, qq
 
@@ -17,26 +15,32 @@ def api_chat_conversations():
     uid = current_user_id()
     db  = get_db()
     rows = qq(db, """
-        SELECT peer_label, peer_local_user_id, peer_archive_id, peer_identity, peer_url,
-               body AS last_body, created_at AS last_at,
+        SELECT peer_label, peer_local_user_id, peer_identity, peer_url,
+               body AS last_body, attachment AS last_att, created_at AS last_at,
                EXISTS(SELECT 1 FROM chat_blocked b WHERE b.owner_user_id=%s AND b.peer_url=m1.peer_url) AS blocked,
                (SELECT COUNT(*) FROM chat_messages m2
                 WHERE m2.owner_user_id=%s AND m2.direction='in' AND m2.is_read=0
                   AND ((m2.peer_local_user_id <=> m1.peer_local_user_id)
-                   AND (m2.peer_archive_id <=> m1.peer_archive_id)
                    AND (m2.peer_url <=> m1.peer_url)
                    AND (m2.peer_identity <=> m1.peer_identity))
                ) AS unread
         FROM chat_messages m1
         WHERE owner_user_id=%s AND id IN (
             SELECT MAX(id) FROM chat_messages WHERE owner_user_id=%s
-            GROUP BY peer_local_user_id, peer_archive_id, peer_url, peer_identity
+            GROUP BY peer_local_user_id, peer_url, peer_identity
         )
         ORDER BY last_at DESC
     """, (uid, uid, uid, uid))
     db.close()
+    import json as _json
     for r in rows:
         if r["last_at"]: r["last_at"] = r["last_at"].isoformat()
+        if not r.get("last_body") and r.get("last_att"):
+            try:
+                r["last_body"] = "📎 " + (_json.loads(r["last_att"]).get("name") or "файл")
+            except ValueError:
+                r["last_body"] = "📎 файл"
+        r.pop("last_att", None)
     return jsonify(rows)
 
 
@@ -45,7 +49,6 @@ def api_chat_messages():
     """Історія переписки з конкретним співрозмовником — позначає вхідні як прочитані."""
     uid = current_user_id()
     peer_local_user_id = flask_request.args.get("peer_local_user_id")
-    peer_archive_id     = flask_request.args.get("peer_archive_id")
     peer_identity        = flask_request.args.get("peer_identity")
     peer_url             = flask_request.args.get("peer_url")
 
@@ -57,9 +60,6 @@ def api_chat_messages():
     elif peer_local_user_id:
         where.append("peer_local_user_id=%s")
         args.append(int(peer_local_user_id))
-    elif peer_archive_id and peer_identity:
-        where.append("peer_archive_id=%s AND peer_identity=%s")
-        args.extend([peer_archive_id, peer_identity])
     else:
         return jsonify({"error": "Вкажи співрозмовника"}), 400
 
@@ -68,8 +68,14 @@ def api_chat_messages():
     with db.cursor() as cur:
         cur.execute(f"UPDATE chat_messages SET is_read=1 WHERE {' AND '.join(where)} AND direction='in'", args)
     db.commit(); db.close()
+    import json as _json
     for r in rows:
         if r["created_at"]: r["created_at"] = r["created_at"].isoformat()
+        r.pop("deliver_token", None)
+        try:
+            r["attachment"] = _json.loads(r["attachment"]) if r.get("attachment") else None
+        except (ValueError, KeyError):
+            r["attachment"] = None
     return jsonify(rows)
 
 
@@ -87,12 +93,19 @@ def api_chat_send():
     body_data           = flask_request.get_json(silent=True) or {}
     msg_text            = (body_data.get("body") or "").strip()
     peer_local_user_id  = body_data.get("peer_local_user_id")
-    peer_archive_id     = body_data.get("peer_archive_id")
     peer_identity       = (body_data.get("peer_identity") or "").strip()
-    if not msg_text:
-        return jsonify({"error": "Порожнє повідомлення"}), 400
-
     uid = current_user_id()
+    att, att_json = None, None
+    if body_data.get("file_id"):
+        from .by_url import my_public_url
+        from .extras import make_attachment
+        att = make_attachment(uid, body_data.get("file_id"), my_public_url())
+        if not att:
+            return jsonify({"error": "Цей файл надіслати не можна"}), 404
+        import json as _json
+        att_json = _json.dumps(att, ensure_ascii=False)
+    if not msg_text and not att:
+        return jsonify({"error": "Порожнє повідомлення"}), 400
     if body_data.get("peer_url"):
         # будь-який архів за адресою — без взаємного підключення
         from .by_url import MAX_LEN, normalize_url, send_by_url
@@ -101,7 +114,7 @@ def api_chat_send():
             return jsonify({"error": "Невірна адреса архіву (потрібна https://, http — лише в локальній мережі)"}), 400
         if len(msg_text) > MAX_LEN:
             return jsonify({"error": f"Задовге повідомлення (до {MAX_LEN} символів)"}), 400
-        ok, warning, real = send_by_url(uid, url, peer_identity, msg_text)
+        ok, warning, real = send_by_url(uid, url, peer_identity, msg_text, att)
         return jsonify({"ok": True, **({"warning": warning} if warning else {}), "peer_url": url,
                         **({"peer_identity": real} if real else {})})
     db  = get_db()
@@ -116,43 +129,15 @@ def api_chat_send():
         recipient_label = recipient["display_name"] or recipient["email"]
         with db.cursor() as cur:
             cur.execute("""
-                INSERT INTO chat_messages (owner_user_id, direction, peer_label, peer_local_user_id, body, is_read)
-                VALUES (%s,'out',%s,%s,%s,1)
-            """, (uid, recipient_label, peer_local_user_id, msg_text))
+                INSERT INTO chat_messages (owner_user_id, direction, peer_label, peer_local_user_id, body, is_read, attachment)
+                VALUES (%s,'out',%s,%s,%s,1,%s)
+            """, (uid, recipient_label, peer_local_user_id, msg_text, att_json))
             cur.execute("""
-                INSERT INTO chat_messages (owner_user_id, direction, peer_label, peer_local_user_id, body)
-                VALUES (%s,'in',%s,%s,%s)
-            """, (peer_local_user_id, sender_label, uid, msg_text))
+                INSERT INTO chat_messages (owner_user_id, direction, peer_label, peer_local_user_id, body, attachment)
+                VALUES (%s,'in',%s,%s,%s,%s)
+            """, (peer_local_user_id, sender_label, uid, msg_text, att_json))
         db.commit(); db.close()
         return jsonify({"ok": True})
 
-    elif peer_archive_id and peer_identity:
-        archives = get_external_archives(uid)
-        cfg = next((a for a in archives if a["id"] == peer_archive_id), None)
-        if not cfg:
-            db.close()
-            return jsonify({"error": "Архів не знайдено"}), 404
-        peer_label = f"{peer_identity}@{cfg['label']}"
-        with db.cursor() as cur:
-            cur.execute("""
-                INSERT INTO chat_messages (owner_user_id, direction, peer_label, peer_archive_id, peer_identity, body, is_read)
-                VALUES (%s,'out',%s,%s,%s,%s,1)
-            """, (uid, peer_label, peer_archive_id, peer_identity, msg_text))
-        db.commit(); db.close()
-
-        # Реле — реально надсилаємо на сервер співрозмовника
-        import requests as req
-        base = cfg.get("base_url", "").rstrip("/")
-        my_base_url = flask_request.host_url.rstrip("/")
-        try:
-            r = req.post(f"{base}/api/external-access/chat/deliver",
-                         headers={"X-Access-Key": cfg.get("access_key", ""), "X-Identity": cfg.get("my_identity", "")},
-                         json={"sender_base_url": my_base_url, "to_nick": peer_identity, "body": msg_text},
-                         timeout=15)
-            if r.status_code != 200:
-                return jsonify({"ok": True, "warning": r.json().get("error", "Не вдалося доставити")})
-        except Exception as e:
-            return jsonify({"ok": True, "warning": f"Збережено локально, але не вдалося доставити: {e}"})
-        return jsonify({"ok": True})
-
+    db.close()
     return jsonify({"error": "Вкажи співрозмовника"}), 400

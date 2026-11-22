@@ -732,16 +732,44 @@
 
       <div id="chat-thread-view" style="display:none">
         <div class="back-btn" onclick="chatBackToList()">← Назад до розмов</div>
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap">
           <div style="font-weight:600;font-size:15px" id="chat-thread-title" data-no-i18n></div>
           <button class="btn btn-ghost btn-sm" id="chat-block-btn" style="margin-left:auto;display:none" onclick="chatToggleBlock()"></button>
+          <button class="btn btn-ghost btn-sm" id="chat-delete-btn" onclick="chatDeleteConversation()">🗑 Видалити чат</button>
         </div>
         <div id="chat-thread-messages" style="display:flex;flex-direction:column;gap:8px;max-height:60vh;overflow-y:auto;padding:4px;margin-bottom:12px"></div>
         <div style="display:flex;gap:8px">
+          <button class="btn btn-ghost" title="Надіслати файл з архіву" onclick="chatOpenFilePicker('chat')">📎</button>
           <input type="text" id="chat-input" placeholder="Повідомлення…" onkeydown="if(event.key==='Enter')chatSendMessage()"
-                 style="flex:1;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px 12px;color:var(--text);font-family:var(--mono);font-size:13px">
+                 style="flex:1;min-width:0;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px 12px;color:var(--text);font-family:var(--mono);font-size:13px">
           <button class="btn btn-primary" onclick="chatSendMessage()">➤</button>
         </div>
+      </div>
+
+      <div id="chat-notes-view" style="display:none">
+        <div class="back-btn" onclick="chatBackToList()">← Назад до розмов</div>
+        <div style="font-weight:600;font-size:15px;margin-bottom:12px">📝 Нотатки</div>
+        <div id="chat-notes-list" style="display:flex;flex-direction:column;gap:8px;max-height:60vh;overflow-y:auto;padding:4px;margin-bottom:12px"></div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-ghost" title="Додати файл з архіву" onclick="chatOpenFilePicker('notes')">📎</button>
+          <input type="text" id="chat-note-input" placeholder="Нова нотатка…" onkeydown="if(event.key==='Enter')chatAddNote()"
+                 style="flex:1;min-width:0;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px 12px;color:var(--text);font-family:var(--mono);font-size:13px">
+          <button class="btn btn-primary" onclick="chatAddNote()">＋</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- FILE FROM ARCHIVE PICKER -->
+    <div id="chat-file-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:150;align-items:center;justify-content:center"
+         onclick="if(event.target===this)this.style.display='none'">
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;width:min(620px,94vw);max-height:85vh;display:flex;flex-direction:column">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <div style="font-weight:600;font-size:14px">📎 Файл з архіву</div>
+          <button class="btn btn-ghost btn-sm" onclick="document.getElementById('chat-file-modal').style.display='none'">✕</button>
+        </div>
+        <input type="text" id="chat-file-q" placeholder="Пошук за назвою файлу…" oninput="chatSearchFilesDebounced()"
+               style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;color:var(--text);font-family:var(--mono);font-size:13px;margin-bottom:10px">
+        <div id="chat-file-results" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:8px;overflow-y:auto"></div>
       </div>
     </div>
 
@@ -755,7 +783,6 @@
         <div class="filter-toggle" id="chat-new-tab-toggle" style="margin-bottom:12px">
           <button class="filter-btn active" data-chatnewtab="local" onclick="chatNewSetTab('local')">Локальний юзер</button>
           <button class="filter-btn" data-chatnewtab="url" onclick="chatNewSetTab('url')">Архів за адресою</button>
-          <button class="filter-btn" data-chatnewtab="external" onclick="chatNewSetTab('external')">Підключений архів</button>
         </div>
         <div id="chat-new-local">
           <select id="chat-new-local-select" style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;color:var(--text);font-family:var(--mono);font-size:13px">
@@ -766,12 +793,6 @@
           <input type="text" id="chat-new-url-input" placeholder="https://адреса-архіву.com" style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;color:var(--text);font-family:var(--mono);font-size:13px;margin-bottom:8px">
           <input type="text" id="chat-new-url-nick" placeholder="Кому (нік) — порожньо = власнику архіву" style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;color:var(--text);font-family:var(--mono);font-size:13px">
           <div class="muted" style="font-size:11px;margin-top:6px">Підключати архіви одне до одного не треба — досить адреси.</div>
-        </div>
-        <div id="chat-new-external" style="display:none">
-          <select id="chat-new-archive-select" style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;color:var(--text);font-family:var(--mono);font-size:13px;margin-bottom:8px">
-            <option value="">— обери архів —</option>
-          </select>
-          <input type="text" id="chat-new-identity" placeholder="Нік юзера в тому архіві" style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;color:var(--text);font-family:var(--mono);font-size:13px">
         </div>
         <button class="btn btn-primary" style="width:100%;margin-top:14px" onclick="chatStartConversation()">Почати</button>
       </div>
@@ -958,7 +979,7 @@
 
 <script src="/i18n.js"></script>
 <script src="/static/i18n.js?v=1"></script>
-<script src="/static/dashboard.js?v=87"></script>
+<script src="/static/dashboard.js?v=88"></script>
 <script src="/static/apps.js?v=6"></script>
 
 </body>

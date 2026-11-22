@@ -3377,36 +3377,69 @@ function codesSetTab(tab) {
 
 // ── Чат ──────────────────────────────────────────────────────────────────
 
-let _chatCurrentPeer = null; // {peer_local_user_id} | {peer_archive_id, peer_identity} | {peer_url, peer_identity}
+let _chatCurrentPeer = null; // {peer_local_user_id} | {peer_url, peer_identity}
 let _chatPollTimer = null;
+let _chatPickTarget = 'chat';   // куди піде файл з архіву: 'chat' | 'notes'
+let _chatPickTimer = null;
+
+function _chatShowView(v) {
+  for (const id of ['chat-list-view', 'chat-thread-view', 'chat-notes-view'])
+    document.getElementById(id).style.display = id === v ? '' : 'none';
+}
 
 function chatBackToList() {
-  document.getElementById('chat-thread-view').style.display = 'none';
-  document.getElementById('chat-list-view').style.display = '';
+  _chatShowView('chat-list-view');
   _chatCurrentPeer = null;
   if (_chatPollTimer) { clearInterval(_chatPollTimer); _chatPollTimer = null; }
+  loadChatConversations();
+}
+
+function _chatPeerParams(p) {
+  const params = new URLSearchParams();
+  if (p.peer_url) { params.set('peer_url', p.peer_url); params.set('peer_identity', p.peer_identity || ''); }
+  else params.set('peer_local_user_id', p.peer_local_user_id);
+  return params;
+}
+
+function _chatAttHtml(a) {
+  if (!a?.url) return '';
+  const ext = (a.ext || '').toLowerCase();
+  if (['jpg','jpeg','png','gif','webp','bmp','avif'].includes(ext))
+    return `<a href="${esc(a.url)}" target="_blank" rel="noopener"><img src="${esc(a.url)}" loading="lazy" alt="" style="display:block;max-width:260px;max-height:260px;border-radius:6px;margin-top:4px"></a>`;
+  if (['mp4','webm','mov','m4v'].includes(ext))
+    return `<video src="${esc(a.url)}" controls preload="metadata" style="display:block;max-width:300px;border-radius:6px;margin-top:4px"></video>`;
+  if (['mp3','ogg','wav','flac','m4a'].includes(ext))
+    return `<audio src="${esc(a.url)}" controls preload="none" style="display:block;margin-top:4px"></audio>`;
+  return `<a href="${esc(a.url)}" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline">📎 ${esc(a.name || 'файл')}</a>`;
 }
 
 async function loadChatConversations() {
   const list = document.getElementById('chat-conversations-list');
   list.innerHTML = `<div style="color:var(--muted);font-size:12px">${t('common.loading')}</div>`;
+  const notesRow = `
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--surface2);border-radius:8px;cursor:pointer;border:1px dashed var(--border)" onclick="chatOpenNotes()">
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:500;font-size:13px">📝 ${t('chat.notes')}</div>
+          <div style="color:var(--muted);font-size:11.5px">${t('chat.notes_hint')}</div>
+        </div>
+      </div>`;
   try {
     const convos = await fetch(`${API}/api/chat/conversations`).then(r => r.json());
     if (!Array.isArray(convos) || !convos.length) {
-      list.innerHTML = `<div style="color:var(--muted);font-size:12px;padding:20px 0;text-align:center">Ще немає розмов — натисни "✎ Нове повідомлення"</div>`;
+      list.innerHTML = notesRow + `<div style="color:var(--muted);font-size:12px;padding:20px 0;text-align:center">Ще немає розмов — натисни "✎ Нове повідомлення"</div>`;
       return;
     }
-    list.innerHTML = convos.map(c => `
+    list.innerHTML = notesRow + convos.map(c => `
       <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--surface2);border-radius:8px;cursor:pointer"
-           onclick='chatOpenThread(${JSON.stringify({peer_local_user_id:c.peer_local_user_id, peer_archive_id:c.peer_archive_id, peer_url:c.peer_url, peer_identity:c.peer_identity, label:c.peer_label, blocked:!!c.blocked}).replace(/'/g,"&apos;")})'>
+           onclick='chatOpenThread(${JSON.stringify({peer_local_user_id:c.peer_local_user_id, peer_url:c.peer_url, peer_identity:c.peer_identity, label:c.peer_label, blocked:!!c.blocked}).replace(/'/g,"&apos;")})'>
         <div style="flex:1;min-width:0">
-          <div style="font-weight:500;font-size:13px">${c.peer_url ? '🌐 ' : ''}${esc(c.peer_label)}${c.blocked ? ' <span class="muted" style="font-size:11px">· заблоковано</span>' : ''}</div>
-          <div style="color:var(--muted);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.last_body)}</div>
+          <div style="font-weight:500;font-size:13px" data-no-i18n>${c.peer_url ? '🌐 ' : ''}${esc(c.peer_label)}${c.blocked ? ' <span class="muted" style="font-size:11px">· заблоковано</span>' : ''}</div>
+          <div style="color:var(--muted);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" data-no-i18n>${esc(c.last_body)}</div>
         </div>
         ${c.unread > 0 ? `<span style="background:var(--accent);color:#fff;border-radius:10px;padding:2px 7px;font-size:10.5px">${c.unread}</span>` : ''}
       </div>`).join('');
   } catch {
-    list.innerHTML = `<div style="color:var(--red);font-size:12px">${t('catalog.error')}</div>`;
+    list.innerHTML = notesRow + `<div style="color:var(--red);font-size:12px">${t('catalog.error')}</div>`;
   }
   chatUpdateUnreadBadge();
 }
@@ -3425,46 +3458,60 @@ async function chatUpdateUnreadBadge() {
 }
 
 function chatOpenThread(peer) {
+  if (!peer.peer_url && !peer.peer_local_user_id) { toast('Ця розмова більше не підтримується', 'err'); return; }
   _chatCurrentPeer = peer;
-  document.getElementById('chat-list-view').style.display = 'none';
-  document.getElementById('chat-thread-view').style.display = '';
+  _chatShowView('chat-thread-view');
   document.getElementById('chat-thread-title').textContent = peer.label;
   _chatRenderBlockBtn();
+  document.getElementById('chat-thread-messages').innerHTML = '';
   chatLoadMessages();
   if (_chatPollTimer) clearInterval(_chatPollTimer);
   _chatPollTimer = setInterval(chatLoadMessages, 5000);
 }
 
+let _chatLastSig = '';
 async function chatLoadMessages() {
   if (!_chatCurrentPeer) return;
-  const params = new URLSearchParams();
-  if (_chatCurrentPeer.peer_url) { params.set('peer_url', _chatCurrentPeer.peer_url); params.set('peer_identity', _chatCurrentPeer.peer_identity || ''); }
-  else if (_chatCurrentPeer.peer_local_user_id) params.set('peer_local_user_id', _chatCurrentPeer.peer_local_user_id);
-  else { params.set('peer_archive_id', _chatCurrentPeer.peer_archive_id); params.set('peer_identity', _chatCurrentPeer.peer_identity); }
   try {
-    const msgs = await fetch(`${API}/api/chat/messages?${params}`).then(r => r.json());
+    const msgs = await fetch(`${API}/api/chat/messages?${_chatPeerParams(_chatCurrentPeer)}`).then(r => r.json());
     const wrap = document.getElementById('chat-thread-messages');
     if (!Array.isArray(msgs)) return;
-    wrap.innerHTML = msgs.map(m => `
-      <div style="align-self:${m.direction==='out'?'flex-end':'flex-start'};max-width:75%;background:${m.direction==='out'?'var(--accent)':'var(--surface2)'};color:${m.direction==='out'?'#fff':'var(--text)'};border-radius:10px;padding:8px 12px;font-size:13px">
-        <span data-no-i18n>${esc(m.body)}</span>
-        <div style="font-size:9.5px;opacity:.7;margin-top:3px">${fmtDate(m.created_at)}</div>
-      </div>`).join('');
+    const sig = msgs.length + ':' + (msgs.at(-1)?.id || '');
+    if (sig === _chatLastSig && wrap.childElementCount) { chatUpdateUnreadBadge(); return; }  // без мерехтіння відео
+    _chatLastSig = sig;
+    wrap.innerHTML = msgs.map(m => {
+      const out = m.direction === 'out';
+      return `
+      <div class="chat-msg" style="align-self:${out?'flex-end':'flex-start'};max-width:75%;background:${out?'var(--accent)':'var(--surface2)'};color:${out?'#fff':'var(--text)'};border-radius:10px;padding:8px 12px;font-size:13px;position:relative">
+        ${m.body ? `<span data-no-i18n style="white-space:pre-wrap">${esc(m.body)}</span>` : ''}
+        ${_chatAttHtml(m.attachment)}
+        <div style="font-size:9.5px;opacity:.7;margin-top:3px;display:flex;gap:8px;align-items:center">
+          <span>${fmtDate(m.created_at)}</span>
+          <span class="chat-msg-pin" title="${t('chat.to_notes')}" style="cursor:pointer;margin-left:auto" onclick="chatMsgToNotes(${m.id})">📌</span>
+        </div>
+      </div>`; }).join('');
     wrap.scrollTop = wrap.scrollHeight;
     chatUpdateUnreadBadge();
   } catch {}
 }
 
-async function chatSendMessage() {
+async function chatMsgToNotes(id) {
+  const r = await fetch(`${API}/api/chat/notes`, { method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ message_id: id }) }).then(x => x.json()).catch(() => ({ error: 'Помилка мережі' }));
+  if (r.error) { toast(r.error, 'err'); return; }
+  toast(t('chat.saved_to_notes'), 'ok');
+}
+
+async function chatSendMessage(fileId) {
   const input = document.getElementById('chat-input');
   const body = input.value.trim();
-  if (!body || !_chatCurrentPeer) return;
+  if ((!body && !fileId) || !_chatCurrentPeer) return;
   input.value = '';
   try {
     const payload = { body };
+    if (fileId) payload.file_id = fileId;
     if (_chatCurrentPeer.peer_url) { payload.peer_url = _chatCurrentPeer.peer_url; payload.peer_identity = _chatCurrentPeer.peer_identity || ''; }
-    else if (_chatCurrentPeer.peer_local_user_id) payload.peer_local_user_id = _chatCurrentPeer.peer_local_user_id;
-    else { payload.peer_archive_id = _chatCurrentPeer.peer_archive_id; payload.peer_identity = _chatCurrentPeer.peer_identity; }
+    else payload.peer_local_user_id = _chatCurrentPeer.peer_local_user_id;
     const r = await fetch(`${API}/api/chat/send`, {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
     }).then(x => x.json());
@@ -3484,12 +3531,112 @@ async function chatSendMessage() {
   }
 }
 
+async function chatDeleteConversation() {
+  const p = _chatCurrentPeer;
+  if (!p || !confirm(t('chat.delete_confirm'))) return;
+  const r = await fetch(`${API}/api/chat/conversation?${_chatPeerParams(p)}`, { method: 'DELETE' })
+    .then(x => x.json()).catch(() => ({ error: 'Помилка мережі' }));
+  if (r.error) { toast(r.error, 'err'); return; }
+  toast(t('chat.deleted'), 'ok');
+  chatBackToList();
+}
+
+// ── Нотатки ──
+function chatOpenNotes() {
+  _chatCurrentPeer = null;
+  if (_chatPollTimer) { clearInterval(_chatPollTimer); _chatPollTimer = null; }
+  _chatShowView('chat-notes-view');
+  chatLoadNotes();
+}
+
+async function chatLoadNotes() {
+  const wrap = document.getElementById('chat-notes-list');
+  try {
+    const notes = await fetch(`${API}/api/chat/notes`).then(r => r.json());
+    if (!Array.isArray(notes) || !notes.length) {
+      wrap.innerHTML = `<div class="muted" style="font-size:12px;padding:20px 0;text-align:center">${t('chat.notes_empty')}</div>`;
+      return;
+    }
+    wrap.innerHTML = notes.map(n => `
+      <div style="background:var(--surface2);border-radius:10px;padding:8px 12px;font-size:13px">
+        ${n.body ? `<span data-no-i18n style="white-space:pre-wrap">${esc(n.body)}</span>` : ''}
+        ${_chatAttHtml(n.attachment)}
+        <div style="font-size:9.5px;opacity:.7;margin-top:3px;display:flex;gap:8px;align-items:center">
+          <span>${fmtDate(n.created_at)}</span>
+          ${n.source_label ? `<span data-no-i18n>· ${esc(n.source_label)}</span>` : ''}
+          <span title="${t('common.delete')}" style="cursor:pointer;margin-left:auto" onclick="chatDeleteNote(${n.id})">🗑</span>
+        </div>
+      </div>`).join('');
+    wrap.scrollTop = wrap.scrollHeight;
+  } catch {
+    wrap.innerHTML = `<div style="color:var(--red);font-size:12px">${t('catalog.error')}</div>`;
+  }
+}
+
+async function chatAddNote(fileId) {
+  const input = document.getElementById('chat-note-input');
+  const body = input.value.trim();
+  if (!body && !fileId) return;
+  const r = await fetch(`${API}/api/chat/notes`, { method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ body, ...(fileId ? { file_id: fileId } : {}) }) }).then(x => x.json()).catch(() => ({ error: 'Помилка мережі' }));
+  if (r.error) { toast(r.error, 'err'); return; }
+  input.value = '';
+  chatLoadNotes();
+}
+
+async function chatDeleteNote(id) {
+  if (!confirm(t('chat.note_delete_confirm'))) return;
+  await fetch(`${API}/api/chat/notes/${id}`, { method: 'DELETE' }).catch(() => {});
+  chatLoadNotes();
+}
+
+// ── Файл з архіву ──
+function chatOpenFilePicker(target) {
+  _chatPickTarget = target;
+  document.getElementById('chat-file-modal').style.display = 'flex';
+  const q = document.getElementById('chat-file-q');
+  q.value = '';
+  q.focus();
+  chatSearchFiles();
+}
+
+function chatSearchFilesDebounced() {
+  clearTimeout(_chatPickTimer);
+  _chatPickTimer = setTimeout(chatSearchFiles, 300);
+}
+
+async function chatSearchFiles() {
+  const grid = document.getElementById('chat-file-results');
+  const q = document.getElementById('chat-file-q').value.trim();
+  grid.innerHTML = `<div class="muted" style="font-size:12px">${t('common.loading')}</div>`;
+  try {
+    const files = await fetch(`${API}/api/chat/files?q=${encodeURIComponent(q)}`).then(r => r.json());
+    if (!Array.isArray(files) || !files.length) { grid.innerHTML = `<div class="muted" style="font-size:12px">—</div>`; return; }
+    const img = ['jpg','jpeg','png','gif','webp','bmp','avif'];
+    grid.innerHTML = files.map(f => `
+      <div onclick="chatPickFile(${f.id})" title="${esc(f.folder ? f.folder + '/' : '')}${esc(f.name)}"
+           style="cursor:pointer;background:var(--surface2);border-radius:6px;overflow:hidden;display:flex;flex-direction:column">
+        <div style="aspect-ratio:1;display:flex;align-items:center;justify-content:center;background:var(--bg);font-size:28px">
+          ${img.includes((f.ext||'').toLowerCase()) ? `<img src="${API}/api/gallery/stream/${f.id}" loading="lazy" alt="" style="width:100%;height:100%;object-fit:cover" onerror="this.replaceWith('📄')">` : '📄'}
+        </div>
+        <div style="font-size:10.5px;padding:4px 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" data-no-i18n>${esc(f.name)}</div>
+      </div>`).join('');
+  } catch {
+    grid.innerHTML = `<div style="color:var(--red);font-size:12px">${t('catalog.error')}</div>`;
+  }
+}
+
+function chatPickFile(id) {
+  document.getElementById('chat-file-modal').style.display = 'none';
+  if (_chatPickTarget === 'notes') chatAddNote(id);
+  else chatSendMessage(id);
+}
+
 function chatNewSetTab(tab) {
   document.querySelectorAll('#chat-new-tab-toggle .filter-btn').forEach(b =>
     b.classList.toggle('active', b.dataset.chatnewtab === tab));
-  document.getElementById('chat-new-local').style.display    = tab === 'local' ? '' : 'none';
-  document.getElementById('chat-new-url').style.display      = tab === 'url' ? '' : 'none';
-  document.getElementById('chat-new-external').style.display = tab === 'external' ? '' : 'none';
+  document.getElementById('chat-new-local').style.display = tab === 'local' ? '' : 'none';
+  document.getElementById('chat-new-url').style.display   = tab === 'url' ? '' : 'none';
 }
 
 function _chatNormUrl(raw) {
@@ -3533,12 +3680,6 @@ async function chatShowNewMessageModal() {
     sel.innerHTML = `<option value="">— обери юзера —</option>` +
       users.filter(u => u.id !== _currentUser?.user_id).map(u => `<option value="${u.id}" data-label="${esc(u.display_name||u.email)}">${esc(u.display_name||u.email)}</option>`).join('');
   } catch {}
-  try {
-    const archives = await fetch(`${API}/api/external-archives`).then(r => r.json());
-    const sel = document.getElementById('chat-new-archive-select');
-    sel.innerHTML = `<option value="">— обери архів —</option>` +
-      (Array.isArray(archives) ? archives.map(a => `<option value="${a.id}" data-label="${esc(a.label)}">${esc(a.label)}</option>`).join('') : '');
-  } catch {}
 }
 
 function chatStartConversation() {
@@ -3551,18 +3692,10 @@ function chatStartConversation() {
     chatOpenThread({ peer_url: url, peer_identity: nick, label: `${nick || 'власник'}@${url.replace(/^https?:\/\//, '')}` });
     return;
   }
-  if (activeTab === 'local') {
-    const sel = document.getElementById('chat-new-local-select');
-    if (!sel.value) { toast('Обери юзера', 'err'); return; }
-    const label = sel.options[sel.selectedIndex].dataset.label;
-    chatOpenThread({ peer_local_user_id: parseInt(sel.value), label });
-  } else {
-    const sel = document.getElementById('chat-new-archive-select');
-    const identity = document.getElementById('chat-new-identity').value.trim();
-    if (!sel.value || !identity) { toast('Обери архів і впиши нік', 'err'); return; }
-    const archLabel = sel.options[sel.selectedIndex].dataset.label;
-    chatOpenThread({ peer_archive_id: sel.value, peer_identity: identity, label: `${identity}@${archLabel}` });
-  }
+  const sel = document.getElementById('chat-new-local-select');
+  if (!sel.value) { toast('Обери юзера', 'err'); return; }
+  const label = sel.options[sel.selectedIndex].dataset.label;
+  chatOpenThread({ peer_local_user_id: parseInt(sel.value), label });
 }
 
 async function loadUsersFull() {

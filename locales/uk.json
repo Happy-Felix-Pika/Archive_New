@@ -311,5 +311,14 @@
  "err.dbfillfields": "Заповніть хост, користувача і назву бази",
  "err.connecting": "Підключення…",
  "err.dbconnectfail": "Не вдалося підключитись",
- "err.dbserverconn": "Помилка з'єднання з сервером"
+ "err.dbserverconn": "Помилка з'єднання з сервером",
+ "common.delete": "Видалити",
+ "chat.notes": "Нотатки",
+ "chat.notes_hint": "Збережені повідомлення й файли — лише для тебе",
+ "chat.notes_empty": "Тут поки порожньо — 📌 біля повідомлення зберігає його сюди",
+ "chat.to_notes": "У нотатки",
+ "chat.saved_to_notes": "Збережено в нотатки",
+ "chat.delete_confirm": "Видалити цю розмову? Вона зникне лише в тебе.",
+ "chat.deleted": "Розмову видалено",
+ "chat.note_delete_confirm": "Видалити нотатку?"
 }

@@ -15,6 +15,7 @@
 
 import hashlib
 import ipaddress
+import json
 import secrets
 import socket
 from urllib.parse import urlsplit
@@ -63,10 +64,13 @@ def normalize_url(raw: str) -> str | None:
         return None
     if u.scheme not in ("http", "https") or not u.hostname:
         return None
-    if u.scheme == "http" and not _is_private_host(u.hostname):
-        return None
-    host = u.hostname + (f":{u.port}" if u.port else "")
-    return f"{u.scheme}://{host}".lower()
+    scheme = u.scheme
+    if scheme == "http" and not _is_private_host(u.hostname):
+        # публічний архів за проксі (Cloudflare/nginx) часто «бачить» себе як http —
+        # назовні він усе одно https, тож не відкидаємо, а виправляємо схему
+        scheme = "https"
+    host = u.hostname + (f":{u.port}" if u.port and not (scheme == "https" and u.scheme == "http") else "")
+    return f"{scheme}://{host}".lower()
 
 
 def my_public_url() -> str:
@@ -78,8 +82,9 @@ def my_public_url() -> str:
             return base.rstrip("/")
     except Exception:
         pass
-    proto = flask_request.headers.get("X-Forwarded-Proto") or flask_request.scheme
-    return f"{proto}://{flask_request.host}"
+    proto = (flask_request.headers.get("X-Forwarded-Proto") or flask_request.scheme).split(",")[0].strip()
+    host = flask_request.headers.get("X-Forwarded-Host") or flask_request.host
+    return normalize_url(f"{proto}://{host.split(',')[0].strip()}") or f"{proto}://{host}"
 
 
 def _host_label(url: str) -> str:
@@ -91,7 +96,7 @@ def _my_name(db, uid) -> str:
     return (me["display_name"] or me["email"].split("@")[0]) if me else "user"
 
 
-def send_by_url(uid: int, peer_url: str, peer_identity: str, body: str):
+def send_by_url(uid: int, peer_url: str, peer_identity: str, body: str, attachment: dict | None = None):
     """Надіслати в архів за адресою. Повертає (ok, warning|None, справжній нік адресата|None)."""
     import requests as req
     token = secrets.token_urlsafe(24)
@@ -101,16 +106,24 @@ def send_by_url(uid: int, peer_url: str, peer_identity: str, body: str):
         label = f"{peer_identity or 'власник'}@{_host_label(peer_url)}"
         with db.cursor() as cur:
             cur.execute("""INSERT INTO chat_messages (owner_user_id, direction, peer_label, peer_url,
-                                                      peer_identity, body, is_read, deliver_token)
-                           VALUES (%s,'out',%s,%s,%s,%s,1,%s)""",
-                        (uid, label, peer_url, peer_identity or "", body, _sha(token)))
+                                                      peer_identity, body, is_read, deliver_token, attachment)
+                           VALUES (%s,'out',%s,%s,%s,%s,1,%s,%s)""",
+                        (uid, label, peer_url, peer_identity or "", body, _sha(token),
+                         json.dumps(attachment, ensure_ascii=False) if attachment else None))
         db.commit()
     finally:
         db.close()
+    me_url = my_public_url()
+    me_host = urlsplit(me_url).hostname or ""
+    if (me_host in ("localhost", "127.0.0.1", "::1") or _is_private_host(me_host)) \
+            and not _is_private_host(urlsplit(peer_url).hostname or ""):
+        return True, ("Не доставлено: твій архів не знає своєї зовнішньої адреси (бачить себе як "
+                      f"{me_url}). Вкажи її в «Конфіг → Пошта → Адреса архіву»"), None
     try:
         r = req.post(f"{peer_url}/api/external-access/chat/inbox",
-                     json={"sender_base_url": my_public_url(), "sender_name": name,
-                           "to_nick": peer_identity or "", "body": body, "token": token},
+                     json={"sender_base_url": me_url, "sender_name": name,
+                           "to_nick": peer_identity or "", "body": body, "token": token,
+                           **({"attachment": {k: attachment[k] for k in ("name", "ext", "url")}} if attachment else {})},
                      timeout=20)
     except Exception as e:
         return True, f"Збережено, але архів не відповідає: {e}", None
@@ -169,7 +182,12 @@ def api_chat_inbox():
     to_nick = (d.get("to_nick") or "").strip()
     body = (d.get("body") or "").strip()
     token = d.get("token") or ""
-    if not sender or not name or not body or not token:
+    from .extras import clean_incoming_attachment
+    att = clean_incoming_attachment(d.get("attachment"), sender) if sender else None
+    if not sender:
+        return jsonify({"error": "Архів-відправник не знає своєї зовнішньої адреси — "
+                                 "вкажи її в «Конфіг → Пошта → Адреса архіву»"}), 400
+    if not name or not (body or att) or not token:
         return jsonify({"error": "Некоректні дані"}), 400
     if len(body) > MAX_LEN:
         return jsonify({"error": f"Задовге повідомлення (до {MAX_LEN} символів)"}), 400
@@ -208,9 +226,9 @@ def api_chat_inbox():
     db = get_db()
     try:
         with db.cursor() as cur:
-            cur.execute("""INSERT INTO chat_messages (owner_user_id, direction, peer_label, peer_url, peer_identity, body)
-                           VALUES (%s,'in',%s,%s,%s,%s)""",
-                        (rcpt["id"], f"{name}@{_host_label(sender)}", sender, name, body))
+            cur.execute("""INSERT INTO chat_messages (owner_user_id, direction, peer_label, peer_url, peer_identity, body, attachment)
+                           VALUES (%s,'in',%s,%s,%s,%s,%s)""",
+                        (rcpt["id"], f"{name}@{_host_label(sender)}", sender, name, body, att))
         db.commit()
     finally:
         db.close()
