@@ -1,7 +1,7 @@
 """Галерея"""
 
 import hashlib
-import mimetypes, os, random, threading
+import mimetypes, os, random, threading, time
 
 from flask import Blueprint, Response, jsonify, request as flask_request, send_file
 
@@ -48,6 +48,24 @@ def _gallery_ids_query(f, artist_id, subfolder, tag_ids, hide_tag_ids, favorites
     # таблиці файлів: кожен фільтр — це короткий запит по індексу
     # («файли з цим тегом», «файли цього автора»), а перетин і тип файлу
     # рахуються в пам'яті. Час залежить від розміру фільтра, а не архіву.
+    # Чужий архів через ключ із прихованими теками — той самий швидкий шлях,
+    # а приховане вирізається в пам'яті за кешованим списком id кожної теки.
+    # Раніше це йшло повним запитом по всій таблиці (десятки секунд на
+    # великому архіві) — і підключений архів відвалювався по таймауту.
+    if exclude_folder_names and not (subfolder or include_post_id):
+        try:
+            ids = _fast_ids(f, artist_id, tag_ids, hide_tag_ids, favorites_only, user_id)
+            hidden = set()
+            for name in exclude_folder_names:
+                hidden |= _folder_ids(name)
+            if hidden:
+                allow = {int(i) for i in (include_file_ids or [])}
+                ids = [i for i in ids if i not in hidden or i in allow]
+            random.shuffle(ids)
+            return jsonify({"ids": ids})
+        except Exception as e:
+            print(f"  ⚠ Галерея (ключ): швидкий шлях не вдався ({e}) — рахую наживо")
+
     if not (subfolder or include_post_id or exclude_folder_names or include_file_ids):
         try:
             if not (artist_id or tag_ids or hide_tag_ids or favorites_only):
@@ -237,6 +255,39 @@ def _plain_response(f, hide_tag_ids=None):
         db.close()
     ids = [i for i in ready[0] if i not in hidden]
     return Response(json.dumps({"ids": ids}, separators=(",", ":")), mimetype="application/json")
+
+
+# id файлів кожної теки верхнього рівня — для прихованих від ключа тек.
+# Живе 5 хв; застаріле віддається одразу, а свіже рахується у фоні.
+_folder_ids_cache: dict = {}
+_folder_ids_lock = threading.Lock()
+_FOLDER_IDS_TTL = 300
+
+
+def _load_folder_ids(name: str) -> set:
+    db = get_db()
+    try:
+        if name == "_root":
+            got = _col(db, "SELECT id FROM files WHERE rel_path NOT LIKE %s", ("%/%",))
+        else:
+            esc = name.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            got = _col(db, "SELECT id FROM files WHERE rel_path LIKE %s", (esc + "/%",))
+    finally:
+        db.close()
+    ids = set(got)
+    with _folder_ids_lock:
+        _folder_ids_cache[name] = (ids, time.time())
+    return ids
+
+
+def _folder_ids(name: str) -> set:
+    with _folder_ids_lock:
+        hit = _folder_ids_cache.get(name)
+    if not hit:
+        return _load_folder_ids(name)
+    if time.time() - hit[1] > _FOLDER_IDS_TTL:
+        threading.Thread(target=_load_folder_ids, args=(name,), daemon=True).start()
+    return hit[0]
 
 
 def _col(db, sql, args=()):
