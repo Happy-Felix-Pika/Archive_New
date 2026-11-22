@@ -346,6 +346,10 @@ def ensure_tables():
             # Індекси для швидкості — на великих бібліотеках (сотні тисяч
             # файлів) їх відсутність помітно гальмує пошук/фільтрацію
             def _ensure_index(table, index_name, column_expr):
+                cur.execute("""SELECT COUNT(*) AS c FROM information_schema.TABLES
+                               WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s""", (table,))
+                if cur.fetchone()['c'] == 0:
+                    return          # таблиці ще немає (застосунок створить її пізніше)
                 cur.execute("""
                     SELECT COUNT(*) AS c FROM information_schema.STATISTICS
                     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND INDEX_NAME = %s
