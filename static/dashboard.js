@@ -3347,7 +3347,7 @@ function codesSetTab(tab) {
 
 // ── Чат ──────────────────────────────────────────────────────────────────
 
-let _chatCurrentPeer = null; // {peer_local_user_id} | {peer_archive_id, peer_identity}
+let _chatCurrentPeer = null; // {peer_local_user_id} | {peer_archive_id, peer_identity} | {peer_url, peer_identity}
 let _chatPollTimer = null;
 
 function chatBackToList() {
@@ -3368,9 +3368,9 @@ async function loadChatConversations() {
     }
     list.innerHTML = convos.map(c => `
       <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--surface2);border-radius:8px;cursor:pointer"
-           onclick='chatOpenThread(${JSON.stringify({peer_local_user_id:c.peer_local_user_id, peer_archive_id:c.peer_archive_id, peer_identity:c.peer_identity, label:c.peer_label}).replace(/'/g,"&apos;")})'>
+           onclick='chatOpenThread(${JSON.stringify({peer_local_user_id:c.peer_local_user_id, peer_archive_id:c.peer_archive_id, peer_url:c.peer_url, peer_identity:c.peer_identity, label:c.peer_label, blocked:!!c.blocked}).replace(/'/g,"&apos;")})'>
         <div style="flex:1;min-width:0">
-          <div style="font-weight:500;font-size:13px">${esc(c.peer_label)}</div>
+          <div style="font-weight:500;font-size:13px">${c.peer_url ? '🌐 ' : ''}${esc(c.peer_label)}${c.blocked ? ' <span class="muted" style="font-size:11px">· заблоковано</span>' : ''}</div>
           <div style="color:var(--muted);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.last_body)}</div>
         </div>
         ${c.unread > 0 ? `<span style="background:var(--accent);color:#fff;border-radius:10px;padding:2px 7px;font-size:10.5px">${c.unread}</span>` : ''}
@@ -3399,6 +3399,7 @@ function chatOpenThread(peer) {
   document.getElementById('chat-list-view').style.display = 'none';
   document.getElementById('chat-thread-view').style.display = '';
   document.getElementById('chat-thread-title').textContent = peer.label;
+  _chatRenderBlockBtn();
   chatLoadMessages();
   if (_chatPollTimer) clearInterval(_chatPollTimer);
   _chatPollTimer = setInterval(chatLoadMessages, 5000);
@@ -3407,7 +3408,8 @@ function chatOpenThread(peer) {
 async function chatLoadMessages() {
   if (!_chatCurrentPeer) return;
   const params = new URLSearchParams();
-  if (_chatCurrentPeer.peer_local_user_id) params.set('peer_local_user_id', _chatCurrentPeer.peer_local_user_id);
+  if (_chatCurrentPeer.peer_url) { params.set('peer_url', _chatCurrentPeer.peer_url); params.set('peer_identity', _chatCurrentPeer.peer_identity || ''); }
+  else if (_chatCurrentPeer.peer_local_user_id) params.set('peer_local_user_id', _chatCurrentPeer.peer_local_user_id);
   else { params.set('peer_archive_id', _chatCurrentPeer.peer_archive_id); params.set('peer_identity', _chatCurrentPeer.peer_identity); }
   try {
     const msgs = await fetch(`${API}/api/chat/messages?${params}`).then(r => r.json());
@@ -3430,13 +3432,22 @@ async function chatSendMessage() {
   input.value = '';
   try {
     const payload = { body };
-    if (_chatCurrentPeer.peer_local_user_id) payload.peer_local_user_id = _chatCurrentPeer.peer_local_user_id;
+    if (_chatCurrentPeer.peer_url) { payload.peer_url = _chatCurrentPeer.peer_url; payload.peer_identity = _chatCurrentPeer.peer_identity || ''; }
+    else if (_chatCurrentPeer.peer_local_user_id) payload.peer_local_user_id = _chatCurrentPeer.peer_local_user_id;
     else { payload.peer_archive_id = _chatCurrentPeer.peer_archive_id; payload.peer_identity = _chatCurrentPeer.peer_identity; }
     const r = await fetch(`${API}/api/chat/send`, {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
     }).then(x => x.json());
     if (r.error) { toast(r.error, 'err'); return; }
     if (r.warning) toast(r.warning, 'err');
+    if (r.peer_url && _chatCurrentPeer.peer_url) {
+      _chatCurrentPeer.peer_url = r.peer_url;                       // нормалізована адреса
+      if (r.peer_identity) {                                        // «власник» → його справжній нік
+        _chatCurrentPeer.peer_identity = r.peer_identity;
+        _chatCurrentPeer.label = `${r.peer_identity}@${r.peer_url.replace(/^https?:\/\//, '')}`;
+        document.getElementById('chat-thread-title').textContent = _chatCurrentPeer.label;
+      }
+    }
     chatLoadMessages();
   } catch {
     toast('Помилка мережі', 'err');
@@ -3447,7 +3458,41 @@ function chatNewSetTab(tab) {
   document.querySelectorAll('#chat-new-tab-toggle .filter-btn').forEach(b =>
     b.classList.toggle('active', b.dataset.chatnewtab === tab));
   document.getElementById('chat-new-local').style.display    = tab === 'local' ? '' : 'none';
+  document.getElementById('chat-new-url').style.display      = tab === 'url' ? '' : 'none';
   document.getElementById('chat-new-external').style.display = tab === 'external' ? '' : 'none';
+}
+
+function _chatNormUrl(raw) {
+  raw = (raw || '').trim();
+  if (!raw) return '';
+  if (!/^https?:\/\//i.test(raw)) {
+    // без схеми: локальна адреса — http, решта — https (сервер перевірить так само)
+    const host = raw.split('/')[0].split(':')[0];
+    const local = /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host) || /\.(local|lan)$/.test(host);
+    raw = (local ? 'http://' : 'https://') + raw;
+  }
+  try { const u = new URL(raw); return `${u.protocol}//${u.host}`.toLowerCase(); } catch { return ''; }
+}
+
+function _chatRenderBlockBtn() {
+  const b = document.getElementById('chat-block-btn');
+  if (!b) return;
+  const p = _chatCurrentPeer || {};
+  b.style.display = p.peer_url ? '' : 'none';
+  b.textContent = p.blocked ? '✓ Розблокувати' : '🚫 Заблокувати архів';
+}
+
+async function chatToggleBlock() {
+  const p = _chatCurrentPeer;
+  if (!p?.peer_url) return;
+  const block = !p.blocked;
+  if (block && !confirm(`Не приймати повідомлень з ${p.peer_url}?`)) return;
+  const r = await fetch(`${API}/api/chat/block`, { method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ peer_url: p.peer_url, block }) }).then(x => x.json()).catch(() => ({}));
+  if (r.error) { toast(r.error, 'err'); return; }
+  p.blocked = block;
+  _chatRenderBlockBtn();
+  toast(block ? 'Архів заблоковано' : 'Архів розблоковано', 'ok');
 }
 
 async function chatShowNewMessageModal() {
@@ -3469,6 +3514,13 @@ async function chatShowNewMessageModal() {
 function chatStartConversation() {
   const activeTab = document.querySelector('#chat-new-tab-toggle .filter-btn.active').dataset.chatnewtab;
   document.getElementById('chat-new-modal').style.display = 'none';
+  if (activeTab === 'url') {
+    const url = _chatNormUrl(document.getElementById('chat-new-url-input').value);
+    const nick = document.getElementById('chat-new-url-nick').value.trim();
+    if (!url) { toast('Впиши адресу архіву', 'err'); return; }
+    chatOpenThread({ peer_url: url, peer_identity: nick, label: `${nick || 'власник'}@${url.replace(/^https?:\/\//, '')}` });
+    return;
+  }
   if (activeTab === 'local') {
     const sel = document.getElementById('chat-new-local-select');
     if (!sel.value) { toast('Обери юзера', 'err'); return; }

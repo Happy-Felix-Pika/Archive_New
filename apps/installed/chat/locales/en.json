@@ -9,5 +9,15 @@
  "Особисті повідомлення між користувачами архіву": "Private messages between archive users",
  "Порожнє повідомлення": "Empty message",
  "Юзера '{0}' у нас не знайдено": "User '{0}' not found here",
- "Юзера не знайдено": "User not found"
+ "Юзера не знайдено": "User not found",
+ "Невірна адреса архіву (потрібна https://, http — лише в локальній мережі)": "Invalid archive address (https:// required, http only on a local network)",
+ "Задовге повідомлення (до {0} символів)": "Message too long (up to {0} characters)",
+ "Збережено, але архів не відповідає: {0}": "Saved, but the archive doesn't respond: {0}",
+ "Той архів старої версії — він ще не вміє приймати повідомлення за адресою": "That archive is an older version — it can't receive messages by address yet",
+ "Не доставлено (код {0})": "Not delivered (code {0})",
+ "Користувача «{0}» у цьому архіві немає": "There is no user «{0}» in this archive",
+ "Отримувач заблокував повідомлення з цього архіву": "The recipient has blocked messages from this archive",
+ "Забагато повідомлень з цього архіву — спробуй пізніше": "Too many messages from this archive — try later",
+ "Не вдалося підтвердити відправника — адреса архіву-відправника недоступна або не його": "Couldn't verify the sender — the sender archive's address is unreachable or not theirs",
+ "Вкажи адресу": "Enter an address"
 }
