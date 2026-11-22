@@ -159,13 +159,13 @@ def api_auth_complete_setup():
 def api_user_settings_get():
     """
     Повертає ВСІ налаштування поточного юзера (e621, inkbunny, download, а
-    також секції застосунків — напр. nextcloud) — замінює собою старий /api/config для все, окрім
+    також секції застосунків) — замінює собою старий /api/config для все, окрім
     підключення до основної БД (те лишається в archiver_config.json/env).
     Паролі/ключі маскуються зірочками.
     """
     settings = get_user_settings()
     safe = json.loads(json.dumps(settings))  # deep copy
-    for section in ("nextcloud", "nextcloud_db", "inkbunny", "mail"):
+    for section in ("inkbunny", "mail"):
         if section in safe and safe[section].get("password"):
             safe[section]["password"] = "••••••••"
     if "e621" in safe and safe["e621"].get("api_key"):
@@ -186,7 +186,7 @@ def api_user_settings_save():
         patch   = flask_request.get_json(silent=True) or {}
         current = get_user_settings()
 
-        for section in ("nextcloud", "nextcloud_db", "inkbunny", "mail"):
+        for section in ("inkbunny", "mail"):
             if section in patch and isinstance(patch[section], dict):
                 if not patch[section].get("password"):
                     patch[section]["password"] = current.get(section, {}).get("password", "")

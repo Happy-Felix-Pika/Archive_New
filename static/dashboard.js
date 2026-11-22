@@ -1695,7 +1695,7 @@ async function galExternalShow(idx) {
       : `<img class="gallery-media" src="${mediaUrl}" style="cursor:zoom-in" onclick="galOpenFullscreen('${mediaUrl.replace(/'/g,"\\'")}')">`;
     const favEl = item.source === 'local'
       ? `<span class="catalog-crumb" style="font-size:15px" onclick="galToggleFavorite(${item.id})" id="gal-fav-${item.id}">${d.is_favorite ? '★' : '☆'}</span>`
-      : `<span class="catalog-crumb" style="font-size:15px" onclick="galExternalToggleFav('${item.source}', ${item.id}, this)">☆</span>`;
+      : `<span class="catalog-crumb" style="font-size:15px" onclick="galExternalToggleFav('${item.source}', ${item.id}, this)">${(await _extFavIds(item.source)).has(item.id) ? '★' : '☆'}</span>`;
     wrap.innerHTML = `
       <div class="gallery-img-box">
         ${mediaEl}
@@ -1729,6 +1729,15 @@ function galExternalNav(delta) {
   galExternalShow(next);
 }
 
+const _extFavCache = {};
+async function _extFavIds(archiveId) {
+  if (!_extFavCache[archiveId]) {
+    _extFavCache[archiveId] = fetch(`${API}/api/external-archives/${archiveId}/favorite-ids`)
+      .then(r => r.json()).then(a => new Set(Array.isArray(a) ? a : [])).catch(() => new Set());
+  }
+  return _extFavCache[archiveId];
+}
+
 async function galExternalToggleFav(archiveId, remoteId, el) {
   try {
     const r = await fetch(`${API}/api/external-archives/${archiveId}/favorite`, {
@@ -1737,6 +1746,8 @@ async function galExternalToggleFav(archiveId, remoteId, el) {
     }).then(x => x.json());
     if (r.error) { toast(r.error, 'err'); return; }
     if (el) el.textContent = r.is_favorite ? '★' : '☆';
+    const set = await _extFavIds(archiveId);
+    r.is_favorite ? set.add(remoteId) : set.delete(remoteId);
     toast(r.is_favorite ? '★ Додано в улюблене' : '☆ Прибрано з улюбленого', 'ok');
   } catch {
     toast('Помилка мережі', 'err');
@@ -2166,8 +2177,7 @@ async function galleryShow(idx) {
       if (container) {
         container.appendChild(player);
         // Ruffle читає байти файлу через JS (не просто рендерить, як
-        // <img>/<video>) — тому потребує CORS. Зовнішній share_url з
-        // Nextcloud CORS не дозволяє, тому примусово через наш сервер
+        // <img>/<video>) — тому потребує CORS. Тому примусово через наш сервер
         player.load(d.stream_url);
       }
     } catch (e) {
@@ -3502,14 +3512,13 @@ async function chatMsgToNotes(id) {
   toast(t('chat.saved_to_notes'), 'ok');
 }
 
-async function chatSendMessage(fileId) {
+async function chatSendMessage(att) {
   const input = document.getElementById('chat-input');
   const body = input.value.trim();
-  if ((!body && !fileId) || !_chatCurrentPeer) return;
+  if ((!body && !att) || !_chatCurrentPeer) return;
   input.value = '';
   try {
-    const payload = { body };
-    if (fileId) payload.file_id = fileId;
+    const payload = { body, ...(att || {}) };
     if (_chatCurrentPeer.peer_url) { payload.peer_url = _chatCurrentPeer.peer_url; payload.peer_identity = _chatCurrentPeer.peer_identity || ''; }
     else payload.peer_local_user_id = _chatCurrentPeer.peer_local_user_id;
     const r = await fetch(`${API}/api/chat/send`, {
@@ -3573,12 +3582,12 @@ async function chatLoadNotes() {
   }
 }
 
-async function chatAddNote(fileId) {
+async function chatAddNote(att) {
   const input = document.getElementById('chat-note-input');
   const body = input.value.trim();
-  if (!body && !fileId) return;
+  if (!body && !att) return;
   const r = await fetch(`${API}/api/chat/notes`, { method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ body, ...(fileId ? { file_id: fileId } : {}) }) }).then(x => x.json()).catch(() => ({ error: 'Помилка мережі' }));
+    body: JSON.stringify({ body, ...(att || {}) }) }).then(x => x.json()).catch(() => ({ error: 'Помилка мережі' }));
   if (r.error) { toast(r.error, 'err'); return; }
   input.value = '';
   chatLoadNotes();
@@ -3590,37 +3599,78 @@ async function chatDeleteNote(id) {
   chatLoadNotes();
 }
 
-// ── Файл з архіву ──
+// ── Файл з архіву / з ПК ──
+let _chatFileMode = 'folder', _chatFilePath = '', _chatFileOffset = 0;
+
 function chatOpenFilePicker(target) {
   _chatPickTarget = target;
   document.getElementById('chat-file-modal').style.display = 'flex';
+  chatFileTab(_chatFileMode);
+}
+
+function chatFileTab(mode) {
+  _chatFileMode = mode;
+  document.querySelectorAll('#chat-file-tabs .filter-btn').forEach(b => b.classList.toggle('active', b.dataset.cftab === mode));
   const q = document.getElementById('chat-file-q');
-  q.value = '';
-  q.focus();
-  chatSearchFiles();
+  q.style.display = mode === 'search' ? '' : 'none';
+  document.getElementById('chat-file-pc').style.display = mode === 'pc' ? 'flex' : 'none';
+  document.getElementById('chat-file-scroll').style.display = mode === 'pc' ? 'none' : '';
+  document.getElementById('chat-file-crumbs').style.display = mode === 'folder' ? 'flex' : 'none';
+  if (mode === 'search') q.focus();
+  if (mode !== 'pc') chatLoadFiles(false);
 }
 
-function chatSearchFilesDebounced() {
+function _unused_chatSearchFilesDebounced() {
   clearTimeout(_chatPickTimer);
-  _chatPickTimer = setTimeout(chatSearchFiles, 300);
+  _chatPickTimer = setTimeout(() => chatLoadFiles(false), 300);
 }
 
-async function chatSearchFiles() {
+function chatOpenFolder(path) { _chatFilePath = path; chatLoadFiles(false); }
+
+function _chatRenderCrumbs() {
+  const parts = _chatFilePath ? _chatFilePath.split('/') : [];
+  let acc = '';
+  const links = [`<a href="#" onclick="chatOpenFolder('');return false">🏠 Архів</a>`];
+  for (const p of parts) {
+    acc = acc ? `${acc}/${p}` : p;
+    links.push(`<span class="muted">/</span><a href="#" onclick='chatOpenFolder(${JSON.stringify(acc).replace(/'/g,"&apos;")});return false'>${esc(p)}</a>`);
+  }
+  document.getElementById('chat-file-crumbs').innerHTML = links.join('');
+}
+
+async function chatLoadFiles(more) {
   const grid = document.getElementById('chat-file-results');
-  const q = document.getElementById('chat-file-q').value.trim();
-  grid.innerHTML = `<div class="muted" style="font-size:12px">${t('common.loading')}</div>`;
+  const moreBtn = document.getElementById('chat-file-more');
+  if (!more) { _chatFileOffset = 0; grid.innerHTML = `<div class="muted" style="font-size:12px">${t('common.loading')}</div>`; }
+  const params = new URLSearchParams({ mode: _chatFileMode, offset: _chatFileOffset });
+  if (_chatFileMode === 'folder') { params.set('path', _chatFilePath); _chatRenderCrumbs(); }
+  if (_chatFileMode === 'search') {
+    const q = document.getElementById('chat-file-q').value.trim();
+    if (!q) { grid.innerHTML = `<div class="muted" style="font-size:12px">Впиши частину назви файлу</div>`; moreBtn.style.display = 'none'; return; }
+    params.set('q', q);
+  }
   try {
-    const files = await fetch(`${API}/api/chat/files?q=${encodeURIComponent(q)}`).then(r => r.json());
-    if (!Array.isArray(files) || !files.length) { grid.innerHTML = `<div class="muted" style="font-size:12px">—</div>`; return; }
+    const r = await fetch(`${API}/api/chat/files?${params}`).then(x => x.json());
+    if (r.error) { grid.innerHTML = `<div style="color:var(--red);font-size:12px">${esc(r.error)}</div>`; return; }
     const img = ['jpg','jpeg','png','gif','webp','bmp','avif'];
-    grid.innerHTML = files.map(f => `
-      <div onclick="chatPickFile(${f.id})" title="${esc(f.folder ? f.folder + '/' : '')}${esc(f.name)}"
+    const tile = (inner, label, onclick, title) => `
+      <div onclick='${onclick}' title="${esc(title)}"
            style="cursor:pointer;background:var(--surface2);border-radius:6px;overflow:hidden;display:flex;flex-direction:column">
-        <div style="aspect-ratio:1;display:flex;align-items:center;justify-content:center;background:var(--bg);font-size:28px">
-          ${img.includes((f.ext||'').toLowerCase()) ? `<img src="${API}/api/gallery/stream/${f.id}" loading="lazy" alt="" style="width:100%;height:100%;object-fit:cover" onerror="this.replaceWith('📄')">` : '📄'}
-        </div>
-        <div style="font-size:10.5px;padding:4px 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" data-no-i18n>${esc(f.name)}</div>
-      </div>`).join('');
+        <div style="aspect-ratio:1;display:flex;align-items:center;justify-content:center;background:var(--bg);font-size:30px">${inner}</div>
+        <div style="font-size:10.5px;padding:4px 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" data-no-i18n>${esc(label)}</div>
+      </div>`;
+    const folderHtml = (r.folders || []).map(f => {
+      const p = _chatFilePath ? `${_chatFilePath}/${f}` : f;
+      return tile('📁', f, `chatOpenFolder(${JSON.stringify(p).replace(/'/g,"&apos;")})`, f);
+    }).join('');
+    const fileHtml = (r.files || []).map(f => tile(
+      img.includes(f.ext) ? `<img src="${API}/api/gallery/stream/${f.id}" loading="lazy" alt="" style="width:100%;height:100%;object-fit:cover" onerror="this.replaceWith('📄')">`
+        : (['mp4','webm','mov','m4v'].includes(f.ext) ? '🎞️' : '📄'),
+      f.name, `chatPickFile(${f.id})`, (f.folder ? f.folder + '/' : '') + f.name)).join('');
+    if (more) grid.insertAdjacentHTML('beforeend', fileHtml);
+    else grid.innerHTML = (folderHtml + fileHtml) || `<div class="muted" style="font-size:12px">Тут порожньо</div>`;
+    _chatFileOffset = r.next_offset ?? (_chatFileOffset + (r.files || []).length);
+    moreBtn.style.display = r.has_more ? '' : 'none';
   } catch {
     grid.innerHTML = `<div style="color:var(--red);font-size:12px">${t('catalog.error')}</div>`;
   }
@@ -3628,8 +3678,21 @@ async function chatSearchFiles() {
 
 function chatPickFile(id) {
   document.getElementById('chat-file-modal').style.display = 'none';
-  if (_chatPickTarget === 'notes') chatAddNote(id);
-  else chatSendMessage(id);
+  if (_chatPickTarget === 'notes') chatAddNote({ file_id: id });
+  else chatSendMessage({ file_id: id });
+}
+
+async function chatUploadFromPc(file) {
+  if (!file) return;
+  if (file.size > 100 * 1024 * 1024) { toast('Файл завеликий (до 100 МБ)', 'err'); return; }
+  const fd = new FormData();
+  fd.append('file', file);
+  toast(`Завантажую ${file.name}…`, 'ok');
+  const r = await fetch(`${API}/api/chat/upload`, { method: 'POST', body: fd }).then(x => x.json()).catch(() => ({ error: 'Помилка мережі' }));
+  if (r.error) { toast(r.error, 'err'); return; }
+  document.getElementById('chat-file-modal').style.display = 'none';
+  if (_chatPickTarget === 'notes') chatAddNote({ upload_id: r.upload_id });
+  else chatSendMessage({ upload_id: r.upload_id });
 }
 
 function chatNewSetTab(tab) {
@@ -5066,7 +5129,9 @@ function catalogRender() {
     const check = canEdit
       ? `<span class="catalog-check${selected ? ' on' : ''}" title="Обрати">${selected ? '✓' : ''}</span>`
       : '';
-    const favMark = item.is_favorite ? `<span class="catalog-fav-mark" title="${t('gal.favorite')}">★</span>` : '';
+    const favMark = item.id
+      ? `<span class="catalog-fav-toggle${item.is_favorite ? ' on' : ''}" data-fav-file="${item.id}" title="${t('gal.favorite')}">${item.is_favorite ? '★' : '☆'}</span>`
+      : '';
     return `<div class="catalog-item${selected ? ' selected' : ''}" data-idx="${idx}" ${canEdit ? 'draggable="true"' : ''} style="position:relative">
       ${check}${favMark}${thumb}${playBadge}
       <div class="catalog-name">${esc(item.name)}</div>
@@ -5076,6 +5141,12 @@ function catalogRender() {
 }
 
 document.getElementById('catalog-grid')?.addEventListener('click', e => {
+  const star = e.target.closest('[data-fav-file]');
+  if (star) {
+    e.stopPropagation();
+    catalogOverlayFav(parseInt(star.dataset.favFile));
+    return;
+  }
   const heart = e.target.closest('[data-fav-folder]');
   if (heart) {
     e.stopPropagation();
@@ -5510,7 +5581,16 @@ let _overlayInfoToken = 0;
 async function catalogOverlayInfo(box) {
   const el = document.getElementById('overlay-info');
   if (!el) return;
-  if (!box?.isCatalog || _catalogSource !== 'local') { el.style.display = 'none'; el.innerHTML = ''; return; }
+  if (!box?.isCatalog) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  if (_catalogSource !== 'local') {       // чужий архів: лише ★ у моє улюблене
+    const it = _catalogItems.find(i => i.id === box.fileId);
+    el.style.display = 'block';
+    el.innerHTML = `<div class="overlay-info-row">
+      ${box.fileId ? `<span class="catalog-crumb" style="font-size:17px" id="ov-fav-${box.fileId}" title="${t('gal.favorite')}"
+            onclick="catalogOverlayFav(${box.fileId})">${it?.is_favorite ? '★' : '☆'}</span>` : ''}
+      <span class="overlay-info-name" title="${esc(box.catalogName)}">${esc(box.catalogName)}</span></div>`;
+    return;
+  }
   const token = ++_overlayInfoToken;
   const isAdmin = canModerate();
   const delBtn = isAdmin
@@ -5537,12 +5617,17 @@ async function catalogOverlayInfo(box) {
 
 async function catalogOverlayFav(id) {
   try {
-    const r = await fetch(`${API}/api/download/${id}/favorite`, {method:'POST'}).then(r => r.json());
+    const r = _catalogSource === 'local'
+      ? await fetch(`${API}/api/download/${id}/favorite`, {method:'POST'}).then(r => r.json())
+      : await fetch(`${API}/api/external-archives/${_catalogSource}/favorite`, {
+          method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ download_id: id })
+        }).then(r => r.json());
     if (r.error) { toast(r.error, 'err'); return; }
     const el = document.getElementById(`ov-fav-${id}`);
     if (el) el.textContent = r.is_favorite ? '★' : '☆';
     const item = _catalogItems.find(i => i.id === id);
     if (item) { item.is_favorite = !!r.is_favorite; catalogRender(); }
+    toast(r.is_favorite ? '★ Додано в улюблене' : '☆ Прибрано з улюбленого', 'ok');
   } catch { toast(t('toast.error'), 'err'); }
 }
 
@@ -5935,8 +6020,7 @@ async function showAppShell() {
 
   // Каталог тепер потрібен незалежно від типу сховища — там же живе
   // виключення папок зі сканування (особисті файли поруч з архівом),
-  // це стосується і Nextcloud, і локального сховища однаково.
-
+  
   // Пікер тегів — зупиняємо bubbling щоб не закривався при кліку всередині
   document.getElementById('gal-tag-picker').addEventListener('mousedown', e => e.stopPropagation());
   document.getElementById('gal-artist-picker').addEventListener('mousedown', e => e.stopPropagation());
@@ -5977,7 +6061,7 @@ async function setupFinish() {
 
   btn.disabled = true;
   try {
-    // Сховище ядра — локальна тека (Nextcloud — окремий застосунок)
+    // Сховище ядра — локальна тека
     const cfgBody = { storage_mode: 'local', local: { path } };
 
     await _origFetch('/api/config', {

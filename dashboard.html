@@ -13,7 +13,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/dashboard.css?v=64">
+<link rel="stylesheet" href="/static/dashboard.css?v=65">
 <script src="https://unpkg.com/@ruffle-rs/ruffle"></script>
 </head>
 <body>
@@ -159,8 +159,7 @@
       <div class="auth-logo-sub" data-i18n="setup.sub">Ще пара кроків і все готово</div>
     </div>
 
-    <!-- Сховище ядра — локальна тека на сервері. Nextcloud — окремий
-         застосунок «Nextcloud» (вкладка в меню), налаштовується потім. -->
+    <!-- Сховище ядра — локальна тека на сервері. -->
     <div class="setup-step active" id="setup-step-2">
       <div class="auth-error" id="setup-error"></div>
 
@@ -762,14 +761,32 @@
     <!-- FILE FROM ARCHIVE PICKER -->
     <div id="chat-file-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:150;align-items:center;justify-content:center"
          onclick="if(event.target===this)this.style.display='none'">
-      <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;width:min(620px,94vw);max-height:85vh;display:flex;flex-direction:column">
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;width:min(720px,94vw);height:min(640px,88vh);display:flex;flex-direction:column">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-          <div style="font-weight:600;font-size:14px">📎 Файл з архіву</div>
+          <div style="font-weight:600;font-size:14px">📎 Надіслати файл</div>
           <button class="btn btn-ghost btn-sm" onclick="document.getElementById('chat-file-modal').style.display='none'">✕</button>
         </div>
+        <div class="filter-toggle" id="chat-file-tabs" style="margin-bottom:10px;flex-wrap:wrap">
+          <button class="filter-btn active" data-cftab="folder" onclick="chatFileTab('folder')">📁 Теки</button>
+          <button class="filter-btn" data-cftab="recent" onclick="chatFileTab('recent')">🕒 Останні</button>
+          <button class="filter-btn" data-cftab="fav" onclick="chatFileTab('fav')">⭐ Улюблені</button>
+          <button class="filter-btn" data-cftab="search" onclick="chatFileTab('search')">🔍 Пошук</button>
+          <button class="filter-btn" data-cftab="pc" onclick="chatFileTab('pc')">💻 З ПК</button>
+        </div>
         <input type="text" id="chat-file-q" placeholder="Пошук за назвою файлу…" oninput="chatSearchFilesDebounced()"
-               style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;color:var(--text);font-family:var(--mono);font-size:13px;margin-bottom:10px">
-        <div id="chat-file-results" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:8px;overflow-y:auto"></div>
+               style="display:none;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;color:var(--text);font-family:var(--mono);font-size:13px;margin-bottom:10px">
+        <div id="chat-file-crumbs" style="font-size:12px;margin-bottom:8px;display:flex;gap:4px;flex-wrap:wrap" data-no-i18n></div>
+        <div id="chat-file-pc" style="display:none;flex:1;align-items:center;justify-content:center;flex-direction:column;gap:10px;border:2px dashed var(--border);border-radius:10px"
+             ondragover="event.preventDefault()" ondrop="event.preventDefault();chatUploadFromPc(event.dataTransfer.files[0])">
+          <div class="muted" style="font-size:13px">Перетягни файл сюди або</div>
+          <button class="btn btn-primary btn-sm" onclick="document.getElementById('chat-file-input').click()">Вибрати файл на ПК</button>
+          <input type="file" id="chat-file-input" style="display:none" onchange="chatUploadFromPc(this.files[0]);this.value=''">
+          <div class="muted" style="font-size:11px">до 100 МБ · файл не потрапляє в архів</div>
+        </div>
+        <div id="chat-file-scroll" style="flex:1;min-height:0;overflow-y:auto">
+          <div id="chat-file-results" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:8px"></div>
+          <div style="text-align:center;margin:10px 0"><button class="btn btn-ghost btn-sm" id="chat-file-more" style="display:none" onclick="chatLoadFiles(true)">Ще</button></div>
+        </div>
       </div>
     </div>
 
@@ -979,7 +996,7 @@
 
 <script src="/i18n.js"></script>
 <script src="/static/i18n.js?v=1"></script>
-<script src="/static/dashboard.js?v=88"></script>
+<script src="/static/dashboard.js?v=90"></script>
 <script src="/static/apps.js?v=6"></script>
 
 </body>

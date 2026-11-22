@@ -553,8 +553,8 @@ class DatabaseTracker:
             if cur.fetchone():
                 download_id = 0          # вже є — нічого не додаємо
             else:
-                # Файл з таким шляхом уже може бути в ядрі (залитий через «Каталог»,
-                # Nextcloud тощо) — тоді беремо його запис, а не падаємо на uniq_path
+                # Файл з таким шляхом уже може бути в ядрі (залитий через «Каталог»
+                # чи покладений у теку руками) — тоді беремо його запис, а не падаємо на uniq_path
                 cur.execute("""
                     INSERT INTO files (storage_id, rel_path, name, ext, size_bytes,
                                        width, height, md5_hash, created_at)
@@ -1948,8 +1948,7 @@ class FurryArchiver:
             self.config.get('download', 'cross_source_threshold') or CROSS_SOURCE_THRESHOLD
         )
 
-        # Сховище — локальна тека (Nextcloud — окремий застосунок дашборда,
-        # архіватор з ним не працює)
+        # Сховище — локальна тека
         self.nc_scanner   = LocalStorage(self.config)
         self.storage_mode = 'local'
         if self.config.get('local', 'path'):
