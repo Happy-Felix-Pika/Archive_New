@@ -187,6 +187,12 @@ class AppManager:
             with db.cursor() as cur:
                 cur.execute("SELECT id, status FROM apps")
                 known = {r["id"]: r["status"] for r in cur.fetchall()}
+        except Exception as e:
+            # немає прав чи таблиці — пояснюємо, а не валимо сервер трасою
+            print(f"  ⚠ Не вдалося прочитати список застосунків: {e}\n"
+                  f"    Перевір, що користувач бази має всі права на свою базу "
+                  f"(GRANT ALL PRIVILEGES ON <база>.* TO <користувач>).")
+            return
         finally:
             db.close()
 
