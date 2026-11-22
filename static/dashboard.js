@@ -1407,6 +1407,18 @@ let _galSelectedArtistId = '';
 
 async function galLoadArtists(filter) {
   const f = filter || _galFilter || 'all';
+  if (_galSource && _galSource !== 'local') {
+    // підключений архів: його автори (номери — того архіву)
+    const wrap = document.getElementById('gal-artist-btn')?.parentElement;
+    if (_galSource === 'combined') { if (wrap) wrap.style.display = 'none'; return; }
+    try {
+      const r = await fetch(`${API}/api/external-archives/${_galSource}/artists?filter=${encodeURIComponent(f)}`).then(x => x.json());
+      _galArtists = (r.unsupported || r.error) ? [] : (r.artists || []);
+      if (wrap) wrap.style.display = _galArtists.length ? '' : 'none';
+    } catch { _galArtists = []; }
+    galRenderArtistList('');
+    return;
+  }
   try {
     const params = new URLSearchParams({ filter: f });
     _galTagIds.forEach(id => params.append('tag_id', id));
@@ -1467,7 +1479,8 @@ function galSelectArtist(id, label) {
   document.getElementById('gal-artist-picker').style.display = 'none';
   galRenderArtistList('');
   galSelectPool('', false);  // скидаємо пул — список пулів залежить від автора
-  galleryInit();
+  if (_galSource === 'local') galleryInit();
+  else { galLoadPools(); galExternalShuffle(); }
 }
 
 function galToggleArtistPicker() {
@@ -1491,14 +1504,17 @@ document.addEventListener('input', e => {
 // ── Пул (pool) ────────────────────────────────────────────────────────────
 let _galPools = [];
 let _galSelectedPool = '';
+let _galExtPoolsToken = 0, _galExtListToken = 0, _galExtShowToken = 0;
 let _galFavOnly = false;
 
 async function galLoadPools() {
   // Чужа бібліотека: серії беремо в того архіву.
   if (_galSource && _galSource !== 'local' && _galSource !== 'combined') {
     const btnWrap = document.getElementById('gal-pool-btn')?.parentElement;
+    const token = ++_galExtPoolsToken;
     try {
       const r = await fetch(`${API}/api/external-archives/${_galSource}/pools`).then(x => x.json());
+      if (token !== _galExtPoolsToken) return;     // уже прийшов новіший запит
       if (r.unsupported || r.error) {
         // Стара версія на тому боці не вміє віддавати серії — ховаємо кнопку
         _galPools = [];
@@ -1599,9 +1615,12 @@ function galSourceChange() {
   _galArtistId = '';
   const pl = document.getElementById('gal-pool-label');   if (pl) pl.textContent = t('gal.allpools');
   const al = document.getElementById('gal-artist-label'); if (al) al.textContent = t('gal.allartists');
-  // кнопка авторів показує НАШИХ авторів — для чужого архіву вона не має сенсу
-  const aw = document.getElementById('gal-artist-btn')?.parentElement;
-  if (aw) aw.style.display = (_galSource === 'local') ? '' : 'none';
+  // теги, автори й серії — того архіву, який дивимось (номери в кожного свої)
+  _galTagIds = new Set();
+  _galHideTagIds = new Set();
+  galRenderSelectedTagChips();
+  galLoadAllTags();
+  galLoadArtists(_galFilter);
   galLoadPools();
   if (_galSource === 'local') galleryInit();
   else galExternalShuffle();
@@ -1617,6 +1636,7 @@ async function galExternalShuffle() {
   // _allTags), а хост уже сам резолвить їх у свої власні ID.
   const tagNames     = [..._galTagIds].map(id => _allTags.find(t=>t.id===id)?.name).filter(Boolean).join(',');
   const hideTagNames = [..._galHideTagIds].map(id => _allTags.find(t=>t.id===id)?.name).filter(Boolean).join(',');
+  const token = ++_galExtListToken;
   try {
     let items;
     if (_galSource === 'combined') {
@@ -1634,16 +1654,15 @@ async function galExternalShuffle() {
       // Тип файлу (фото/відео/флеш) і серію теж передаємо — раніше вони
       // не відправлялись, і чужа бібліотека показувала все купою.
       params.set('filter', _galFilter || 'all');
-      if (_galSelectedPool) {
-        params.set('subfolder', _galSelectedPool);
-        // id автора тут — ЧУЖОГО архіву: береться з самої серії, а не з
-        // нашого списку авторів (там інші номери)
-        if (_galSelectedArtistId) params.set('artist_id', _galSelectedArtistId);
-      }
+      if (_galSelectedPool) params.set('subfolder', _galSelectedPool);
+      // id автора — ЧУЖОГО архіву (з його списку авторів чи з серії)
+      if (_galSelectedArtistId && _galSelectedArtistId !== 'fav') params.set('artist_id', _galSelectedArtistId);
       const r = await fetch(`${API}/api/external-archives/${_galSource}/gallery/ids?${params}`).then(r => r.json());
+      if (token !== _galExtListToken) return;      // поки чекали, вибрали інше
       if (r.error) { wrap.innerHTML = `<div class="gallery-empty">✗ ${esc(r.error)}</div>`; return; }
       items = (r.ids || []).map(id => ({ source: _galSource, id }));
     }
+    if (token !== _galExtListToken) return;
     if (!items.length) { wrap.innerHTML = `<div class="gallery-empty">${t('gal.nofiles')}</div>`; return; }
     _galExtItems = items;
     status.textContent = `${items.length.toLocaleString('uk-UA')} файлів`;
@@ -1657,12 +1676,16 @@ async function galExternalShow(idx) {
   _galExtIdx = idx;
   const item = _galExtItems[idx];
   const wrap = document.getElementById('gallery-wrap');
-  wrap.innerHTML = `<div class="gallery-loading"><div class="gallery-spinner"></div>${t('common.loading')}</div>`;
+  const token = ++_galExtShowToken;
+  wrap.innerHTML = `<div class="gallery-loading"><div class="gallery-spinner"></div>${t('common.loading')}</div>
+    <div class="gallery-nav prev" onclick="galExternalNav(-1)">‹</div>
+    <div class="gallery-nav next" onclick="galExternalNav(1)">›</div>`;
   try {
     const metaUrl = item.source === 'local'
       ? `${API}/api/gallery/meta/${item.id}`
       : `${API}/api/external-archives/${item.source}/gallery/meta/${item.id}`;
     const d = await fetch(metaUrl).then(r => r.json());
+    if (token !== _galExtShowToken) return;
     if (d.error) { wrap.innerHTML = `<div class="gallery-empty">✗ ${esc(d.error)}</div>`; return; }
     const isVideo  = ['webm','mp4'].includes((d.file_ext||'').toLowerCase());
     const mediaUrl = item.source === 'local' ? (d.share_url || d.stream_url) : `${API}${d.stream_url}`;
@@ -1686,12 +1709,14 @@ async function galExternalShow(idx) {
           </div>
           <div class="gallery-info-secondary">
             <span class="gallery-filename">${esc(d.filename)}</span>
+            <span class="muted" style="font-size:11px">${idx + 1} / ${_galExtItems.length.toLocaleString('uk-UA')}</span>
           </div>
+          ${item.source !== 'local' && item.source !== 'combined' ? galPoolBadges(d) : ''}
           ${d.tags?.length ? `<div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:4px">${d.tags.slice(0,30).map(tg=>`<span class="tag-chip">${esc(tg?.name ?? tg)}</span>`).join('')}</div>` : ''}
         </div>
       </div>
-      <div class="gallery-nav prev" onclick="galExternalNav(-1)" style="position:absolute;left:-64px;top:calc(50% - 60px)">‹</div>
-      <div class="gallery-nav next" onclick="galExternalNav(1)"  style="position:absolute;right:-64px;top:calc(50% - 60px)">›</div>`;
+      <div class="gallery-nav prev" onclick="galExternalNav(-1)">‹</div>
+      <div class="gallery-nav next" onclick="galExternalNav(1)">›</div>`;
   } catch (e) {
     wrap.innerHTML = `<div class="gallery-empty">✗ ${esc(e.message)}</div>`;
   }
@@ -1771,6 +1796,14 @@ function galSelectPool(name, refresh = true, artistId = null, artistName = '') {
   // Якщо обираємо конкретний pool зі списку "всі автори" (без фільтра автора) —
   // одразу застосовуємо і фільтр автора цього pool, інакше назви пулів можуть
   // збігатись у різних авторів, і галерея показала б суміш замість конкретного.
+  // У підключеному архіві список серій — усіх авторів разом, тож автор
+  // береться з обраної серії завжди (інакше лишався автор попередньої
+  // серії, і нова показувалась порожньою).
+  if (_galSource !== 'local' && artistId && name) {
+    _galSelectedArtistId = String(artistId);
+    const albl = document.getElementById('gal-artist-label');
+    if (albl) albl.textContent = artistName ? `👤 ${artistName}` : t('gal.allartists');
+  }
   if (name && artistId && !_galSelectedArtistId) {
     _galSelectedArtistId = String(artistId);
     _galArtistId = String(artistId);
@@ -1831,7 +1864,13 @@ document.addEventListener('input', e => {
 
 async function galLoadAllTags() {
   try {
-    _allTags = await fetch(`${API}/api/tags`).then(r => r.json());
+    if (_galSource && _galSource !== 'local' && _galSource !== 'combined') {
+      // теги підключеного архіву (фільтр туди йде назвами — id у кожного свої)
+      const r = await fetch(`${API}/api/external-archives/${_galSource}/tags`).then(x => x.json());
+      _allTags = (r.unsupported || r.error) ? [] : (r.tags || []);
+    } else {
+      _allTags = await fetch(`${API}/api/tags`).then(r => r.json());
+    }
     galRenderTagPicker();
     galRenderAllTagsList();
   } catch {}

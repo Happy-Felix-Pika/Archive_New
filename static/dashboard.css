@@ -184,6 +184,16 @@ tbody td{padding:10px 16px;font-size:13px;font-family:var(--mono);vertical-align
 .gallery-nav:hover { background: rgba(124,106,247,.25); border-color: var(--accent); }
 .gallery-nav.prev { left: -64px; }
 .gallery-nav.next { right: -64px; }
+/* Арти й Онлайн на компʼютері: стрілки стоять на краях екрана (поруч із
+   меню і біля правого краю) і не рухаються, коли картинка інша за розміром,
+   — можна гортати, не зсуваючи курсор. */
+@media (min-width: 861px) {
+  #page-gallery .gallery-nav, #page-live .gallery-nav {
+    position: fixed !important; top: 50% !important; transform: translateY(-50%);
+  }
+  #page-gallery .gallery-nav.prev, #page-live .gallery-nav.prev { left: 236px !important; right: auto !important; }
+  #page-gallery .gallery-nav.next, #page-live .gallery-nav.next { right: 16px !important; left: auto !important; }
+}
 .gallery-info { display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:12px;font-family:var(--mono);font-size:12px;color:var(--muted) }
 .gallery-info a { color: var(--accent2); }
 .gallery-counter { font-family:var(--mono);font-size:12px;color:var(--muted);text-align:center }
