@@ -14,6 +14,19 @@ from core.db import get_db
 # ── Migrate / ensure tables exist ─────────────────────────────────────────
 
 ENSURE_TABLES_SQL = [
+    # Публічні посилання «поділитися»: файл або тека, відкриваються без входу
+    """CREATE TABLE IF NOT EXISTS share_links (
+        id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+        token       VARCHAR(64) NOT NULL UNIQUE,
+        kind        VARCHAR(10) NOT NULL,
+        rel_path    VARCHAR(1024) NOT NULL,
+        file_id     BIGINT NULL,
+        created_by  INT NOT NULL,
+        created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+        expires_at  DATETIME NULL,
+        views       INT NOT NULL DEFAULT 0,
+        INDEX idx_by (created_by)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
     # Журнал дій модераторів: що зроблено, ким, і що потрібно, щоб це
     # відмінити (payload). Адмін бачить журнал і відміняє одним кліком.
     """CREATE TABLE IF NOT EXISTS mod_actions (
