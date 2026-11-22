@@ -2641,6 +2641,106 @@ class FurryArchiver:
 
     # ── MIGRATE: перенос старых download.txt → БД ─────────────────────────────
 
+    def download_single_post(self, artist_name: str, post_ref: str, dry_run: bool = False):
+        """
+        «Лише цей арт»: скачати один пост (e621:123 / inkbunny:456) у теку
+        автора — тим самим шляхом, що й повне скачування (дублікати, пули,
+        теги, «На перевірку»), але без решти бібліотеки. Автора, якого ще
+        не було, створюємо з вимкненим автооновленням.
+        """
+        source, _, num = (post_ref or "").partition(":")
+        source = {"ib": "inkbunny"}.get(source.strip().lower(), source.strip().lower())
+        num = num.strip()
+        if source not in ("e621", "inkbunny") or not num.isdigit():
+            print(f"✗ Невірний пост: {post_ref} (очікується e621:123 або inkbunny:123)")
+            return
+        name = (artist_name or "").strip().lstrip("@")
+        print("\n" + "=" * 60)
+        print(f"  ЛИШЕ ОДИН АРТ: {source} {num} → автор «{name}»")
+        print("=" * 60)
+
+        # Автор: наявний (за назвою, текою чи іншою назвою) або новий
+        with self.db.cursor() as cur:
+            cur.execute("""SELECT id, artist_name, folder_name FROM artists
+                           WHERE artist_name=%s OR folder_name=%s
+                           ORDER BY (folder_name=%s) DESC LIMIT 1""", (name, f"@{name}", f"@{name}"))
+            row = cur.fetchone()
+            if not row:
+                try:
+                    cur.execute("""SELECT a.id, a.artist_name, a.folder_name FROM artist_aliases al
+                                   JOIN artists a ON a.id = al.artist_id WHERE al.alias_name=%s""", (name,))
+                    row = cur.fetchone()
+                except Exception:
+                    row = None
+        if row:
+            artist_id, folder_name, name = row['id'], row['folder_name'], row['artist_name']
+            print(f"  автор в архіві: {name} ({folder_name})")
+        else:
+            folder_name = f"@{name}"
+            artist_id = self.tracker.get_or_create_artist(folder_name, name, self.user_id)
+            with self.db.cursor() as cur:
+                cur.execute("UPDATE artists SET auto_update=0 WHERE id=%s", (artist_id,))
+            self.db.commit()
+            print(f"  новий автор {folder_name} (автооновлення вимкнено)")
+        artist_path = self._ensure_artist_dir(folder_name)
+
+        post_id = f"{'e621' if source == 'e621' else 'ib'}_{num}"
+        if self.tracker.is_post_downloaded(artist_id, post_id):
+            print(f"  ⊘ цей пост уже є в архіві ({post_id})")
+            return
+        if dry_run:
+            print(f"  [DRY RUN] скачав би {post_id}")
+            return
+        temp_dir = os.path.join(self.config.get('download', 'local_temp_dir') or './temp_downloads', name)
+        os.makedirs(temp_dir, exist_ok=True)
+        check_dup = self.config.get('download', 'check_duplicates') is not False
+
+        results = []          # (дані файлу, post_url, теги)
+        if source == 'e621':
+            if not self.e621_dl:
+                print("✗ e621 не налаштовано"); return
+            try:
+                post = self.e621_dl.get_post(num)
+                if post:
+                    self.e621_dl.categorize([post])
+            except Exception as e:
+                print(f"✗ e621 {num}: {e}"); return
+            if not post:
+                print(f"✗ e621 {num}: пост не знайдено"); return
+            res = self.e621_dl.download_post(post, temp_dir)
+            if res:
+                results.append((res, res['post_url'], res.get('tags')))
+        else:
+            if not (self.ib_dl and self.ib_dl.sid):
+                print("✗ Inkbunny не налаштовано або вхід не вдався"); return
+            res = self.ib_dl.download_submission({'submission_id': num}, temp_dir)
+            if res:
+                for f in res['files']:
+                    results.append((f, res['post_url'], res.get('tags')))
+        if not results:
+            print("✗ Не вдалося скачати (немає файлу або формат не дозволений)")
+            return
+
+        done = 0
+        for data, url, tags in results:
+            data['page_num'] = data.get('page_num', 1)
+            status = self._check_and_upload(artist_id, artist_path, data, post_id=post_id, source=source,
+                                            post_url=url, dry_run=False, check_duplicates=check_dup,
+                                            tags=tags, secondary=False)
+            if status == 'uploaded':
+                done += 1
+                print(f"  ✓ {data['filename']}")
+            elif status == 'md5_dup':
+                print(f"  ⊘ точно такий файл уже є: {data['filename']}")
+            elif status.startswith('phash_pending') or status.startswith('pool_priority'):
+                print(f"  ⏳ схожий уже є — {data['filename']} у «На перевірку»")
+            elif status.startswith('cross_dup'):
+                print(f"  ⊘ та сама робота вже є з іншого сайту")
+            else:
+                print(f"  ✗ {status}")
+        self.tracker.save()           # пули звірить кінець запуску (як і для автора)
+        print(f"\n✓ Готово: збережено {done} файл(ів) у {folder_name}")
+
     def _ensure_artist_dir(self, folder_name: str) -> str:
         """Тека автора в сховищі (створюється, якщо нема) → відносний шлях."""
         root = getattr(self.nc_scanner, 'root', '') or ''
@@ -3585,6 +3685,8 @@ def main():
     parser.add_argument('--setup',         action='store_true', help='Создать шаблон конфига')
     parser.add_argument('--migrate-tags',  action='store_true', help='Скачать теги из e621/Inkbunny для уже скачанных файлов')
     parser.add_argument('--sync-all',      action='store_true', help='Просканувати всю кореневу папку і каталоги в ній, додати всі знайдені файли в БД')
+    parser.add_argument('--single-post', type=str, default=None,
+                        help='Разом з --artist: скачати лише один пост (e621:123 або inkbunny:456)')
     parser.add_argument('--artist',        type=str, default=None, help='Завантажити всю бібліотеку одного конкретного автора (створює папку якщо треба)')
     parser.add_argument('--auto-update',   action='store_true', help='Перевірити на нове ТІЛЬКИ авторів з увімкненим авто-оновленням (для щоденного планувальника)')
     parser.add_argument('--find-duplicates', action='store_true', help='Ретроактивний пошук дублікатів у вже наявній бібліотеці (обмежується --artist і/або --subfolder, якщо задані)')
@@ -3620,6 +3722,8 @@ def main():
             archiver.recheck_pools(args.artist)
         elif args.recheck_pools:
             archiver.recheck_pools_all()
+        elif args.single_post and args.artist:
+            archiver.download_single_post(args.artist, args.single_post, dry_run=args.dry_run)
         elif args.artist:
             archiver.run(dry_run=args.dry_run, artist_name=args.artist)
         elif args.auto_update:

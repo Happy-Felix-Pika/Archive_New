@@ -4292,7 +4292,8 @@ function liveShowItem(idx) {
     </div>
     <div style="display:flex;gap:8px;justify-content:center;margin-top:10px">
       <button class="btn btn-ghost" onclick="liveBackToResults()">← ${t('live.backtoresults')}</button>
-      ${canModerate() ? `<button class="btn btn-primary" onclick="liveDownloadArtistFromViewer()">⬇ ${t('live.downloadthisartist')}</button>
+      ${canModerate() && ['e621','inkbunny'].includes(r.source) && !r.in_library ? `<button class="btn btn-primary" onclick="liveDownloadOnePost()" title="Лише цю роботу — у теку автора, без решти його бібліотеки">⬇ Лише цей арт</button>` : ''}
+      ${canModerate() ? `<button class="btn btn-ghost" onclick="liveDownloadArtistFromViewer()">⬇ ${t('live.downloadthisartist')}</button>
         <button class="btn btn-ghost" onclick="liveAttachArtistFromViewer()" title="Той самий автор уже є в архіві під іншою назвою">🔗 Приєднати до автора…</button>` : ''}
     </div>
     <div class="gallery-nav prev" onclick="liveGo(-1)" style="position:absolute;left:-64px;top:calc(50% - 60px)">‹</div>
@@ -4495,6 +4496,31 @@ async function liveSearchPool(poolId, poolName) {
   } catch (e) {
     grid.innerHTML = `<div style="opacity:.6">${t('catalog.error')}</div>`;
   }
+}
+
+// «Лише цей арт»: одна робота в теку автора (новий автор — без автооновлення)
+async function liveDownloadOnePost() {
+  const r = _liveResults[_liveIdx];
+  if (!r) return;
+  const names = (r.artists || []).filter(Boolean);
+  // автор, який уже є в архіві (зокрема під іншою назвою), — у його теку
+  const known = r.artists_in_archive || {};
+  let name = names.find(n => known[n]) ? known[names.find(n => known[n])] : names[0];
+  if (names.length > 1 && !names.some(n => known[n])) {
+    name = prompt(`У роботи кілька авторів: ${names.join(', ')}\nУ чию теку покласти?`, names[0]);
+    if (!name) return;
+  }
+  if (!name) name = prompt('Автора не вказано. У яку теку автора покласти?', '');
+  if (!name) return;
+  try {
+    const resp = await fetch(`${API}/api/run`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ artist: name.trim(), single_post: `${r.source}:${r.id}` })
+    });
+    const d = await resp.json().catch(() => ({}));
+    if (!resp.ok) { toast(d.error || t('toast.starterr'), 'err'); return; }
+    toast(`Качаю цей арт у «${name}» — хід видно у вкладці «Запуск»`, 'ok');
+  } catch { toast(t('toast.starterr'), 'err'); }
 }
 
 function liveDownloadArtistFromViewer() {
