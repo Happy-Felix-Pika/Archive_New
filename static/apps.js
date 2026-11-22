@@ -68,7 +68,8 @@ async function appsBuildMenu() {
       el.className = 'nav-item';
       el.dataset.page  = item.page_id;
       el.dataset.appId = item.app_id;
-      el.innerHTML = `<span class="nav-icon">${item.icon || '🧩'}</span> <span>${item.label || item.id}</span>`;
+      el.innerHTML = `<span class="nav-icon">${item.icon || '🧩'}</span> <span>${item.label || item.id}</span>` +
+        (item.page_id === 'chat' ? ` <span class="nav-badge" id="chat-unread-badge" style="display:none;margin-left:auto;background:var(--accent);color:#fff;border-radius:10px;padding:1px 7px;font-size:10.5px"></span>` : '');
       el.addEventListener('click', () => {
         showPage(item.page_id);
         document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
@@ -111,6 +112,7 @@ async function appsBuildMenu() {
   // у кінець, коли всі пункти вже на місці.
   const trash = nav.querySelector('.nav-item[data-page="trash"]');
   if (trash) nav.appendChild(trash);
+  if (typeof chatUpdateUnreadBadge === 'function') chatUpdateUnreadBadge();   // лічильник чату — одразу
 
   appsLoadStartupScripts();
 }

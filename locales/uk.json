@@ -311,5 +311,7 @@
  "chat.saved_to_notes": "Збережено в нотатки",
  "chat.delete_confirm": "Видалити цю розмову? Вона зникне лише в тебе.",
  "chat.deleted": "Розмову видалено",
- "chat.note_delete_confirm": "Видалити нотатку?"
+ "chat.note_delete_confirm": "Видалити нотатку?",
+ "chat.read": "Прочитано",
+ "chat.sent": "Надіслано, ще не прочитано"
 }

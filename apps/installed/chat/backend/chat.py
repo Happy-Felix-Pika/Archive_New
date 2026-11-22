@@ -66,12 +66,22 @@ def api_chat_messages():
     db   = get_db()
     rows = qq(db, f"SELECT * FROM chat_messages WHERE {' AND '.join(where)} ORDER BY created_at ASC", args)
     with db.cursor() as cur:
-        cur.execute(f"UPDATE chat_messages SET is_read=1 WHERE {' AND '.join(where)} AND direction='in'", args)
+        cur.execute(f"UPDATE chat_messages SET is_read=1 WHERE {' AND '.join(where)} AND direction='in' AND is_read=0", args)
+        newly_read = cur.rowcount
+        if newly_read and peer_local_user_id:
+            # локальний співрозмовник: його вихідні до мене — прочитані
+            cur.execute("""UPDATE chat_messages SET read_at=NOW()
+                           WHERE owner_user_id=%s AND peer_local_user_id=%s AND direction='out' AND read_at IS NULL""",
+                        (int(peer_local_user_id), uid))
     db.commit(); db.close()
+    if newly_read and peer_url:
+        from .by_url import send_read_receipt
+        send_read_receipt(uid, peer_url, peer_identity or "")
     import json as _json
     for r in rows:
         if r["created_at"]: r["created_at"] = r["created_at"].isoformat()
         r.pop("deliver_token", None)
+        if r.get("read_at"): r["read_at"] = r["read_at"].isoformat()
         try:
             r["attachment"] = _json.loads(r["attachment"]) if r.get("attachment") else None
         except (ValueError, KeyError):
@@ -82,10 +92,21 @@ def api_chat_messages():
 @bp.route("/api/chat/unread-count")
 def api_chat_unread_count():
     db  = get_db()
+    uid = current_user_id()
     row = q(db, "SELECT COUNT(*) AS c FROM chat_messages WHERE owner_user_id=%s AND direction='in' AND is_read=0",
-            (current_user_id(),))
+            (uid,))
+    latest = None
+    if row["c"]:
+        latest = q(db, """SELECT id, peer_label, peer_local_user_id, peer_url, peer_identity, body, attachment
+                          FROM chat_messages WHERE owner_user_id=%s AND direction='in' AND is_read=0
+                          ORDER BY id DESC LIMIT 1""", (uid,))
+        if latest:
+            if not latest["body"] and latest.get("attachment"):
+                latest["body"] = "📎 файл"
+            latest.pop("attachment", None)
+            latest["body"] = (latest["body"] or "")[:140]
     db.close()
-    return jsonify({"count": row["c"]})
+    return jsonify({"count": row["c"], "latest": latest})
 
 
 @bp.route("/api/chat/send", methods=["POST"])

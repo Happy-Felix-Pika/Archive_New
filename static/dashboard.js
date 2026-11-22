@@ -3424,6 +3424,7 @@ function _chatAttHtml(a) {
 }
 
 async function loadChatConversations() {
+  _chatRenderNotifyBtn();
   const list = document.getElementById('chat-conversations-list');
   list.innerHTML = `<div style="color:var(--muted);font-size:12px">${t('common.loading')}</div>`;
   const notesRow = `
@@ -3454,6 +3455,9 @@ async function loadChatConversations() {
   chatUpdateUnreadBadge();
 }
 
+let _chatNotifiedId = null;            // останнє вхідне, про яке вже сповістили
+const _chatBaseTitle = document.title;
+
 async function chatUpdateUnreadBadge() {
   try {
     // Чат — застосунок, його може не бути встановлено. Тоді просто
@@ -3462,9 +3466,55 @@ async function chatUpdateUnreadBadge() {
     if (resp.status === 404) { const b=document.getElementById('chat-unread-badge'); if (b) b.style.display='none'; return; }
     const r = await resp.json();
     const badge = document.getElementById('chat-unread-badge');
-    if (r.count > 0) { badge.textContent = r.count; badge.style.display = ''; }
-    else { badge.style.display = 'none'; }
+    if (badge) {
+      if (r.count > 0) { badge.textContent = r.count; badge.style.display = ''; }
+      else { badge.style.display = 'none'; }
+    }
+    document.title = r.count > 0 ? `(${r.count}) ${_chatBaseTitle}` : _chatBaseTitle;
+    _chatMaybeNotify(r.latest);
   } catch {}
+}
+
+function _chatIsOpenThread(m) {
+  const p = _chatCurrentPeer;
+  if (!p || currentPage !== 'chat' || document.hidden) return false;
+  return m.peer_url ? (p.peer_url === m.peer_url && (p.peer_identity || '') === (m.peer_identity || ''))
+                    : p.peer_local_user_id == m.peer_local_user_id;
+}
+
+function _chatMaybeNotify(m) {
+  if (!m) return;
+  let seen = _chatNotifiedId;
+  if (seen === null) { try { seen = parseInt(localStorage.getItem('chatNotifiedId') || '0'); } catch { seen = 0; } }
+  if (m.id <= seen) { _chatNotifiedId = seen; return; }
+  _chatNotifiedId = m.id;
+  try { localStorage.setItem('chatNotifiedId', String(m.id)); } catch {}
+  if (_chatIsOpenThread(m)) return;                       // і так дивишся в цю розмову
+  const text = `💬 ${m.peer_label}: ${m.body}`;
+  toast(text, 'ok');
+  try {
+    if ('Notification' in window && Notification.permission === 'granted' && document.hidden) {
+      const n = new Notification(`💬 ${m.peer_label}`, { body: m.body, tag: 'chat-' + m.id, icon: '/static/icons/icon-192.png' });
+      n.onclick = () => {
+        window.focus(); n.close();
+        showPage('chat');
+        chatOpenThread({ peer_local_user_id: m.peer_local_user_id, peer_url: m.peer_url,
+                         peer_identity: m.peer_identity, label: m.peer_label });
+      };
+    }
+  } catch {}
+}
+
+function _chatRenderNotifyBtn() {
+  const b = document.getElementById('chat-notify-btn');
+  if (!b) return;
+  b.style.display = ('Notification' in window && Notification.permission === 'default') ? '' : 'none';
+}
+
+async function chatEnableNotifications() {
+  try { await Notification.requestPermission(); } catch {}
+  _chatRenderNotifyBtn();
+  if (Notification.permission === 'granted') toast('🔔 Сповіщення увімкнено', 'ok');
 }
 
 function chatOpenThread(peer) {
@@ -3486,7 +3536,7 @@ async function chatLoadMessages() {
     const msgs = await fetch(`${API}/api/chat/messages?${_chatPeerParams(_chatCurrentPeer)}`).then(r => r.json());
     const wrap = document.getElementById('chat-thread-messages');
     if (!Array.isArray(msgs)) return;
-    const sig = msgs.length + ':' + (msgs.at(-1)?.id || '');
+    const sig = msgs.length + ':' + (msgs.at(-1)?.id || '') + ':' + msgs.filter(m => m.read_at).length;
     if (sig === _chatLastSig && wrap.childElementCount) { chatUpdateUnreadBadge(); return; }  // без мерехтіння відео
     _chatLastSig = sig;
     wrap.innerHTML = msgs.map(m => {
@@ -3497,6 +3547,7 @@ async function chatLoadMessages() {
         ${_chatAttHtml(m.attachment)}
         <div style="font-size:9.5px;opacity:.7;margin-top:3px;display:flex;gap:8px;align-items:center">
           <span>${fmtDate(m.created_at)}</span>
+          ${out ? `<span title="${m.read_at ? t('chat.read') + ' ' + fmtDate(m.read_at) : t('chat.sent')}" style="font-weight:700;letter-spacing:-2px;${m.read_at ? 'color:#fff;opacity:1;text-shadow:0 0 4px #38bdf8' : 'opacity:.75'}">${m.read_at ? '✓✓' : '✓'}</span>` : ''}
           <span class="chat-msg-pin" title="${t('chat.to_notes')}" style="cursor:pointer;margin-left:auto" onclick="chatMsgToNotes(${m.id})">📌</span>
         </div>
       </div>`; }).join('');
@@ -6038,7 +6089,7 @@ async function showAppShell() {
     document.querySelector('.nav-item[data-page="gallery"]').classList.add('active');
     showPage('gallery');
   }
-  setInterval(chatUpdateUnreadBadge, 20000);
+  setInterval(chatUpdateUnreadBadge, 15000);
   chatUpdateUnreadBadge();
   galLoadArtists();
   galLoadAllTags();
