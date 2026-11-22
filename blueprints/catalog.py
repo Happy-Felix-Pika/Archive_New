@@ -71,7 +71,13 @@ def _safe_rel_path(raw: str) -> str | None:
     parts = [p for p in rel.split("/") if p not in ("", ".")]
     if any(p == ".." for p in parts):
         return None
-    return "/".join(parts)
+    rel = "/".join(parts)
+    # службові файли архіву (ключ сесій, налаштування, кеш, кошик) —
+    # недосяжні через каталог ні для кого
+    from core.storage_api import is_service_path
+    if is_service_path(rel):
+        return None
+    return rel
 
 
 @bp.route("/api/catalog/excluded-folders")
@@ -135,8 +141,6 @@ def api_catalog_list(hidden_folders_override=None):
     # локальної теки живуть тепер у core/storage_api.py, а тут лишається
     # тільки те, що справді стосується каталогу — приховані теки,
     # службовий download.txt і сортування.
-    if rel_path.strip("/").split("/")[0] == ".trash":
-        return jsonify({"error": "Кошик переглядається в розділі «Кошик»"}), 403
 
     try:
         entries = get_storage().list_dir(rel_path)
@@ -148,9 +152,12 @@ def api_catalog_list(hidden_folders_override=None):
     if not entries and rel_path and not get_storage().exists(rel_path):
         return jsonify({"error": "Папку не знайдено"}), 404
 
+    from core.storage_api import is_service_path
     folders, files = [], []
     for it in entries:
         name = it["name"]
+        if is_service_path(f"{rel_path}/{name}" if rel_path else name):
+            continue
         if it["is_dir"]:
             # .trash — кошик ядра; у каталозі йому не місце, для нього є
             # окремий розділ «Кошик»

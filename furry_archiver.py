@@ -1030,6 +1030,19 @@ class LocalStorage:
 # E621
 # ─────────────────────────────────────────────────────────────────────────────
 
+_SERVICE_ROOT_NAMES = {
+    "archiver_config.json", "archiver_config.json.tmp",
+    "e621_tag_categories.json", "e621_tag_categories.json.tmp",
+    "pending_review", "cache", "temp_downloads", "tmp_hashes", "VERSION.json",
+}
+
+
+def _is_service_rel(rel: str) -> bool:
+    """Те саме правило, що й core/storage_api.is_service_path (архіватор — окремий процес)."""
+    parts = [p for p in rel.replace("\\", "/").strip("/").split("/") if p]
+    return bool(parts) and (any(p.startswith(".") for p in parts) or parts[0] in _SERVICE_ROOT_NAMES)
+
+
 # Категорії тегів e621 (номери з їхнього довідника тегів)
 E621_TAG_CATEGORIES = {0: 'general', 1: 'artist', 3: 'copyright', 4: 'character',
                        5: 'species', 6: 'invalid', 7: 'meta', 8: 'lore'}
@@ -3021,6 +3034,8 @@ class FurryArchiver:
                 if fname == 'download.txt':
                     continue
                 rel = os.path.relpath(os.path.join(dirpath, fname), root)
+                if _is_service_rel(rel):
+                    continue          # службові файли архіву (ключ, налаштування, кеш)
                 by_folder.setdefault(folder_name, []).append({'name': fname, 'rel': rel, 'subfolder': subfolder})
 
         total_files = sum(len(v) for v in by_folder.values())
