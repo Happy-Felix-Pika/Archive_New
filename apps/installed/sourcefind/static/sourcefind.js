@@ -57,7 +57,7 @@
     const c = s.counts || {};
     document.getElementById('sf-status').innerHTML = `
       <div style="display:flex;gap:22px;flex-wrap:wrap;font-size:13px">
-        <div><div class="muted" style="font-size:11px">ЩЕ НЕ ПЕРЕВІРЕНО</div><div style="font-size:20px;font-weight:600">${(s.todo || 0).toLocaleString('uk-UA')}</div></div>
+        <div><div class="muted" style="font-size:11px">ЩЕ НЕ ПЕРЕВІРЕНО</div><div style="font-size:20px;font-weight:600">${s.todo == null ? '<span class="muted" style="font-size:13px">рахую…</span>' : s.todo.toLocaleString('uk-UA')}</div></div>
         <div><div class="muted" style="font-size:11px">ЗНАЙДЕНО</div><div style="font-size:20px;font-weight:600;color:var(--green)">${(c.applied || 0).toLocaleString('uk-UA')}</div></div>
         <div><div class="muted" style="font-size:11px">НА ПЕРЕВІРКУ</div><div style="font-size:20px;font-weight:600;color:var(--yellow)">${(c.review || 0).toLocaleString('uk-UA')}</div></div>
         <div><div class="muted" style="font-size:11px">НЕ ЗНАЙДЕНО</div><div style="font-size:20px;font-weight:600">${(c.none || 0).toLocaleString('uk-UA')}</div></div>
@@ -75,12 +75,16 @@
     if (j) {
       const res = (() => { try { return typeof j.result === 'string' ? JSON.parse(j.result) : j.result; } catch { return null; } })();
       box.innerHTML = running
-        ? `<div style="height:6px;background:var(--surface2);border-radius:3px;overflow:hidden"><div style="height:100%;width:${j.progress || 0}%;background:var(--accent)"></div></div>
+        ? `<div style="display:flex;align-items:center;gap:10px"><div class="gallery-spinner" style="width:16px;height:16px;margin:0"></div>
+             <div style="font-weight:600;font-size:13px">Пошук іде — ${j.progress || 0}%</div></div>
+           <div style="height:8px;background:var(--surface2);border-radius:4px;overflow:hidden;margin-top:8px"><div style="height:100%;width:${Math.max(2, j.progress || 0)}%;background:var(--accent);transition:width .4s"></div></div>
            <div class="muted" style="font-size:12px;margin-top:6px">${esc(j.message || 'Готуюсь…')}</div>`
         : `<div class="muted" style="font-size:12px">Останній запуск: ${esc(j.status)}${res ? ` — знайдено ${res.applied || 0}, на перевірку ${res.review || 0}, не знайдено ${res.none || 0}` : ''}${j.error ? ` — ${esc(j.error)}` : ''}</div>`;
     } else box.innerHTML = '';
-    if (running && !_poll) _poll = setInterval(sourcefindRefresh, 3000);
-    if (!running && _poll) { clearInterval(_poll); _poll = null; }
+    // поки йде пошук або ще рахується «не перевірено» — оновлюємо сторінку саму
+    const want = running || s.todo == null;
+    if (want && !_poll) _poll = setInterval(sourcefindRefresh, 3000);
+    if (!want && _poll) { clearInterval(_poll); _poll = null; }
   };
 
   window.sourcefindRun = async function () {
