@@ -1,6 +1,6 @@
 // «Пошук джерел»: кнопка в картці файлу й вкладка «🔎 Джерела» в «На перевірку».
 
-const SF_SITE = { e621: 'e621', inkbunny: 'Inkbunny', furaffinity: 'FurAffinity', twitter: 'Twitter', weasyl: 'Weasyl' };
+const SF_SITE = { e621: 'e621', inkbunny: 'Inkbunny', furaffinity: 'FurAffinity', twitter: 'Twitter', weasyl: 'Weasyl', bluesky: 'Bluesky', deviantart: 'DeviantArt' };
 
 if (typeof registerContribution === 'function') {
   registerContribution('file.actions', {
@@ -48,7 +48,7 @@ async function sourcefindLoadReview(el) {
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:5px">
             <span class="badge badge-${esc(c.site)}">${esc(SF_SITE[c.site] || c.site)}</span>
             <a href="${esc(c.url || '#')}" target="_blank" rel="noopener" data-no-i18n>${esc(c.url || '')}</a>
-            <span class="muted" style="font-size:11px">${c.method === 'iqdb' ? `схожість ${Math.round(c.score)}%` : c.method === 'fuzzy' ? `відмінність ${c.score}` : 'той самий файл'}</span>
+            <span class="muted" style="font-size:11px">${c.method === 'iqdb' ? `схожість ${Math.round(c.score)}%` : c.method === 'fuzzy' ? `відмінність ${c.score}` : c.method === 'fluffle' ? 'Fluffle: імовірно' : 'той самий файл'}</span>
             ${(c.artists || []).length ? `<span class="muted" style="font-size:11px" data-no-i18n>· ${esc(c.artists.join(', '))}</span>` : ''}
             <button class="btn btn-primary btn-sm" onclick="sourcefindReviewApply(${r.file_id}, ${i})">✓ Це воно</button>
           </div>`).join('')}

@@ -20,12 +20,13 @@ JOB = "scan"
 
 def _settings():
     s = core.settings.all() if core else {}
-    return {"fuzzy_key": s.get("fuzzy_key") or "", "use_iqdb": s.get("use_iqdb", True)}
+    return {"fuzzy_key": s.get("fuzzy_key") or "", "use_iqdb": s.get("use_iqdb", True),
+            "use_fluffle": s.get("use_fluffle", True)}
 
 
 def _make_finder(log=print):
     s = _settings()
-    return F.Finder(fuzzy_key=s["fuzzy_key"], use_iqdb=s["use_iqdb"], log=log)
+    return F.Finder(fuzzy_key=s["fuzzy_key"], use_iqdb=s["use_iqdb"], use_fluffle=s["use_fluffle"], log=log)
 
 
 def _require_mod():
@@ -208,7 +209,7 @@ def api_status():
         job = {k: (j[k].isoformat() if hasattr(j.get(k), "isoformat") else j.get(k))
                for k in ("id", "status", "progress", "message", "result", "error", "created_at", "finished_at") if k in j}
     return jsonify({"counts": counts, "todo": todo, "has_fuzzy_key": bool(s["fuzzy_key"]),
-                    "use_iqdb": bool(s["use_iqdb"]), "job": job})
+                    "use_iqdb": bool(s["use_iqdb"]), "use_fluffle": bool(s["use_fluffle"]), "job": job})
 
 
 @bp.route("/settings", methods=["POST"])
@@ -221,6 +222,8 @@ def api_settings():
         core.settings.set("fuzzy_key", (d.get("fuzzy_key") or "").strip())
     if "use_iqdb" in d:
         core.settings.set("use_iqdb", bool(d.get("use_iqdb")))
+    if "use_fluffle" in d:
+        core.settings.set("use_fluffle", bool(d.get("use_fluffle")))
     return jsonify({"ok": True})
 
 
