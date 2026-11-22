@@ -28,7 +28,9 @@ def _compute_tags(db):
 
 
 # Рахується у фоні на старті й після змін; запит отримує готовий список.
-tags_cache = WarmCache("tags", _compute_tags, interval=600)
+# persist — після перезапуску (оновлення контейнера) теги є одразу, а не
+# через хвилину-дві, поки на великому архіві рахується перший список
+tags_cache = WarmCache("tags", _compute_tags, interval=600, persist=True)
 
 
 def _invalidate_tags_cache():

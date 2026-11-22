@@ -1407,6 +1407,7 @@ let _galFilter   = 'all';
 let _galArtistId = '';
 let _galTagIds   = new Set();
 let _allTags     = [];
+let _allTagsLoaded = false;
 
 function galSetFilter(f) {
   _galFilter = f;
@@ -1957,7 +1958,8 @@ async function galLoadAllTags() {
       if (!(r.unsupported || r.error)) _extTagsMerge(aid, r.tags || []);
       if (_galSource === aid) _allTags = [...(_extTagCache[aid]?.values() || [])];
     } else {
-      _allTags = await fetch(`${API}/api/tags`).then(r => r.json());
+      const r = await fetch(`${API}/api/tags`).then(r => r.json());
+      if (Array.isArray(r)) { _allTags = r; _allTagsLoaded = true; }
     }
     galRenderTagPicker();
     galRenderAllTagsList();
@@ -2025,7 +2027,7 @@ function galRenderTagPicker() {
       .slice(0, 25);
     list.innerHTML = matches.length
       ? `<div style="display:flex;flex-wrap:wrap;gap:5px">${matches.map(tg => tagChipHtml(tg)).join('')}</div>`
-      : `<span style="color:var(--muted);font-family:var(--mono);font-size:12px">${t('gal.notagsfound')}</span>`;
+      : `<span style="color:var(--muted);font-family:var(--mono);font-size:12px">${(_allTagsLoaded || _galSource !== 'local') ? t('gal.notagsfound') : t('common.loading')}</span>`;
   }
   galRenderSelectedTagChips();
 }
