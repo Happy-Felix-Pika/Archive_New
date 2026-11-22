@@ -1685,6 +1685,7 @@ async function galExternalShow(idx) {
       ? `${API}/api/gallery/meta/${item.id}`
       : `${API}/api/external-archives/${item.source}/gallery/meta/${item.id}`;
     const d = await fetch(metaUrl).then(r => r.json());
+    if (item.source !== 'local' && Array.isArray(d.tags)) _extTagsMerge(item.source, d.tags);   // теги — в кеш
     if (token !== _galExtShowToken) return;
     if (d.error) { wrap.innerHTML = `<div class="gallery-empty">✗ ${esc(d.error)}</div>`; return; }
     const isVideo  = ['webm','mp4'].includes((d.file_ext||'').toLowerCase());
@@ -1862,12 +1863,41 @@ document.addEventListener('input', e => {
   if (e.target.id === 'gal-pool-search') galRenderPoolList(e.target.value);
 });
 
+// Кеш тегів підключених архівів: {id архіву: Map(назва → тег)}. Наповнюється
+// списком з того архіву, а якщо той старої версії й списку не віддає — тегами
+// з кожного переглянутого файлу. Фільтр туди однаково йде НАЗВАМИ.
+const _extTagCache = {};
+
+function _extTagsMerge(archiveId, tags) {
+  const m = _extTagCache[archiveId] || (_extTagCache[archiveId] = new Map());
+  let added = false;
+  for (const tg of tags || []) {
+    const name = typeof tg === 'string' ? tg : tg?.name;
+    if (!name) continue;
+    const old = m.get(name);
+    if (!old) {
+      m.set(name, { id: `x:${name}`, name, category: tg.category || 'other', usage_count: tg.usage_count || 0 });
+      added = true;
+    } else if (tg.usage_count && tg.usage_count > (old.usage_count || 0)) {
+      old.usage_count = tg.usage_count;
+    }
+  }
+  if (added && _galSource === archiveId) {
+    // вибрані теги лишаються вибраними: id = «x:назва», не залежить від порядку
+    _allTags = [...m.values()];
+    galRenderTagPicker();
+  }
+}
+
 async function galLoadAllTags() {
   try {
     if (_galSource && _galSource !== 'local' && _galSource !== 'combined') {
-      // теги підключеного архіву (фільтр туди йде назвами — id у кожного свої)
-      const r = await fetch(`${API}/api/external-archives/${_galSource}/tags`).then(x => x.json());
-      _allTags = (r.unsupported || r.error) ? [] : (r.tags || []);
+      const aid = _galSource;
+      _allTags = [...(_extTagCache[aid]?.values() || [])];        // що вже знаємо — одразу
+      galRenderTagPicker();
+      const r = await fetch(`${API}/api/external-archives/${aid}/tags`).then(x => x.json()).catch(() => ({}));
+      if (!(r.unsupported || r.error)) _extTagsMerge(aid, r.tags || []);
+      if (_galSource === aid) _allTags = [...(_extTagCache[aid]?.values() || [])];
     } else {
       _allTags = await fetch(`${API}/api/tags`).then(r => r.json());
     }
@@ -1917,7 +1947,7 @@ function tagChipHtml(t) {
   const cnt = t.usage_count > 0 ? `<span style="opacity:.45;font-size:10px;margin-left:3px">${t.usage_count}</span>` : '';
   return `<span class="tag-chip ${anySelected?'selected':''}"
     style="background:${bg};color:${col};border-color:${brd}"
-    onclick="galToggleTag(${t.id})">${esc(t.name)}${cnt}</span>`;
+    data-tag-id="${esc(String(t.id))}" onclick="galToggleTag(isNaN(this.dataset.tagId) ? this.dataset.tagId : +this.dataset.tagId)">${esc(t.name)}${cnt}</span>`;
 }
 
 function galRenderTagPicker() {
