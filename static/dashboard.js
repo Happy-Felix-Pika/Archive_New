@@ -3749,6 +3749,29 @@ function chatOpenThread(peer) {
 }
 
 let _chatLastSig = '';
+let _chatStick = true;          // «прилипнути» до низу: тримати останнє повідомлення на виду
+
+function _chatNearBottom(w) { return w.scrollHeight - w.scrollTop - w.clientHeight < 80; }
+
+function _chatOnScroll() {
+  const w = document.getElementById('chat-thread-messages');
+  if (!w) return;
+  _chatStick = _chatNearBottom(w);
+  const b = document.getElementById('chat-jump');
+  if (b && _chatStick) { b.style.display = 'none'; b.textContent = '⬇'; }
+  else if (b) b.style.display = '';
+}
+
+function chatScrollToEnd(force) {
+  const w = document.getElementById('chat-thread-messages');
+  if (!w) return;
+  if (force) _chatStick = true;
+  if (!_chatStick) return;
+  w.scrollTop = w.scrollHeight;
+  const b = document.getElementById('chat-jump');
+  if (b) { b.style.display = 'none'; b.textContent = '⬇'; }
+}
+
 async function chatLoadMessages() {
   if (!_chatCurrentPeer) return;
   try {
@@ -3757,6 +3780,11 @@ async function chatLoadMessages() {
     if (!Array.isArray(msgs)) return;
     const sig = msgs.length + ':' + (msgs.at(-1)?.id || '') + ':' + msgs.filter(m => m.read_at).length;
     if (sig === _chatLastSig && wrap.childElementCount) { chatUpdateUnreadBadge(); return; }  // без мерехтіння відео
+    const firstRender = !wrap.childElementCount;
+    const prevCount = wrap.querySelectorAll('.chat-msg').length;
+    if (firstRender) _chatStick = true;
+    else _chatStick = _chatNearBottom(wrap);
+    const keepTop = wrap.scrollTop;
     _chatLastSig = sig;
     wrap.innerHTML = msgs.map(m => {
       const out = m.direction === 'out';
@@ -3770,7 +3798,16 @@ async function chatLoadMessages() {
           <span class="chat-msg-pin" title="${t('chat.to_notes')}" style="cursor:pointer;margin-left:auto" onclick="chatMsgToNotes(${m.id})">📌</span>
         </div>
       </div>`; }).join('');
-    wrap.scrollTop = wrap.scrollHeight;
+    if (_chatStick) {
+      chatScrollToEnd();
+      // картинки й відео довантажуються пізніше й «відштовхують» низ — доскролюємо
+      wrap.querySelectorAll('img,video').forEach(el =>
+        el.addEventListener(el.tagName === 'IMG' ? 'load' : 'loadedmetadata', () => chatScrollToEnd(), { once: true }));
+    } else {
+      wrap.scrollTop = keepTop;                     // читаєш старе — не смикаємо
+      const b = document.getElementById('chat-jump');
+      if (b && msgs.length > prevCount) { b.textContent = '⬇ Нові повідомлення'; b.style.display = ''; }
+    }
     chatUpdateUnreadBadge();
   } catch {}
 }
@@ -3796,6 +3833,7 @@ async function chatSendMessage(att) {
     }).then(x => x.json());
     if (r.error) { toast(r.error, 'err'); return; }
     if (r.warning) toast(r.warning, 'err');
+    _chatStick = true;                            // своє повідомлення — завжди показуємо
     if (r.peer_url && _chatCurrentPeer.peer_url) {
       _chatCurrentPeer.peer_url = r.peer_url;                       // нормалізована адреса
       if (r.peer_identity) {                                        // «власник» → його справжній нік
