@@ -1536,5 +1536,10 @@
  "chat.read": "Read",
  "chat.sent": "Sent, not read yet",
  "Увімкнути сповіщення": "Enable notifications",
- "Сповіщення увімкнено": "Notifications enabled"
+ "Сповіщення увімкнено": "Notifications enabled",
+ "pager.of": "of",
+ "live.works": "works",
+ "Перша сторінка": "First page",
+ "Остання сторінка": "Last page",
+ "Впиши номер і натисни Enter": "Type a number and press Enter"
 }

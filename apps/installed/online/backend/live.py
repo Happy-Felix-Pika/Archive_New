@@ -467,28 +467,34 @@ def api_live_favorites_list():
             return jsonify({"results": [], "error": f"{src.label} не підтримує перегляд чужого улюбленого"})
         if not src.is_configured():
             return jsonify({"results": [], "error": f"Вкажи свої дані для {src.label} у налаштуваннях"})
+        from .sources import take_total
+        take_total()
         try:
             results = src.search_favorites(username=username, tags=tags, exclude=exclude, sort=sort, page=page, limit=60)
         except Exception as e:
             return jsonify({"results": [], "error": str(e)})
+        total = _total_info(take_total(), page, 60, len(results))
         for r in results:
             r["is_favorite"] = (username.lower() == get_user_live_credentials(current_user_id()).get(source_id, {}).get("username", "").lower())
         if results:
             _decorate(src, results)
-        return jsonify({"results": results})
+        return jsonify({"results": results, "total": total})
 
     if src and src.supports_real_favorites:
         if not src.is_configured():
             return jsonify({"results": [], "error": f"Вкажи свої дані для {src.label} у налаштуваннях"})
+        from .sources import take_total
+        take_total()
         try:
             results = src.search_favorites(tags=tags, exclude=exclude, sort=sort, page=page, limit=60)
         except Exception as e:
             return jsonify({"results": [], "error": str(e)})
+        total = _total_info(take_total(), page, 60, len(results))
         for r in results:
             r["is_favorite"] = True
         if results:
             _decorate(src, results)
-        return jsonify({"results": results})
+        return jsonify({"results": results, "total": total})
 
     # Джерело без власного API улюбленого — спільна локальна таблиця
     try:
@@ -695,6 +701,16 @@ def _extra_search_args(src, args):
     return {k: v for k, v in wanted.items() if k in params}
 
 
+def _total_info(reported, page, limit, n):
+    """{pages, count, approx, last}: що відомо про кількість сторінок."""
+    info = dict(reported or {})
+    if n < limit and not info.get("pages"):
+        info["pages"] = page            # неповна сторінка — це остання
+        info["approx"] = False
+    info["last"] = bool(info.get("pages") and page >= info["pages"])
+    return info
+
+
 @bp.route("/api/live/search")
 def api_live_search():
     """
@@ -719,6 +735,8 @@ def api_live_search():
         needed = ", ".join(f["label"] for f in src.credential_fields)
         return jsonify({"results": [], "error": f"Вкажи свої дані для {src.label} у налаштуваннях ({needed})"})
 
+    from .sources import take_total
+    take_total()
     try:
         results, pool_name = src.search(
             tags=tags, artist=artist, exclude=exclude, sort=sort,
@@ -750,7 +768,8 @@ def api_live_search():
                 if not src.supports_real_favorites:
                     r["is_favorite"] = r['id'] in fav_ids
 
-        return jsonify({"results": results, "pool_name": pool_name})
+        return jsonify({"results": results, "pool_name": pool_name,
+                        "total": _total_info(take_total(), page, limit, len(results))})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

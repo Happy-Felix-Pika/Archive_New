@@ -1264,6 +1264,30 @@ class E621Downloader:
             print(f"  ✗ E621 live-пошук: {e}")
             return []
 
+    _tag_count_cache: dict = {}
+
+    def tag_post_count(self, name: str) -> int | None:
+        """Скільки постів має тег (для «Сторінка N з M»). Кеш на 10 хв."""
+        import time as _t
+        name = (name or "").strip().lower()
+        if not name:
+            return None
+        hit = self._tag_count_cache.get(name)
+        if hit and _t.time() - hit[1] < 600:
+            return hit[0]
+        self._rate_limit()
+        try:
+            r = self.session.get(f"{E621_API_BASE}/tags.json",
+                                 params={'search[name]': name, 'limit': 1}, timeout=15)
+            r.raise_for_status()
+            data = r.json()
+            rows = data if isinstance(data, list) else data.get('tags', []) if isinstance(data, dict) else []
+            n = int(rows[0].get('post_count')) if rows and rows[0].get('name') == name else None
+        except Exception:
+            n = None
+        self._tag_count_cache[name] = (n, _t.time())
+        return n
+
     def search_artist_posts(self, artist_name: str, limit=None) -> list:
         all_posts = []
         before_id = None
@@ -1553,6 +1577,7 @@ class InkbunnyDownloader:
             if data.get('error_code'):
                 print(f"  ✗ Inkbunny пошук: {data.get('error_message', data)}")
                 return []
+            self._remember_totals(data)
             return (data.get('submissions', []) or [])[:limit]
         except Exception as e:
             print(f"  ✗ Inkbunny пошук за ключовими словами: {e}")
@@ -1578,6 +1603,16 @@ class InkbunnyDownloader:
             print(f"  ✗ Inkbunny резолв юзернейму {username}: {e}")
             return None, None
 
+    last_totals = None
+
+    def _remember_totals(self, data: dict):
+        """Inkbunny сам каже, скільки всього сторінок і робіт — для «Сторінка N з M»."""
+        try:
+            self.last_totals = {"pages": int(data.get('pages_count') or 0) or None,
+                                "count": int(data.get('results_count_all') or 0) or None}
+        except (TypeError, ValueError):
+            self.last_totals = None
+
     def get_favorites_of_user(self, username: str, limit: int = 60, page: int = 1) -> list:
         """Улюблене КОНКРЕТНОГО (будь-якого) юзера Inkbunny — публічна
         інформація, доступна через їхній сайт (Search favorites by).
@@ -1598,7 +1633,9 @@ class InkbunnyDownloader:
                 'get_rid': 'yes', 'show_files': 'yes'
             })
             r.raise_for_status()
-            return (r.json().get('submissions', []) or [])[:limit]
+            data = r.json()
+            self._remember_totals(data)
+            return (data.get('submissions', []) or [])[:limit]
         except Exception as e:
             print(f"  ✗ Inkbunny улюблене {username}: {e}")
             return []

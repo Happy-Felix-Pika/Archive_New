@@ -4265,18 +4265,45 @@ async function liveSearch(page = 1) {
     liveRenderResults();
     const pager = document.getElementById('live-pager');
     pager.style.display = !d.pool_name ? '' : 'none';
-    document.getElementById('live-page-label').textContent = `${t('pager.page')} ${_livePage}`;
+    liveRenderPager(d.total);
   } catch (e) {
     grid.innerHTML = `<div style="opacity:.6">${t('catalog.error')}</div>`;
   }
 }
 
-function liveChangePage(delta) {
-  const next = _livePage + delta;
-  if (next < 1) return;
-  if (_liveShowingFavorites) liveShowFavorites(next, _liveFavsUsername);
-  else liveSearch(next);
+let _liveTotalPages = null;
+
+// «Сторінка [N] з M»: M — якщо джерело знає (Inkbunny — точно; e621 — для
+// запиту з одного тегу, приблизно). Невідомо — лише поле для номера.
+function liveRenderPager(total) {
+  _liveTotalPages = total?.pages || null;
+  const inp = document.getElementById('live-page-input');
+  inp.value = _livePage;
+  if (_liveTotalPages) inp.max = _liveTotalPages; else inp.removeAttribute('max');
+  const tot = document.getElementById('live-page-total');
+  if (_liveTotalPages) {
+    const cnt = total.count ? ` · ${total.approx ? '≈' : ''}${Number(total.count).toLocaleString('uk-UA')} ${t('live.works')}` : '';
+    tot.textContent = `${t('pager.of')} ${total.approx ? '≈' : ''}${_liveTotalPages.toLocaleString('uk-UA')}${cnt}`;
+  } else tot.textContent = '';
+  const isLast = !!total?.last;
+  document.getElementById('live-first-btn').disabled = _livePage <= 1;
+  document.getElementById('live-prev-btn').disabled  = _livePage <= 1;
+  document.getElementById('live-next-btn').disabled  = isLast;
+  const lastBtn = document.getElementById('live-last-btn');
+  lastBtn.style.display = _liveTotalPages ? '' : 'none';
+  lastBtn.disabled = isLast;
 }
+
+function liveGoToPage(n) {
+  if (!Number.isFinite(n) || n < 1) { document.getElementById('live-page-input').value = _livePage; return; }
+  if (_liveTotalPages && n > _liveTotalPages) n = _liveTotalPages;
+  if (n === _livePage) return;
+  if (_liveShowingFavorites) liveShowFavorites(n, _liveFavsUsername);
+  else liveSearch(n);
+  document.getElementById('live-grid')?.scrollIntoView({ block: 'start' });
+}
+
+function liveChangePage(delta) { liveGoToPage(_livePage + delta); }
 
 // ── Автодоповнення тегів (e621) ─────────────────────────────────────────
 function liveSetupTagAutocomplete(inputId, boxId) {
@@ -4641,7 +4668,7 @@ async function liveShowFavorites(page = 1, username = '') {
     liveRenderResults();
     const pager = document.getElementById('live-pager');
     pager.style.display = '';
-    document.getElementById('live-page-label').textContent = `${t('pager.page')} ${_livePage}`;
+    liveRenderPager(d.total);
   } catch (e) {
     grid.innerHTML = `<div style="opacity:.6">${t('catalog.error')}</div>`;
   }

@@ -125,9 +125,28 @@ def build(LiveSourceBase):
                     parts.append(f"order:{sort}")
                 query = " ".join(parts)
                 posts = dl.search_posts(query or "order:score", limit=limit, page=page)
+                self._report_tag_total(dl, f"{artist and 'artist:' + artist} {tags}", limit)
 
             results = [self._build_result(dl, p) for p in posts]
             return results, pool_name
+
+        # e621 не каже, скільки всього результатів. Для запиту з ОДНОГО тегу
+        # (автор, вид…) кількість відома з самого тегу — тоді «з M» (приблизно:
+        # виключення й видалені пости її трохи зменшують). Сайт віддає не далі 750-ї сторінки.
+        def _report_tag_total(self, dl, query, limit):
+            words = [w for w in query.split() if w and not w.startswith("-")
+                     and not w.split(":", 1)[0] in ("order", "rating", "status", "date")]
+            if len(words) != 1:
+                return
+            w = words[0]
+            if ":" in w:
+                pref, rest = w.split(":", 1)
+                if pref not in ("artist", "species", "character", "copyright", "general", "meta", "lore", "invalid"):
+                    return
+                w = rest
+            n = dl.tag_post_count(w) if hasattr(dl, "tag_post_count") else None
+            if n:
+                self.report_total(pages=min(750, -(-n // limit)), count=n, approx=True)
 
         def search_favorites(self, *, username=None, tags="", exclude="", sort="", page=1, limit=60):
             dl = self._downloader()

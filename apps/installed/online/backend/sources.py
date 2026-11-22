@@ -12,6 +12,18 @@
 """
 
 
+import threading as _threading
+
+_page_info = _threading.local()
+
+
+def take_total():
+    """Скільки всього сторінок/робіт повідомило джерело в цьому запиті (або None)."""
+    info = getattr(_page_info, "total", None)
+    _page_info.total = None
+    return info
+
+
 class LiveSourceBase:
     """
     Базовий клас джерела.
@@ -47,6 +59,11 @@ class LiveSourceBase:
 
     def search(self, *, tags="", artist="", exclude="", sort="", pool_id=None, page=1, limit=60):
         raise NotImplementedError
+
+    def report_total(self, pages=None, count=None, approx=False):
+        """Джерело, яке знає, скільки всього результатів, повідомляє це —
+        вкладка «Онлайн» покаже «Сторінка N з M». Не знає — нічого не кличе."""
+        _page_info.total = {"pages": pages, "count": count, "approx": bool(approx)}
 
     def toggle_favorite(self, post_id):
         raise NotImplementedError
