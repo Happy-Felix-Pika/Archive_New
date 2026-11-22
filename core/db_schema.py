@@ -21,6 +21,7 @@ ENSURE_TABLES_SQL = [
         kind        VARCHAR(10) NOT NULL,
         rel_path    VARCHAR(1024) NOT NULL,
         file_id     BIGINT NULL,
+        pool_id     INT NULL,
         created_by  INT NOT NULL,
         created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
         expires_at  DATETIME NULL,
@@ -301,6 +302,12 @@ def ensure_tables():
                 if len(failed) == len(pending):
                     raise last_err
                 pending = failed
+            # share_links.pool_id — посилання на цілий пул (таблиця вже могла бути без нього)
+            cur.execute("""SELECT COUNT(*) AS c FROM information_schema.COLUMNS
+                           WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'share_links'
+                             AND COLUMN_NAME = 'pool_id'""")
+            if cur.fetchone()["c"] == 0:
+                cur.execute("ALTER TABLE share_links ADD COLUMN pool_id INT NULL AFTER file_id")
             # matched_folder_name для крос-авторських дублікатів
             if HAS_FURRY:   # таблиця належить застосунку
                 cur.execute("""

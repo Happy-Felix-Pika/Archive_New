@@ -69,7 +69,20 @@ def _out(r) -> dict:
 def api_share_create():
     d = flask_request.get_json(silent=True) or {}
     uid = current_user_id()
-    if d.get("file_id"):
+    pool_id = None
+    if d.get("pool_id"):
+        db = get_db()
+        try:
+            p = q(db, """SELECT p.id, p.name, a.artist_name FROM furry_pools p
+                         JOIN artists a ON a.id = p.artist_id WHERE p.id=%s""", (int(d["pool_id"]),))
+        except Exception:
+            p = None
+        finally:
+            db.close()
+        if not p:
+            return jsonify({"error": "Пул не знайдено"}), 404
+        kind, rel, fid, pool_id = "pool", f"{p['artist_name']} · {p['name']}", None, p["id"]
+    elif d.get("file_id"):
         f = get_file(int(d["file_id"]))
         if not f or is_service_path(f["rel_path"]) or _hidden_top(f["rel_path"]):
             return jsonify({"error": "Файл недоступний"}), 404
@@ -88,15 +101,16 @@ def api_share_create():
     db = get_db()
     try:
         # уже ділились цим — те саме посилання, а не нове щоразу
-        row = q(db, "SELECT * FROM share_links WHERE kind=%s AND rel_path=%s AND created_by=%s",
-                (kind, rel, uid))
+        find = ("SELECT * FROM share_links WHERE kind=%s AND created_by=%s AND "
+                + ("pool_id=%s" if kind == "pool" else "rel_path=%s"))
+        key = (kind, uid, pool_id if kind == "pool" else rel)
+        row = q(db, find, key)
         if not row:
             with db.cursor() as cur:
-                cur.execute("""INSERT INTO share_links (token, kind, rel_path, file_id, created_by)
-                               VALUES (%s,%s,%s,%s,%s)""", (secrets.token_urlsafe(12), kind, rel, fid, uid))
+                cur.execute("""INSERT INTO share_links (token, kind, rel_path, file_id, pool_id, created_by)
+                               VALUES (%s,%s,%s,%s,%s,%s)""", (secrets.token_urlsafe(12), kind, rel, fid, pool_id, uid))
             db.commit()
-            row = q(db, "SELECT * FROM share_links WHERE kind=%s AND rel_path=%s AND created_by=%s",
-                    (kind, rel, uid))
+            row = q(db, find, key)
     finally:
         db.close()
     return jsonify({"ok": True, **_out(row)})
@@ -148,6 +162,8 @@ def _resolve(sh, sub: str) -> str | None:
     """Шлях у сховищі для запиту всередині посилання — лише в межах того, чим поділились."""
     if sh["kind"] == "file":
         return sh["rel_path"]
+    if sh["kind"] == "pool":
+        return _pool_files(sh).get(str(sub))
     sub = _clean(sub)
     if sub is None:
         return None
@@ -155,6 +171,19 @@ def _resolve(sh, sub: str) -> str | None:
     if sub and is_service_path(rel):
         return None
     return rel
+
+
+def _pool_files(sh) -> dict:
+    """Файли пулу за порядком сторінок: {str(file_id): rel_path} (упорядкований)."""
+    db = get_db()
+    try:
+        rows = qq(db, """SELECT f.id, f.rel_path FROM furry_pool_items i JOIN files f ON f.id = i.file_id
+                         WHERE i.pool_id=%s ORDER BY i.page IS NULL, i.page, f.id""", (sh["pool_id"],))
+    except Exception:
+        rows = []
+    finally:
+        db.close()
+    return {str(r["id"]): r["rel_path"] for r in rows if not is_service_path(r["rel_path"])}
 
 
 def _not_found():
@@ -174,7 +203,7 @@ def share_page(token):
         db.commit()
     finally:
         db.close()
-    name = sh["rel_path"].rsplit("/", 1)[-1] or "Архів"
+    name = sh["rel_path"] if sh["kind"] == "pool" else (sh["rel_path"].rsplit("/", 1)[-1] or "Архів")
     if sh["kind"] == "file":
         if not os.path.isfile(local_path(sh["rel_path"])):
             return _not_found()
@@ -192,7 +221,7 @@ def share_page(token):
                    <a class='btn' href='{raw}?dl=1'>⬇ Завантажити</a></div>
                    <div class='viewer'>{media}</div>"""
         return Response(_page(name, body), content_type="text/html; charset=utf-8")
-    if not os.path.isdir(local_path(sh["rel_path"])):
+    if sh["kind"] == "folder" and not os.path.isdir(local_path(sh["rel_path"])):
         return _not_found()
     body = f"""<div class='bar'><div class='title' id='crumbs'>{_e(name)}</div></div>
                <div class='grid' id='grid'></div>
@@ -208,8 +237,11 @@ def share_page(token):
 @bp.route("/s/<token>/list")
 def share_list(token):
     sh = _share(token)
-    if not sh or sh["kind"] != "folder":
+    if not sh or sh["kind"] not in ("folder", "pool"):
         return jsonify({"error": "not found"}), 404
+    if sh["kind"] == "pool":
+        files = [{"name": rel.rsplit("/", 1)[-1], "p": fid} for fid, rel in _pool_files(sh).items()]
+        return jsonify({"path": "", "folders": [], "files": files})
     sub = flask_request.args.get("p", "")
     rel = _resolve(sh, sub)
     if rel is None:
@@ -219,7 +251,8 @@ def share_list(token):
     except OSError:
         return jsonify({"error": "not found"}), 404
     folders = [e.name for e in entries if e.is_dir() and not e.name.startswith(".")]
-    files = [{"name": e.name, "size": e.stat().st_size} for e in entries
+    base = _clean(sub) or ""
+    files = [{"name": e.name, "size": e.stat().st_size, "p": f"{base}/{e.name}".strip("/")} for e in entries
              if e.is_file() and not e.name.startswith(".")]
     return jsonify({"path": _clean(sub) or "", "folders": folders, "files": files})
 
@@ -297,7 +330,7 @@ const IMG=['jpg','jpeg','png','gif','webp','bmp','avif'], VID=['mp4','webm','mov
 let cur='', files=[], idx=0;
 const ext=n=>(n.split('.').pop()||'').toLowerCase();
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const P=n=>encodeURIComponent(cur?cur+'/'+n:n);
+const P=x=>encodeURIComponent(x.p);
 async function load(p){
   cur=p||''; const r=await fetch(`/s/${T}/list?p=${encodeURIComponent(cur)}`).then(x=>x.json());
   if(r.error){document.getElementById('grid').innerHTML='<div class="empty">Не знайдено</div>';return;}
@@ -306,12 +339,12 @@ async function load(p){
     parts.map(x=>{acc=acc?acc+'/'+x:x;const a=acc;return ` / <a href="#" onclick='load(${JSON.stringify(a)});return false'>${esc(x)}</a>`}).join('');
   files=r.files;
   const f=r.folders.map(n=>`<div class="tile" onclick='load(${JSON.stringify(cur?cur+"/"+n:n)})'><div class="th">📁</div><div class="nm">${esc(n)}</div></div>`).join('');
-  const g=r.files.map((x,i)=>{const e=ext(x.name);const th=(IMG.includes(e)||VID.includes(e))?`<img loading="lazy" src="/s/${T}/thumb?p=${P(x.name)}" onerror="this.replaceWith('📄')">`:'📄';
+  const g=r.files.map((x,i)=>{const e=ext(x.name);const th=(IMG.includes(e)||VID.includes(e))?`<img loading="lazy" src="/s/${T}/thumb?p=${P(x)}" onerror="this.replaceWith('📄')">`:'📄';
     return `<div class="tile" onclick="openLb(${i})"><div class="th">${th}</div><div class="nm">${esc(x.name)}</div></div>`}).join('');
   document.getElementById('grid').innerHTML=(f+g)||'<div class="empty">Тут порожньо</div>';
 }
 function openLb(i){
-  idx=i; const x=files[i], e=ext(x.name), src=`/s/${T}/raw?p=${P(x.name)}`;
+  idx=i; const x=files[i], e=ext(x.name), src=`/s/${T}/raw?p=${P(x)}`;
   document.getElementById('lbm').innerHTML=IMG.includes(e)?`<img src="${src}">`:VID.includes(e)?`<video src="${src}" controls autoplay loop playsinline></video>`:`<div class="empty">📄 ${esc(x.name)}</div>`;
   document.getElementById('lbn').textContent=`${i+1} / ${files.length} · ${x.name}`;
   document.getElementById('lbdl').href=src+'&dl=1';

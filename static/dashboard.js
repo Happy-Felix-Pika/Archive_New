@@ -7100,7 +7100,25 @@ async function _shareCreate(body) {
   if (r.error) { toast(r.error, 'err'); return; }
   _shareShowLink(r);
 }
-function shareFile(fileId) { _shareCreate({ file_id: fileId }); }
+// Арт із пулу — питаємо: лише цей арт чи весь пул (і який, якщо їх кілька)
+async function shareFile(fileId) {
+  let d = (typeof _galMeta !== 'undefined' && _galMeta[fileId]) || null;
+  if (!d) d = await fetch(`${API}/api/gallery/meta/${fileId}`).then(r => r.json()).catch(() => null);
+  const pools = (d?.pools || []).filter(p => p.pool_id);
+  if (!pools.length) { _shareCreate({ file_id: fileId }); return; }
+  _shareModal(`
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <div style="font-weight:600">🔗 Чим поділитися?</div>
+      <button class="btn btn-ghost btn-sm" onclick="document.getElementById('share-modal').remove()">✕</button>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <button class="btn btn-ghost" style="justify-content:flex-start;text-align:left" onclick="_shareCreate({ file_id: ${fileId} })">🖼 Лише цей арт</button>
+      ${pools.map(p => `
+        <button class="btn btn-ghost" style="justify-content:flex-start;text-align:left" onclick="_shareCreate({ pool_id: ${p.pool_id} })">
+          📖 Увесь пул «<span data-no-i18n>${esc(p.name)}</span>» <span class="muted" style="margin-left:6px">${p.total ? `${p.total} стор.` : ''}</span>
+        </button>`).join('')}
+    </div>`);
+}
 function shareFolder(path) { if (path) _shareCreate({ folder: path }); }
 
 function _shareModal(html) {
@@ -7119,7 +7137,7 @@ function _shareModal(html) {
 function _shareShowLink(s) {
   const m = _shareModal(`
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-      <div style="font-weight:600">🔗 Посилання на ${s.kind === 'folder' ? 'теку' : 'файл'}</div>
+      <div style="font-weight:600">🔗 Посилання на ${s.kind === 'folder' ? 'теку' : s.kind === 'pool' ? 'пул' : 'арт'}</div>
       <button class="btn btn-ghost btn-sm" onclick="document.getElementById('share-modal').remove()">✕</button>
     </div>
     <div class="muted" style="font-size:12px;margin-bottom:8px" data-no-i18n>${esc(s.path)}</div>
@@ -7129,7 +7147,7 @@ function _shareShowLink(s) {
       <button class="btn btn-primary btn-sm" onclick="shareCopy()">Копіювати</button>
     </div>
     <div class="muted" style="font-size:11.5px;margin-top:8px">Відкривається без входу в архів — бачить будь-хто, у кого є посилання.
-      ${s.kind === 'folder' ? 'Видно вміст теки й її підтек, вище — ні.' : ''}</div>
+      ${s.kind === 'folder' ? 'Видно вміст теки й її підтек, вище — ні.' : s.kind === 'pool' ? 'Видно всі сторінки пулу по порядку.' : ''}</div>
     <div style="display:flex;justify-content:space-between;margin-top:14px">
       <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="shareRevoke(${s.id}, true)">Відкликати посилання</button>
       <a class="btn btn-ghost btn-sm" href="${esc(s.url)}" target="_blank" rel="noopener">Відкрити ↗</a>
@@ -7160,7 +7178,7 @@ async function sharesShowMine() {
     </div>
     ${Array.isArray(rows) && rows.length ? rows.map(s => `
       <div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border)">
-        <span>${s.kind === 'folder' ? '📁' : '📄'}</span>
+        <span>${s.kind === 'folder' ? '📁' : s.kind === 'pool' ? '📖' : '📄'}</span>
         <div style="flex:1;min-width:0">
           <div style="font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" data-no-i18n>${esc(s.path)}</div>
           <div class="muted" style="font-size:11px">переглядів: ${s.views} · ${fmtDate(s.created_at)}</div>
