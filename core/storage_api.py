@@ -18,6 +18,39 @@ import shutil
 from core.storage import get_local_root, get_storage_mode
 
 
+# ── Службові файли ──────────────────────────────────────────────────
+#
+#  Якщо тека сховища — та сама /data, де архів тримає свої файли
+#  (ключ сесій, налаштування з паролями, кеш, черга перевірки), вони не
+#  мають бути видні ні в каталозі, ні в «Артах», ні підключеним архівам.
+#  Прихованим вважається будь-що з крапкою на початку (.secret_key, .trash,
+#  .cache…) на будь-якому рівні і службові назви в корені.
+
+SERVICE_ROOT_NAMES = {
+    "archiver_config.json", "archiver_config.json.tmp",
+    "e621_tag_categories.json", "e621_tag_categories.json.tmp",
+    "pending_review", "cache", "temp_downloads", "tmp_hashes", "VERSION.json",
+}
+
+
+def is_service_path(rel_path: str) -> bool:
+    parts = [p for p in (rel_path or "").replace("\\", "/").strip("/").split("/") if p]
+    if not parts:
+        return False
+    if any(p.startswith(".") for p in parts):
+        return True
+    return parts[0] in SERVICE_ROOT_NAMES
+
+
+def top_folders() -> list:
+    """Теки верхнього рівня сховища (без службових) — для списків доступу."""
+    try:
+        return [it["name"] for it in get_storage().list_dir("")
+                if it["is_dir"] and not is_service_path(it["name"])]
+    except Exception:
+        return []
+
+
 class StorageError(Exception):
     """Проблема зі сховищем (немає налаштувань, недоступне тощо)."""
 

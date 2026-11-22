@@ -555,6 +555,20 @@ def ensure_tables():
             # Творець (id 1) — завжди адмін, хоч би що було в базі
             cur.execute("UPDATE users SET role='admin', is_admin=1 WHERE id=1 AND (is_admin<>1 OR role<>'admin')")
 
+            # Службові файли архіву (ключ сесій, налаштування, кеш), які
+            # синхронізація колись внесла в архів як звичайні файли, коли
+            # тека сховища збігалась з /data, — прибираємо з бази (з диска
+            # нічого не видаляється).
+            from core.storage_api import SERVICE_ROOT_NAMES
+            names = sorted(SERVICE_ROOT_NAMES)
+            ph = ",".join(["%s"] * len(names))
+            likes = " OR ".join(["rel_path LIKE %s"] * len(names))
+            cur.execute(f"""DELETE FROM files WHERE rel_path IN ({ph}) OR {likes}
+                            OR rel_path LIKE '.%%' OR rel_path LIKE '%%/.%%'""",
+                        names + [n + "/%" for n in names])
+            if cur.rowcount:
+                print(f"  ✓ Прибрано з архіву службових файлів: {cur.rowcount}")
+
         db.commit()
         db.close()
         print("  ✓ Таблицы БД проверены/созданы")

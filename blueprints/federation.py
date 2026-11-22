@@ -245,6 +245,23 @@ def api_external_keys_list():
         return jsonify({"error": str(e)}), 500
 
 
+def _all_top_folders() -> list:
+    """
+    Усі теки верхнього рівня: і ті, що лежать у сховищі (власні, як
+    «Private»), і теки авторів з бази. Раніше брались лише автори — тека
+    не-автора в списку не з'являлась, і сховати її від ключа було неможливо.
+    """
+    from core.storage_api import is_service_path, top_folders
+    names = set(top_folders())
+    try:
+        db = get_db()
+        names |= {r["folder_name"] for r in qq(db, "SELECT DISTINCT folder_name FROM artists")}
+        db.close()
+    except Exception:
+        pass          # без застосунку furry таблиці artists немає
+    return sorted((n for n in names if n and not is_service_path(n)), key=lambda n: n.lower())
+
+
 @bp.route("/api/external-access/keys/<int:key_id>/folders")
 @admin_required
 def api_external_key_folders(key_id):
@@ -254,12 +271,12 @@ def api_external_key_folders(key_id):
     лише ті, які явно позначили.
     """
     try:
+        names = _all_top_folders()
         db      = get_db()
-        artists = qq(db, "SELECT DISTINCT folder_name FROM artists ORDER BY folder_name")
         hidden  = qq(db, "SELECT folder_name FROM key_hidden_folders WHERE key_id=%s", (key_id,))
         db.close()
         hidden_set = {r["folder_name"] for r in hidden}
-        return jsonify([{"folder_name": a["folder_name"], "hidden": a["folder_name"] in hidden_set} for a in artists])
+        return jsonify([{"folder_name": n, "hidden": n in hidden_set} for n in names])
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -299,8 +316,7 @@ def api_external_key_folders_bulk(key_id):
             if action == "show_all":
                 cur.execute("DELETE FROM key_hidden_folders WHERE key_id=%s", (key_id,))
             elif action == "hide_all":
-                cur.execute("SELECT DISTINCT folder_name FROM artists")
-                names = [r["folder_name"] for r in cur.fetchall()]
+                names = _all_top_folders()
                 cur.execute("DELETE FROM key_hidden_folders WHERE key_id=%s", (key_id,))
                 for name in names:
                     cur.execute("INSERT IGNORE INTO key_hidden_folders (key_id, folder_name) VALUES (%s,%s)",

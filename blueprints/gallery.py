@@ -351,7 +351,8 @@ def api_gallery_meta(download_id):
             FROM files f
             WHERE f.id = %s
         """, (user_id, download_id))
-        if not row or not row["filename"]:
+        from core.storage_api import is_service_path
+        if not row or not row["filename"] or is_service_path(row["rel_path"]):
             db.close()
             return jsonify({"error": "not found"}), 404
         tags = qq(db, """
@@ -397,7 +398,8 @@ def api_gallery_stream(download_id):
         # Читаємо з ядра: шлях до файлу більше не збирається з автора.
         row = get_file(download_id, db)
         db.close()
-        if not row or not row["name"]:
+        from core.storage_api import is_service_path
+        if not row or not row["name"] or is_service_path(row["rel_path"]):
             return jsonify({"error": "not found"}), 404
 
         mime = mimetypes.guess_type(row["name"])[0] or "application/octet-stream"
