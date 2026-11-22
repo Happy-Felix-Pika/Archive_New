@@ -670,6 +670,18 @@ async function loadRecent() {
 
 // ── Pending ───────────────────────────────────────────────────────────────
 let _pendingTab = 'files';
+// Вкладки застосунків у «На перевірку»: registerPendingTab({id, label, load(el)})
+const _pendingAppTabs = {};
+function registerPendingTab(tab) {
+  _pendingAppTabs[tab.id] = tab;
+  const bar = document.getElementById('pending-tab-toggle');
+  if (bar && !bar.querySelector(`[data-tab="${tab.id}"]`)) {
+    const b = document.createElement('button');
+    b.className = 'filter-btn'; b.dataset.tab = tab.id; b.innerHTML = tab.label;
+    b.onclick = () => pendingSetTab(tab.id);
+    bar.appendChild(b);
+  }
+}
 
 function pendingSetTab(tab) {
   _pendingTab = tab;
@@ -678,6 +690,7 @@ function pendingSetTab(tab) {
   document.getElementById('pending-list').style.display      = tab === 'files' ? '' : 'none';
   document.getElementById('duplicates-list').style.display   = tab === 'duplicates' ? '' : 'none';
   document.getElementById('tagsugg-list').style.display      = tab === 'tags' ? '' : 'none';
+  document.getElementById('pending-app-list').style.display  = _pendingAppTabs[tab] ? '' : 'none';
   document.getElementById('btn-reject-all').style.display    = tab === 'files' ? '' : 'none';
   const nearBtn = document.getElementById('btn-reject-near');
   if (nearBtn) nearBtn.style.display = (tab === 'files') ? '' : 'none';
@@ -690,7 +703,8 @@ function pendingSetTab(tab) {
 }
 
 function pendingRefreshCurrentTab() {
-  if (_pendingTab === 'duplicates') loadDuplicatesTab();
+  if (_pendingAppTabs[_pendingTab]) _pendingAppTabs[_pendingTab].load(document.getElementById('pending-app-list'));
+  else if (_pendingTab === 'duplicates') loadDuplicatesTab();
   else if (_pendingTab === 'tags') loadTagSuggestions();
   else loadPending();
   tagSuggUpdateCount();
@@ -2159,7 +2173,8 @@ async function galleryShow(idx) {
           ${d.artist_id ? favArtistHeart(d.artist_fav, `onclick="galToggleFavArtist(${d.artist_id}, this)"`) : ''}
           ${d.source ? `<span class="badge badge-${d.source}">${d.source}</span>` : ''}
         </div>
-        ${d.post_url ? `<a href="${d.post_url}" target="_blank" class="gallery-info-link">↗ ${t('gal.original')}</a>` : ''}
+        ${d.post_url ? `<a href="${esc(d.post_url)}" target="_blank" rel="noopener" class="gallery-info-link">↗ ${t('gal.original')}</a>` : ''}
+        ${(d.source_links || []).map(l => `<a href="${esc(l.url)}" target="_blank" rel="noopener" class="gallery-info-link">↗ ${esc(l.site)}</a>`).join('')}
       </div>
       <div class="gallery-info-secondary">
         <span class="gallery-filename" title="${esc(d.filename)}">${esc(d.filename)}</span>
