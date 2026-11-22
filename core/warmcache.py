@@ -91,9 +91,15 @@ class WarmCache:
             print(f"  ⚠ Кеш «{self.name}» не збережено на диск: {e}")
 
     # ── читання ──────────────────────────────────────────────────────
-    def get(self):
+    def get(self, wait: bool = True):
+        """wait=False — не чекати найпершого підрахунку: якщо даних ще нема,
+        повертає None (а фон тим часом рахує)."""
         self._last_get = time.monotonic()
         if self._data is None:
+            if not wait:
+                self.start()
+                self._wake.set()
+                return None
             self.refresh()
         elif self._dirty:
             if self.cost <= _CHEAP and not self._lock.locked():

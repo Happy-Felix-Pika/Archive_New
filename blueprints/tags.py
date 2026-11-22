@@ -54,7 +54,13 @@ def _tags_cache_background_loop():
 
 @bp.route("/api/tags")
 def api_tags_list():
-    return jsonify(tags_cache.get() or [])
+    # Найперший підрахунок на великому архіві може йти хвилини — запит його
+    # не чекає (інакше проксі обриває з’єднання, а сторінка лишалась без тегів
+    # до перезавантаження): «ще рахую», браузер спитає знову за кілька секунд.
+    data = tags_cache.get(wait=False)
+    if data is None:
+        return jsonify({"loading": True}), 202
+    return jsonify(data)
 
 
 @bp.route("/api/tags", methods=["POST"])

@@ -589,7 +589,7 @@ def api_external_access_tags():
         return hidden
     from blueprints.tags import tags_cache
     return jsonify([{"id": t["id"], "name": t["name"], "category": t["category"],
-                     "usage_count": t["usage_count"]} for t in (tags_cache.get() or []) if t["usage_count"]])
+                     "usage_count": t["usage_count"]} for t in (tags_cache.get(wait=False) or []) if t["usage_count"]])
 
 
 @bp.route("/api/external-archives/<archive_id>/tags")
