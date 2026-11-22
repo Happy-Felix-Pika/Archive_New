@@ -250,6 +250,12 @@ tbody td{padding:10px 16px;font-size:13px;font-family:var(--mono);vertical-align
 .tag-chip.selected { border-color:rgba(255,255,255,.4) }
 .tag-inline { display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:12px;font-size:11px;font-family:var(--mono);font-weight:500;cursor:pointer;background:var(--surface2);color:var(--text);border:1px solid var(--border);transition:background .1s }
 .tag-inline:hover { background:var(--border) }
+.tag-inline.tag-inc,.tag-chip.tag-inc { background:var(--accent);border-color:var(--accent);color:#fff }
+.tag-inline.tag-exc,.tag-chip.tag-exc { background:var(--red);border-color:var(--red);color:#fff;text-decoration:line-through }
+.tag-chip.live-tag { cursor:pointer }
+.tag-x { margin-left:2px;opacity:.45;padding:0 2px;border-radius:6px }
+.tag-x:hover { opacity:1;background:rgba(0,0,0,.25) }
+#gal-active-tags { display:none;flex-wrap:wrap;gap:4px;margin:6px 0 }
 
 /* Misc */
 .err-banner{background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.3);color:var(--red);padding:12px 16px;border-radius:8px;font-family:var(--mono);font-size:12px;margin-bottom:16px;display:none}

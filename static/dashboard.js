@@ -1713,7 +1713,10 @@ async function galExternalShow(idx) {
             <span class="muted" style="font-size:11px">${idx + 1} / ${_galExtItems.length.toLocaleString('uk-UA')}</span>
           </div>
           ${item.source !== 'local' && item.source !== 'combined' ? galPoolBadges(d) : ''}
-          ${d.tags?.length ? `<div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:4px">${d.tags.slice(0,30).map(tg=>`<span class="tag-chip">${esc(tg?.name ?? tg)}</span>`).join('')}</div>` : ''}
+          ${d.tags?.length ? `<div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:4px">${d.tags.slice(0,30).map(tg => tg?.id != null
+            ? `<span class="tag-chip${_galTagIds.has(tg.id) ? ' tag-inc' : _galHideTagIds.has(tg.id) ? ' tag-exc' : ''}" data-tag-id="${esc(String(tg.id))}"
+                 onclick="galExtTagClick(this)">${esc(tg.name)}</span>`
+            : `<span class="tag-chip">${esc(tg?.name ?? tg)}</span>`).join('')}</div>` : ''}
         </div>
       </div>
       <div class="gallery-nav prev" onclick="galExternalNav(-1)">‹</div>
@@ -1721,6 +1724,19 @@ async function galExternalShow(idx) {
   } catch (e) {
     wrap.innerHTML = `<div class="gallery-empty">✗ ${esc(e.message)}</div>`;
   }
+}
+
+function galExtTagClick(el) {
+  const raw = el.dataset.tagId, id = isNaN(raw) ? raw : +raw;
+  if (_galTagIds.has(id))          { _galTagIds.delete(id); _galHideTagIds.add(id); }
+  else if (_galHideTagIds.has(id)) _galHideTagIds.delete(id);
+  else                             _galTagIds.add(id);
+  if (!_allTags.find(x => x.id === id)) _allTags.push({ id, name: el.textContent.trim() });
+  el.classList.toggle('tag-inc', _galTagIds.has(id));
+  el.classList.toggle('tag-exc', _galHideTagIds.has(id));
+  galRenderTagPicker();
+  galRenderActiveTagsHint();
+  toast(`${el.textContent.trim()}: ${_galTagIds.has(id) ? '+ у фільтрі' : _galHideTagIds.has(id) ? 'виключено' : 'прибрано'} · «Перемішати» — застосувати`, 'ok');
 }
 
 function galExternalNav(delta) {
@@ -1939,6 +1955,7 @@ function galClearAllTags() {
   _galTagIds.clear();
   _galHideTagIds.clear();
   galRenderTagPicker();
+  galRenderActiveTagsHint();
   toast(t('toast.tagsreset'), 'ok');
 }
 
@@ -2006,6 +2023,7 @@ function galToggleTag(id) {
     else _galHideTagIds.add(id);
   }
   galRenderTagPicker();
+  galRenderActiveTagsHint();
   // Дебаунс — якщо клацаєш кілька тегів підряд, реальні запити на автора/
   // пул йдуть тільки один раз, після того як клацання припинились, а не
   // по два запити на КОЖЕН окремий клік (це й давало відчуття гальмування)
@@ -2059,6 +2077,7 @@ async function galleryInit() {
   if (_galFavOnly) params.set('favorites', '1');
   _galTagIds.forEach(id => params.append('tag_id', id));
   _galHideTagIds.forEach(id => params.append('hide_tag_id', id));
+  galRenderActiveTagsHint();
   try {
     const r = await fetch(`${API}/api/gallery/ids?${params}`).then(r => r.json());
     if (!r.ids?.length) { wrap.innerHTML = `<div class="gallery-empty">${t('gal.nofiles')}</div>`; return; }
@@ -2123,7 +2142,7 @@ async function galleryShow(idx) {
       `<div class="tag-group" style="text-align:center">
         <div class="tag-group-label cat-${cat}">${TAG_CAT_LABELS[cat]}</div>
         <div class="tag-group-chips" style="justify-content:center">${groups[cat].map(t =>
-          `<span class="tag-inline" onclick="galRemoveTag(${id},${t.id},this)">${esc(t.name)}<span style="margin-left:4px;opacity:.6">✕</span></span>`
+          galArtTagChip(id, t)
         ).join('')}</div>
       </div>`
     ).join('');
@@ -2365,6 +2384,52 @@ async function galAddTagToFile(downloadId, name, color) {
   } catch(e) { toast(`✗ ${e.message}`,'err'); }
 }
 
+// Тег на арті: клік — у фільтр пошуку (вкл. → викл. → прибрати), ✕ — зняти тег з арту.
+// Додати тег на арт — кнопкою «+ тег» нижче.
+function galArtTagChip(downloadId, t) {
+  const st = _galTagIds.has(t.id) ? ' tag-inc' : _galHideTagIds.has(t.id) ? ' tag-exc' : '';
+  const title = _galTagIds.has(t.id) ? 'У фільтрі — клік, щоб виключати' : _galHideTagIds.has(t.id)
+    ? 'Виключено — клік, щоб прибрати з фільтра' : 'Клік — шукати з цим тегом';
+  const x = `<span class="tag-x" title="${canModerate() ? 'Зняти тег з арту' : 'Запропонувати зняти тег'}"
+      onclick="event.stopPropagation();galRemoveTag(${downloadId},${t.id},this)">✕</span>`;
+  return `<span class="tag-inline${st}" data-art-tag="${esc(String(t.id))}" title="${title}"
+      onclick="galArtTagClick(${downloadId}, this.dataset.artTag)">${esc(t.name)}${x}</span>`;
+}
+
+function galArtTagClick(downloadId, rawId) {
+  const id = isNaN(rawId) ? rawId : +rawId;
+  const tag = (_galMeta[downloadId]?.tags || []).find(x => x.id === id);
+  if (tag && !_allTags.find(x => x.id === id)) _allTags.push(tag);      // щоб фільтр знав назву
+  let msg;
+  if (_galTagIds.has(id))          { _galTagIds.delete(id); _galHideTagIds.add(id); msg = `− ${tag?.name} (виключено)`; }
+  else if (_galHideTagIds.has(id)) { _galHideTagIds.delete(id); msg = `${tag?.name} — прибрано з фільтра`; }
+  else                             { _galTagIds.add(id); msg = `+ ${tag?.name}`; }
+  galRefreshFileTags(downloadId);
+  galRenderTagPicker();
+  galRenderActiveTagsHint();
+  toast(`${msg} · «Перемішати» — застосувати`, 'ok');
+}
+
+// Короткий підсумок фільтра біля кнопок пошуку
+function galRenderActiveTagsHint() {
+  const el = document.getElementById('gal-active-tags');
+  if (!el) return;
+  const name = id => esc(_allTags.find(t => t.id === id)?.name || String(id));
+  const inc = [..._galTagIds].map(id => `<span class="tag-inline tag-inc" onclick="galToggleTagQuick('${esc(String(id))}')">${name(id)}</span>`);
+  const exc = [..._galHideTagIds].map(id => `<span class="tag-inline tag-exc" onclick="galToggleTagQuick('${esc(String(id))}')">${name(id)}</span>`);
+  el.innerHTML = inc.concat(exc).join('');
+  el.style.display = (inc.length || exc.length) ? 'flex' : 'none';
+}
+
+function galToggleTagQuick(rawId) {
+  const id = isNaN(rawId) ? rawId : +rawId;
+  if (_galTagIds.has(id)) { _galTagIds.delete(id); _galHideTagIds.add(id); }
+  else _galHideTagIds.delete(id);
+  galRenderActiveTagsHint();
+  galRenderTagPicker();
+  if (_galMeta[_galIds[_galIdx]]) galRefreshFileTags(_galIds[_galIdx]);
+}
+
 async function galRemoveTag(downloadId, tagId, el) {
   el.closest('.tag-inline').style.opacity='.3';
   try {
@@ -2394,7 +2459,7 @@ function galRefreshFileTags(downloadId) {
     `<div class="tag-group" style="text-align:center">
       <div class="tag-group-label cat-${cat}">${TAG_CAT_LABELS[cat]}</div>
       <div class="tag-group-chips" style="justify-content:center">${rgroups[cat].map(t=>
-        `<span class="tag-inline" onclick="galRemoveTag(${downloadId},${t.id},this)">${esc(t.name)}<span style="margin-left:4px;opacity:.6">✕</span></span>`
+        galArtTagChip(downloadId, t)
       ).join('')}</div>
     </div>`
   ).join('');
@@ -4542,6 +4607,38 @@ async function liveDeleteBookmark(bookmarkId) {
   }
 }
 
+// Тег на арті в «Онлайн»: клік — у поле тегів, ще клік — у «виключити», ще — прибрати
+function _liveTagWord(name) { return _liveSource === 'e621' ? String(name).trim().replace(/\s+/g, '_') : String(name).trim(); }
+function _liveWords(id) { return liveFieldVal(id).split(/\s+/).filter(Boolean); }
+
+function liveTagChip(name) {
+  const w = _liveTagWord(name);
+  const st = _liveWords('tags').includes(w) ? ' tag-inc' : _liveWords('exclude').includes(w) ? ' tag-exc' : '';
+  return `<span class="tag-chip live-tag${st}" data-live-tag="${esc(w)}" title="Клік — у пошук, ще раз — виключити, ще раз — прибрати"
+      onclick="liveTagClick(this.dataset.liveTag)">${esc(name)}</span>`;
+}
+
+function liveTagClick(w) {
+  if (!liveField('tags')) { toast('Це джерело не шукає за тегами', 'err'); return; }
+  const tags = _liveWords('tags'), exc = _liveWords('exclude');
+  let msg;
+  if (tags.includes(w)) {
+    liveSetField('tags', tags.filter(x => x !== w).join(' '));
+    if (liveField('exclude')) { liveSetField('exclude', exc.concat(w).join(' ')); msg = `− ${w} (виключено)`; }
+    else msg = `${w} — прибрано`;
+  } else if (exc.includes(w)) {
+    liveSetField('exclude', exc.filter(x => x !== w).join(' ')); msg = `${w} — прибрано з пошуку`;
+  } else {
+    liveSetField('tags', tags.concat(w).join(' ')); msg = `+ ${w}`;
+  }
+  document.querySelectorAll('.live-tag').forEach(el => {
+    const x = el.dataset.liveTag;
+    el.classList.toggle('tag-inc', _liveWords('tags').includes(x));
+    el.classList.toggle('tag-exc', _liveWords('exclude').includes(x));
+  });
+  toast(`${msg} · 🔍 Шукати — застосувати`, 'ok');
+}
+
 function liveShowItem(idx) {
   if (!_liveResults.length) return;
   idx = ((idx % _liveResults.length) + _liveResults.length) % _liveResults.length;
@@ -4558,7 +4655,7 @@ function liveShowItem(idx) {
   const artistsHtml = (r.artists||[]).filter(Boolean).map(a =>
     `<span class="catalog-crumb" data-artist-link="${esc(a)}" data-artist-source="${esc(r.source)}">${esc(a)}</span>`
   ).join(', ') || '—';
-  const tagsHtml = (r.tags||[]).slice(0, 20).map(tg => `<span class="tag-chip">${esc(tg?.name ?? tg)}</span>`).join('');
+  const tagsHtml = (r.tags||[]).slice(0, 20).map(tg => liveTagChip(tg?.name ?? tg)).join('');
 
   document.getElementById('live-grid').style.display = 'none';
   const viewer = document.getElementById('live-viewer');

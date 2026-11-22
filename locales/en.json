@@ -1541,5 +1541,13 @@
  "live.works": "works",
  "Перша сторінка": "First page",
  "Остання сторінка": "Last page",
- "Впиши номер і натисни Enter": "Type a number and press Enter"
+ "Впиши номер і натисни Enter": "Type a number and press Enter",
+ "Клік — шукати з цим тегом": "Click — search with this tag",
+ "У фільтрі — клік, щоб виключати": "In the filter — click to exclude",
+ "Виключено — клік, щоб прибрати з фільтра": "Excluded — click to remove from the filter",
+ "Зняти тег з арту": "Remove the tag from the art",
+ "Запропонувати зняти тег": "Suggest removing the tag",
+ "Клік — у пошук, ще раз — виключити, ще раз — прибрати": "Click — add to search, again — exclude, again — remove",
+ "Це джерело не шукає за тегами": "This source doesn't search by tags",
+ "Клік по тегу: вкл. → викл. → прибрати": "Click a tag: include → exclude → remove"
 }
