@@ -453,13 +453,36 @@ def call_external_api(cfg: dict, path: str, stream: bool = False, params: dict =
         r = req.get(f"{base}{path}", headers={
             "X-Access-Key": cfg.get("access_key", ""),
             "X-Identity":   cfg.get("my_identity", ""),
+            "User-Agent":   "Archive-federation/1.0",
         }, params=params, timeout=15, stream=stream)
-        if r.status_code == 403:
-            return None, "Ключ доступу недійсний або деактивований власником архіву"
-        r.raise_for_status()
-        return r, None
+    except req.exceptions.Timeout:
+        return None, f"Архів {base} не відповів вчасно (довше 15 с)"
     except req.exceptions.RequestException as e:
-        return None, f"Не вдалося звернутись до архіву: {e}"
+        return None, f"Архів {base} недоступний: {type(e).__name__}"
+    if r.status_code < 400:
+        return r, None
+    # Пояснення — те, що сказав сам той архів; не JSON — відповів хтось інший
+    # (проксі, Cloudflare-захист від ботів, сторінка помилки сервера)
+    is_json = "json" in (r.headers.get("Content-Type") or "")
+    why = None
+    if is_json:
+        try:
+            why = (r.json() or {}).get("error")
+        except ValueError:
+            why = None
+    if why:
+        msg = why
+    elif r.status_code in (401, 403):
+        msg = (f"Архів {base} відповів {r.status_code}, але не сам — схоже, запит відсікає проксі "
+               f"чи захист від ботів (напр. Cloudflare) перед ним")
+    elif r.status_code == 404:
+        msg = f"Архів {base} не знає цієї адреси (код 404) — стара версія або неправильна адреса"
+    elif r.status_code >= 500:
+        msg = f"Архів {base} зараз не працює як слід (код {r.status_code}) — може, саме перезапускається"
+    else:
+        msg = f"Архів {base} відповів кодом {r.status_code}"
+    print(f"  ✗ Зовнішній архів {base}{path}: {msg}")
+    return None, msg
 
 
 @bp.route("/api/external-archives")
