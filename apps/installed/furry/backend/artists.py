@@ -142,6 +142,28 @@ def api_artists():
         return jsonify({"error": str(e)}), 503
 
 
+# ── Автори для підключених архівів ───────────────────────────────────
+
+@bp.route("/api/external-access/artists")
+def api_external_access_artists():
+    """Автори цього архіву для вибору автора в підключеному архіві (без прихованих для ключа тек)."""
+    from blueprints.federation import external_key_or_403
+    key_id, hidden = external_key_or_403()
+    if key_id is None:
+        return hidden
+    f = flask_request.args.get("filter", "all")
+    rows = artists_cache.get()["views"].get(f if f in _VIEW_KINDS else "all", [])
+    return jsonify([{"id": r["id"], "artist_name": r["artist_name"], "folder_name": r["folder_name"],
+                     "total_files": r["total_files"]} for r in rows if r["folder_name"] not in hidden])
+
+
+@bp.route("/api/external-archives/<archive_id>/artists")
+def api_external_archive_artists(archive_id):
+    from blueprints.federation import proxy_external_list
+    return proxy_external_list(archive_id, "/api/external-access/artists", "artists",
+                               {"filter": flask_request.args.get("filter", "all")})
+
+
 # ── Улюблені автори (у кожного користувача свої) ─────────────────────
 
 def favorite_artist_ids(user_id) -> set:

@@ -503,6 +503,59 @@ def api_external_archives_status(archive_id):
     return jsonify({"active": True})
 
 
+def proxy_external_list(archive_id, host_path: str, key: str, params=None):
+    """
+    Спільний «список з чужого архіву» (серії, автори, теги): запит до його
+    /api/external-access/... з ключем. Стара версія на тому боці (404) —
+    {"unsupported": True}, щоб інтерфейс просто сховав відповідну кнопку.
+    """
+    import requests as req
+    cfg = _get_external_cfg_or_404(archive_id)
+    if not cfg:
+        return jsonify({"error": "Архів не знайдено"}), 404
+    base = cfg.get("base_url", "").rstrip("/")
+    try:
+        r = req.get(f"{base}{host_path}", params=params or {}, headers={
+            "X-Access-Key": cfg.get("access_key", ""),
+            "X-Identity":   cfg.get("my_identity", ""),
+        }, timeout=20)
+    except req.exceptions.RequestException as e:
+        return jsonify({"error": f"Не вдалося звернутись до архіву: {e}"}), 502
+    if r.status_code == 404:
+        return jsonify({"unsupported": True, key: []})
+    if r.status_code == 403:
+        return jsonify({"error": "Ключ доступу недійсний або деактивований власником архіву"}), 403
+    try:
+        return jsonify({key: r.json()})
+    except ValueError:
+        return jsonify({"error": "Архів відповів незрозуміло"}), 502
+
+
+def external_key_or_403():
+    """(key_id, hidden_folders) для запиту ззовні, або (None, відповідь 403)."""
+    valid, key_id = _validate_external_key(flask_request.headers.get("X-Access-Key", ""),
+                                           flask_request.headers.get("X-Identity", ""))
+    if not valid:
+        return None, (jsonify({"error": "Ключ доступу недійсний або деактивований"}), 403)
+    return key_id, get_hidden_folders_for_key(key_id)
+
+
+@bp.route("/api/external-access/tags")
+def api_external_access_tags():
+    """Теги цього архіву — для вибору тегів у підключеному архіві (назви; id в кожного свої)."""
+    key_id, hidden = external_key_or_403()
+    if key_id is None:
+        return hidden
+    from blueprints.tags import tags_cache
+    return jsonify([{"id": t["id"], "name": t["name"], "category": t["category"],
+                     "usage_count": t["usage_count"]} for t in (tags_cache.get() or []) if t["usage_count"]])
+
+
+@bp.route("/api/external-archives/<archive_id>/tags")
+def api_external_archive_tags(archive_id):
+    return proxy_external_list(archive_id, "/api/external-access/tags", "tags")
+
+
 def _get_external_cfg_or_404(archive_id):
     archives = get_external_archives(current_user_id())
     # Далі майже завжди йде запит до ІНШОГО сервера (до 40 с). Зʼєднання з
