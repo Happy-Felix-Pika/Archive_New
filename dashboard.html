@@ -725,6 +725,7 @@
         <div class="pending-toolbar">
           <button class="btn btn-primary btn-sm" onclick="chatShowNewMessageModal()">✎ Нове повідомлення</button>
           <button class="btn btn-ghost" onclick="loadChatConversations()" data-i18n="btn.refresh">↻ Оновити</button>
+          <button class="btn btn-ghost btn-sm" id="chat-notify-btn" style="display:none" onclick="chatEnableNotifications()">🔔 Увімкнути сповіщення</button>
         </div>
         <div id="chat-conversations-list" style="display:flex;flex-direction:column;gap:6px;margin-top:12px"></div>
       </div>
@@ -996,8 +997,8 @@
 
 <script src="/i18n.js"></script>
 <script src="/static/i18n.js?v=1"></script>
-<script src="/static/dashboard.js?v=90"></script>
-<script src="/static/apps.js?v=6"></script>
+<script src="/static/dashboard.js?v=92"></script>
+<script src="/static/apps.js?v=8"></script>
 
 </body>
 </html>

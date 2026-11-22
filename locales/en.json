@@ -1532,5 +1532,9 @@
  "Теки": "Folders",
  "Улюблені": "Favorites",
  "Файл завеликий (до 100 МБ)": "File is too large (up to 100 MB)",
- "до 100 МБ · файл не потрапляє в архів": "up to 100 MB · the file isn't added to the archive"
+ "до 100 МБ · файл не потрапляє в архів": "up to 100 MB · the file isn't added to the archive",
+ "chat.read": "Read",
+ "chat.sent": "Sent, not read yet",
+ "Увімкнути сповіщення": "Enable notifications",
+ "Сповіщення увімкнено": "Notifications enabled"
 }

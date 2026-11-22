@@ -185,21 +185,107 @@ def api_chat_verify():
         row = q(db, f"""SELECT id, owner_user_id FROM chat_messages
                         WHERE deliver_token=%s AND direction='out'
                           AND created_at > NOW() - INTERVAL {TOKEN_MINUTES} MINUTE""", (_sha(token),))
-        if not row:
-            return jsonify({"ok": False}), 404
-        name = _my_name(db, row["owner_user_id"])
-        with db.cursor() as cur:
-            cur.execute("UPDATE chat_messages SET deliver_token=NULL WHERE id=%s", (row["id"],))
+        if row:
+            with db.cursor() as cur:
+                cur.execute("UPDATE chat_messages SET deliver_token=NULL WHERE id=%s", (row["id"],))
+        else:
+            row = q(db, f"""SELECT owner_user_id FROM chat_verify_tokens WHERE token_hash=%s
+                            AND created_at > NOW() - INTERVAL {TOKEN_MINUTES} MINUTE""", (_sha(token),))
+            if not row:
+                return jsonify({"ok": False}), 404
+            with db.cursor() as cur:
+                cur.execute("DELETE FROM chat_verify_tokens WHERE token_hash=%s", (_sha(token),))
         db.commit()
-        return jsonify({"ok": True, "sender_name": name})
+        return jsonify({"ok": True, "sender_name": _my_name(db, row["owner_user_id"])})
     finally:
         db.close()
+
+
+def _verify_sender(sender: str, token: str, name: str):
+    """«Це справді ти?» — питаємо сам архів-відправник за його адресою.
+    Архів за проксі може не знати своєї схеми: http → пробуємо й https;
+    після редиректів беремо справжню адресу. → (ok, справжня адреса, причина)."""
+    import requests as req
+    candidates = [sender]
+    if sender.startswith("http://"):
+        candidates.append("https://" + sender[7:])
+    why = ""
+    for base in candidates:
+        try:
+            v = req.get(f"{base}/api/external-access/chat/verify", params={"token": token}, timeout=10)
+            j = v.json() if "json" in (v.headers.get("Content-Type") or "") else {}
+            if v.status_code == 200 and j.get("ok") and j.get("sender_name") == name:
+                return True, _base_of(v.url), ""
+            why = f"{base}: код {v.status_code}"
+        except Exception as e:
+            why = f"{base}: {type(e).__name__}"
+    return False, sender, why
+
+
+# ── «Прочитано» між архівами ─────────────────────────────────────────
+
+def send_read_receipt(uid: int, peer_url: str, peer_identity: str):
+    """Я відкрив розмову — кажемо архіву співрозмовника, що його повідомлення прочитані.
+    Тихо й у фоні: не вийшло — ну й гаразд, лишаться «✓»."""
+    import threading
+    me_url = my_public_url()
+
+    def run():
+        import requests as req
+        token = secrets.token_urlsafe(24)
+        db = get_db()
+        try:
+            name = _my_name(db, uid)
+            with db.cursor() as cur:
+                cur.execute("INSERT INTO chat_verify_tokens (token_hash, owner_user_id) VALUES (%s,%s)",
+                            (_sha(token), uid))
+                cur.execute(f"DELETE FROM chat_verify_tokens WHERE created_at < NOW() - INTERVAL {TOKEN_MINUTES} MINUTE")
+            db.commit()
+        finally:
+            db.close()
+        try:
+            req.post(f"{peer_url}/api/external-access/chat/read",
+                     json={"reader_base_url": me_url, "reader_name": name,
+                           "to_nick": peer_identity or "", "token": token}, timeout=15)
+        except Exception:
+            pass
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+@bp.route("/api/external-access/chat/read", methods=["POST"])
+def api_chat_read_receipt():
+    d = flask_request.get_json(silent=True) or {}
+    reader = normalize_url(d.get("reader_base_url"))
+    name = (d.get("reader_name") or "").strip()[:100]
+    to_nick = (d.get("to_nick") or "").strip()
+    token = d.get("token") or ""
+    if not reader or not name or not token:
+        return jsonify({"error": "Некоректні дані"}), 400
+    ok, real, why = _verify_sender(reader, token, name)
+    if not ok:
+        return jsonify({"error": f"Не підтверджено ({why})"}), 403
+    host = urlsplit(real).netloc
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute("""UPDATE chat_messages m JOIN users u ON u.id = m.owner_user_id
+                           SET m.read_at = NOW()
+                           WHERE m.direction='out' AND m.read_at IS NULL AND m.peer_identity=%s
+                             AND SUBSTRING_INDEX(m.peer_url,'://',-1)=%s
+                             AND (LOWER(u.display_name)=LOWER(%s)
+                                  OR (COALESCE(u.display_name,'')='' AND LOWER(SUBSTRING_INDEX(u.email,'@',1))=LOWER(%s)))""",
+                        (name, host, to_nick, to_nick))
+            n = cur.rowcount
+        db.commit()
+    finally:
+        db.close()
+    return jsonify({"ok": True, "marked": n})
 
 
 @bp.route("/api/external-access/chat/inbox", methods=["POST"])
 def api_chat_inbox():
     """Повідомлення від будь-якого архіву — після перевірки, що воно справді звідти."""
-    import requests as req
     d = flask_request.get_json(silent=True) or {}
     sender = normalize_url(d.get("sender_base_url"))
     name = (d.get("sender_name") or "").strip()[:100]
@@ -238,23 +324,9 @@ def api_chat_inbox():
     finally:
         db.close()
 
-    # «Це справді ти?» — питаємо сам архів-відправник за його адресою.
-    # Архів за проксі може не знати своєї схеми: http → пробуємо й https;
-    # після редиректів запамʼятовуємо справжню адресу — на неї й відповідатимемо.
-    candidates = [sender]
-    if sender.startswith("http://"):
-        candidates.append("https://" + sender[7:])
-    ok, why = False, ""
-    for base in candidates:
-        try:
-            v = req.get(f"{base}/api/external-access/chat/verify", params={"token": token}, timeout=10)
-            j = v.json() if "json" in (v.headers.get("Content-Type") or "") else {}
-            if v.status_code == 200 and j.get("ok") and j.get("sender_name") == name:
-                ok, sender = True, _base_of(v.url)
-                break
-            why = f"{base}: код {v.status_code}"
-        except Exception as e:
-            why = f"{base}: {type(e).__name__}"
+    ok, real, why = _verify_sender(sender, token, name)
+    if ok:
+        sender = real
     if not ok:
         print(f"  ✗ Чат: не підтверджено відправника {name} ({why})")
         return jsonify({"error": f"Не вдалося підтвердити відправника — його архів недоступний з боку адресата ({why}). "
