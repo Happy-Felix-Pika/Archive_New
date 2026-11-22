@@ -17,21 +17,23 @@ def api_chat_conversations():
     uid = current_user_id()
     db  = get_db()
     rows = qq(db, """
-        SELECT peer_label, peer_local_user_id, peer_archive_id, peer_identity,
+        SELECT peer_label, peer_local_user_id, peer_archive_id, peer_identity, peer_url,
                body AS last_body, created_at AS last_at,
+               EXISTS(SELECT 1 FROM chat_blocked b WHERE b.owner_user_id=%s AND b.peer_url=m1.peer_url) AS blocked,
                (SELECT COUNT(*) FROM chat_messages m2
                 WHERE m2.owner_user_id=%s AND m2.direction='in' AND m2.is_read=0
                   AND ((m2.peer_local_user_id <=> m1.peer_local_user_id)
                    AND (m2.peer_archive_id <=> m1.peer_archive_id)
+                   AND (m2.peer_url <=> m1.peer_url)
                    AND (m2.peer_identity <=> m1.peer_identity))
                ) AS unread
         FROM chat_messages m1
         WHERE owner_user_id=%s AND id IN (
             SELECT MAX(id) FROM chat_messages WHERE owner_user_id=%s
-            GROUP BY peer_local_user_id, peer_archive_id, peer_identity
+            GROUP BY peer_local_user_id, peer_archive_id, peer_url, peer_identity
         )
         ORDER BY last_at DESC
-    """, (uid, uid, uid))
+    """, (uid, uid, uid, uid))
     db.close()
     for r in rows:
         if r["last_at"]: r["last_at"] = r["last_at"].isoformat()
@@ -45,10 +47,14 @@ def api_chat_messages():
     peer_local_user_id = flask_request.args.get("peer_local_user_id")
     peer_archive_id     = flask_request.args.get("peer_archive_id")
     peer_identity        = flask_request.args.get("peer_identity")
+    peer_url             = flask_request.args.get("peer_url")
 
     where = ["owner_user_id=%s"]
     args  = [uid]
-    if peer_local_user_id:
+    if peer_url:
+        where.append("peer_url=%s AND peer_identity=%s")
+        args.extend([peer_url, peer_identity or ""])
+    elif peer_local_user_id:
         where.append("peer_local_user_id=%s")
         args.append(int(peer_local_user_id))
     elif peer_archive_id and peer_identity:
@@ -87,6 +93,17 @@ def api_chat_send():
         return jsonify({"error": "Порожнє повідомлення"}), 400
 
     uid = current_user_id()
+    if body_data.get("peer_url"):
+        # будь-який архів за адресою — без взаємного підключення
+        from .by_url import MAX_LEN, normalize_url, send_by_url
+        url = normalize_url(body_data.get("peer_url"))
+        if not url:
+            return jsonify({"error": "Невірна адреса архіву (потрібна https://, http — лише в локальній мережі)"}), 400
+        if len(msg_text) > MAX_LEN:
+            return jsonify({"error": f"Задовге повідомлення (до {MAX_LEN} символів)"}), 400
+        ok, warning, real = send_by_url(uid, url, peer_identity, msg_text)
+        return jsonify({"ok": True, **({"warning": warning} if warning else {}), "peer_url": url,
+                        **({"peer_identity": real} if real else {})})
     db  = get_db()
     sender = q(db, "SELECT display_name, email FROM users WHERE id=%s", (uid,))
     sender_label = sender["display_name"] or sender["email"]

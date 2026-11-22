@@ -1502,5 +1502,20 @@
  "також: {0}": "also: {0}",
  "тека {0} ({1} файл(ів)": "folder {0} ({1} file(s)",
  "тека знову в кошику ({0} файл(ів)": "folder is back in the trash ({0} file(s)",
- "Теку відновлено ({0} файл(ів)": "Folder restored ({0} file(s)"
+ "Теку відновлено ({0} файл(ів)": "Folder restored ({0} file(s)",
+ "Архів за адресою": "Archive by address",
+ "Підключений архів": "Connected archive",
+ "Кому (нік) — порожньо = власнику архіву": "To (nickname) — empty = archive owner",
+ "Підключати архіви одне до одного не треба — досить адреси": "No need to connect the archives to each other — the address is enough",
+ "https://адреса-архіву.com": "https://archive-address.com",
+ "✓ Розблокувати": "✓ Unblock",
+ "🚫 Заблокувати архів": "🚫 Block archive",
+ "Розблокувати": "Unblock",
+ "Заблокувати архів": "Block archive",
+ "Не приймати повідомлень з {0}": "Stop accepting messages from {0}",
+ "Архів заблоковано": "Archive blocked",
+ "Архів розблоковано": "Archive unblocked",
+ "Впиши адресу архіву": "Enter the archive address",
+ "заблоковано": "blocked",
+ "власник": "owner"
 }
