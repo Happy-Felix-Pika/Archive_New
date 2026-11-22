@@ -10,8 +10,8 @@
         <div style="font-weight:600;margin-bottom:6px">🔎 Пошук джерел</div>
         <div class="muted" style="font-size:12.5px;line-height:1.5">
           Для картинок без посилання на оригінал архів сам шукає, звідки вони:
-          спершу точний збіг файлу на e621, потім схожі картинки (FuzzySearch — e621, Inkbunny,
-          FurAffinity, Twitter…; і пошук e621). Знайдене впевнено — одразу ставиться посилання на
+          спершу точний збіг файлу на e621, потім пошук за картинкою — Fluffle (e621, Inkbunny,
+          FurAffinity, Weasyl…; без ключа), FuzzySearch (якщо є ключ) і пошук e621. Знайдене впевнено — одразу ставиться посилання на
           оригінал і теги (з e621 чи Inkbunny). Сумнівне — у «На перевірку → 🔎 Джерела».
           Файли нікуди не переносяться.
         </div>
@@ -31,13 +31,16 @@
       <div class="card">
         <div style="font-weight:600;margin-bottom:10px">Налаштування</div>
         <div class="field">
-          <label>API-ключ FuzzySearch <span class="muted" style="font-weight:400">(на ньому працюють Telegram-боти пошуку; без ключа — лише e621)</span></label>
+          <label>API-ключ FuzzySearch <span class="muted" style="font-weight:400">(необов'язково — ключ видає автор сервісу, Syfaro; без нього працюють Fluffle й e621)</span></label>
           <div style="display:flex;gap:8px">
             <input type="password" id="sf-key" placeholder="ключ" autocomplete="off" style="flex:1">
             <button class="btn btn-ghost btn-sm" onclick="sourcefindSaveKey()">Зберегти</button>
           </div>
           <div id="sf-key-state" class="muted" style="font-size:11.5px;margin-top:4px"></div>
         </div>
+        <label style="font-size:13px;display:flex;gap:8px;align-items:center;margin-top:6px">
+          <input type="checkbox" id="sf-fluffle" onchange="sourcefindSaveOpt('use_fluffle', this.checked)"> шукати через Fluffle (без ключа: e621, Inkbunny, FurAffinity, Weasyl, Bluesky)
+        </label>
         <label style="font-size:13px;display:flex;gap:8px;align-items:center;margin-top:6px">
           <input type="checkbox" id="sf-iqdb" onchange="sourcefindSaveIqdb(this.checked)"> шукати схожі й у власному пошуку e621 (IQDB)
         </label>
@@ -63,6 +66,7 @@
       ${c.review ? `<div style="margin-top:10px"><a href="#" onclick="showPage('pending');pendingSetTab('sources');return false">→ Переглянути сумнівні</a></div>` : ''}`;
     document.getElementById('sf-key-state').textContent = s.has_fuzzy_key ? '✓ ключ збережено' : 'ключ не вказано';
     document.getElementById('sf-iqdb').checked = !!s.use_iqdb;
+    document.getElementById('sf-fluffle').checked = s.use_fluffle !== false;
     const j = s.job, running = j && (j.status === 'running' || j.status === 'pending');
     document.getElementById('sf-run').disabled = running;
     document.getElementById('sf-cancel').style.display = running ? '' : 'none';
@@ -101,6 +105,11 @@
     document.getElementById('sf-key').value = '';
     toast(v ? 'Ключ збережено' : 'Ключ прибрано', 'ok');
     sourcefindRefresh();
+  };
+
+  window.sourcefindSaveOpt = async function (key, on) {
+    await fetch(`${BASE()}/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ [key]: on }) });
   };
 
   window.sourcefindSaveIqdb = async function (on) {

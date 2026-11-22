@@ -3,9 +3,10 @@
 
 Порядок (від дешевого й точного до повільного):
   1. e621 за MD5 — той самий файл байт у байт (точно, миттєво).
-  2. FuzzySearch — перцептивний хеш по e621, Inkbunny, FurAffinity, Twitter,
-     Weasyl… (на ньому ж працюють Telegram-боти пошуку). Потрібен API-ключ.
-  3. e621 IQDB — схожі картинки на e621 (власний пошук e621, ключ e621).
+  2. Fluffle — пошук за картинкою по e621, Inkbunny, FurAffinity, Weasyl,
+     Bluesky… Без ключа: лише User-Agent з назвою застосунку.
+  3. FuzzySearch — перцептивний хеш (на ньому працюють Telegram-боти). Потрібен API-ключ.
+  4. e621 IQDB — схожі картинки на e621 (власний пошук e621, ключ e621).
 
 Знайдене впевнено — застосовуємо одразу: посилання на оригінал і теги.
 Сумнівне — у «На перевірку». Пріоритет джерел: e621 → Inkbunny → решта.
@@ -21,6 +22,11 @@ import time
 SITE_PRIORITY = {"e621": 0, "inkbunny": 1, "furaffinity": 2, "weasyl": 3, "twitter": 4}
 
 FUZZY_URLS = ["https://api-next.fuzzysearch.net/v1/image", "https://api.fuzzysearch.net/image"]
+FLUFFLE_URL = "https://api.fluffle.xyz/exact-search-by-file"
+USER_AGENT = "Archive-sourcefind/1.0 (by Happy-Felix-Pika on GitHub)"
+FLUFFLE_PLATFORMS = {"e621": "e621", "furaffinity": "furaffinity", "inkbunny": "inkbunny",
+                     "weasyl": "weasyl", "twitter": "twitter", "bluesky": "bluesky",
+                     "deviantart": "deviantart", "furrynetwork": "furrynetwork"}
 FUZZY_SURE = 3        # відстань хешів: 0–3 — та сама картинка
 FUZZY_MAYBE = 7
 IQDB_SURE = 90        # схожість e621 IQDB у відсотках
@@ -64,9 +70,10 @@ def _site_from_url(u: str) -> tuple[str | None, str | None]:
 
 
 class Finder:
-    def __init__(self, fuzzy_key: str = "", use_iqdb: bool = True, log=print):
+    def __init__(self, fuzzy_key: str = "", use_iqdb: bool = True, log=print, use_fluffle: bool = True):
         self.fuzzy_key = (fuzzy_key or "").strip()
         self.use_iqdb = use_iqdb
+        self.use_fluffle = use_fluffle
         self.log = log
         self._e6 = None
         self._ib = None
@@ -116,10 +123,19 @@ class Finder:
 
         small = _shrink(content, ext)
 
-        # 2. FuzzySearch
+        def done():
+            return any(c["sure"] and c["site"] in ("e621", "inkbunny") for c in out)
+
+        # 2. Fluffle — без ключа
+        if self.use_fluffle:
+            out += self._fluffle(content)
+        if done():
+            return out
+
+        # 3. FuzzySearch
         if self.fuzzy_key:
             out += self._fuzzy(small)
-        if any(c["sure"] and c["site"] in ("e621", "inkbunny") for c in out):
+        if done():
             return out
 
         # 3. e621 IQDB
@@ -133,6 +149,49 @@ class Finder:
                 "artists": [a for a in (tags.get("artist") or []) if a not in ("conditional_dnp", "sound_warning", "unknown_artist")],
                 "method": method, "score": score, "sure": sure,
                 "sources": p.get("sources") or [], "_post": p}
+
+    def _fluffle(self, content: bytes) -> list:
+        """Fluffle: match exact — впевнено; probable — на перевірку; unlikely — пропускаємо."""
+        import requests
+        img = _shrink_min_side(content, 256)
+        try:
+            r = requests.post(FLUFFLE_URL, headers={"User-Agent": USER_AGENT},
+                              files={"file": ("image.png", img, "image/png")}, data={"limit": 8}, timeout=60)
+        except Exception as e:
+            self.log(f"  ⚠ Fluffle: {e}")
+            self.errors.append(f"Fluffle: {e}")
+            return []
+        if r.status_code == 429:
+            time.sleep(3)
+            self.errors.append("Fluffle: забагато запитів (429)")
+            return []
+        if r.status_code in (415, 422):
+            return []                                # формат/битий файл — не їхня вина й не наша помилка
+        if r.status_code != 200:
+            self.log(f"  ⚠ Fluffle: код {r.status_code}")
+            self.errors.append(f"Fluffle: код {r.status_code}")
+            return []
+        try:
+            items = (r.json() or {}).get("results") or []
+        except ValueError:
+            return []
+        out = []
+        for it in items:
+            match = str(it.get("match") or "").lower()
+            if match not in ("exact", "probable"):
+                continue
+            plat = re.sub(r"[^a-z0-9]", "", str(it.get("platform") or "").lower())
+            site = FLUFFLE_PLATFORMS.get(plat, plat)
+            # id виду «e621_123», «inkbunny_456-789» (робота-файл), «furAffinity_1011»
+            raw_id = str(it.get("id") or "").split("_", 1)[-1]
+            sid = raw_id.split("-", 1)[0] if site == "inkbunny" else raw_id
+            url = it.get("url") or page_url(site, sid)
+            if site in ("e621", "inkbunny", "furaffinity", "weasyl"):
+                url = page_url(site, sid) or url
+            out.append({"site": site, "site_id": sid, "url": url,
+                        "artists": [a.get("name") for a in (it.get("authors") or []) if a.get("name")],
+                        "method": "fluffle", "score": float(it.get("distance") or 0), "sure": match == "exact"})
+        return out
 
     def _fuzzy(self, img: bytes) -> list:
         import requests
@@ -245,7 +304,7 @@ def pick(cands: list) -> dict | None:
         return None
 
     def key(c):
-        q = -c["score"] if c["method"] == "iqdb" else (c["score"] if c["method"] == "fuzzy" else -1000)
+        q = {"iqdb": -c["score"], "fluffle": -c["score"], "fuzzy": c["score"]}.get(c["method"], -1000)
         return (SITE_PRIORITY.get(c["site"], 9), q)
     return sorted(sure, key=key)[0]
 
@@ -280,6 +339,27 @@ def _shrink(content: bytes, ext: str) -> bytes:
         im.thumbnail((1600, 1600))
         buf = io.BytesIO()
         im.save(buf, "JPEG", quality=90)
+        return buf.getvalue()
+    except Exception:
+        return content
+
+
+def _shrink_min_side(content: bytes, target: int) -> bytes:
+    """Як радить Fluffle: менша сторона ~256 px, PNG (без втрат). Швидше й у межах 4 МБ."""
+    try:
+        from PIL import Image
+        im = Image.open(io.BytesIO(content))
+        try:
+            im.seek(0)
+        except Exception:
+            pass
+        im = im.convert("RGBA" if im.mode in ("RGBA", "LA", "P") else "RGB")
+        w, h = im.size
+        if min(w, h) > target:
+            k = target / min(w, h)
+            im = im.resize((max(1, round(w * k)), max(1, round(h * k))))
+        buf = io.BytesIO()
+        im.save(buf, "PNG")
         return buf.getvalue()
     except Exception:
         return content

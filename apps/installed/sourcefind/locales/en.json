@@ -53,5 +53,8 @@
  "схожість {0}": "similarity {0}",
  "той самий файл": "same file",
  "шукати схожі й у власному пошуку e621 (IQDB)": "also search similar images with e621's own search (IQDB)",
- "ще раз і ті, що не знайшлись": "retry the ones not found before"
+ "ще раз і ті, що не знайшлись": "retry the ones not found before",
+ "шукати через Fluffle (без ключа: e621, Inkbunny, FurAffinity, Weasyl, Bluesky)": "search with Fluffle (no key: e621, Inkbunny, FurAffinity, Weasyl, Bluesky)",
+ "необов'язково — ключ видає автор сервісу, Syfaro; без нього працюють Fluffle й e621": "optional — the key is issued by the service author, Syfaro; Fluffle and e621 work without it",
+ "Fluffle: імовірно": "Fluffle: probable"
 }
