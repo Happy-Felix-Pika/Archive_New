@@ -553,18 +553,27 @@ class DatabaseTracker:
             if cur.fetchone():
                 download_id = 0          # вже є — нічого не додаємо
             else:
+                # Файл з таким шляхом уже може бути в ядрі (залитий через «Каталог»,
+                # Nextcloud тощо) — тоді беремо його запис, а не падаємо на uniq_path
                 cur.execute("""
                     INSERT INTO files (storage_id, rel_path, name, ext, size_bytes,
                                        width, height, md5_hash, created_at)
                     VALUES ('default',%s,%s,%s,%s,%s,%s,%s,NOW())
+                    ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id),
+                        md5_hash   = COALESCE(md5_hash, VALUES(md5_hash)),
+                        width      = COALESCE(width, VALUES(width)),
+                        height     = COALESCE(height, VALUES(height)),
+                        size_bytes = COALESCE(size_bytes, VALUES(size_bytes))
                 """, (rel_path, filename, file_ext, size_bytes, width, height, md5_hash))
                 download_id = cur.lastrowid
                 cur.execute("""
-                    INSERT INTO furry_posts (file_id, artist_id, post_id, source, post_url,
+                    INSERT IGNORE INTO furry_posts (file_id, artist_id, post_id, source, post_url,
                                              page_num, subfolder, pool_order, downloaded_at)
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,NOW())
                 """, (download_id, artist_id, post_id, source, post_url,
                       page_num, subfolder, pool_order))
+                if not cur.rowcount:
+                    return 0             # цей файл уже належить іншому запису
                 if phash_val is not None:
                     cur.execute("""INSERT INTO file_phash (file_id, phash) VALUES (%s,%s)
                                    ON DUPLICATE KEY UPDATE phash=VALUES(phash)""",
@@ -3520,7 +3529,11 @@ class FurryArchiver:
                     cur.execute("""
                         UPDATE files SET md5_hash=%s, width=%s, height=%s
                         WHERE id=%s
-                    """, (res['md5_hash'], res['phash_val'], res['width'], res['height'], existing_row['id']))
+                    """, (res['md5_hash'], res['width'], res['height'], existing_row['id']))
+                    if res.get('phash_val') is not None:
+                        cur.execute("""INSERT INTO file_phash (file_id, phash) VALUES (%s,%s)
+                                       ON DUPLICATE KEY UPDATE phash=VALUES(phash)""",
+                                    (existing_row['id'], res['phash_val']))
                 added += 1
             else:
                 post_id, page_num, _, source, post_url = _sync_parse(filename, f.get('subfolder'))
