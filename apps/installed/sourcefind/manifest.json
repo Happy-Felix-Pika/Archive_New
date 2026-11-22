@@ -1,0 +1,21 @@
+{
+  "id": "sourcefind",
+  "name": "Пошук джерел",
+  "version": "1.0.0",
+  "description": "Знаходить оригінали файлів (e621, Inkbunny, FurAffinity…) за самою картинкою: підставляє посилання на джерело й теги",
+  "author": "Felix",
+  "core_api_version": 1,
+  "min_core_version": "1.0.0",
+  "dependencies": {},
+  "permissions": ["database", "storage", "files", "jobs"],
+  "backend": "backend",
+  "table_prefix": "srcfind_",
+  "menu": [
+    {"id": "main", "label": {"uk": "Пошук джерел", "ru": "Поиск источников", "en": "Find sources"},
+     "icon": "🔎", "order": 55, "admin_only": true, "roles": ["admin", "moderator"]}
+  ],
+  "pages": [
+    {"id": "main", "js": "static/sourcefind.js", "init": "sourcefindPageInit"}
+  ],
+  "scripts": ["static/contrib.js"]
+}
