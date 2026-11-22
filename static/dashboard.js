@@ -1408,6 +1408,7 @@ let _galArtistId = '';
 let _galTagIds   = new Set();
 let _allTags     = [];
 let _allTagsLoaded = false;
+let _allTagsRetry = null;
 
 function galSetFilter(f) {
   _galFilter = f;
@@ -1958,8 +1959,13 @@ async function galLoadAllTags() {
       if (!(r.unsupported || r.error)) _extTagsMerge(aid, r.tags || []);
       if (_galSource === aid) _allTags = [...(_extTagCache[aid]?.values() || [])];
     } else {
-      const r = await fetch(`${API}/api/tags`).then(r => r.json());
+      const r = await fetch(`${API}/api/tags`).then(r => r.json()).catch(() => null);
       if (Array.isArray(r)) { _allTags = r; _allTagsLoaded = true; }
+      else {
+        // ще рахується (або мережа/проксі не дочекались) — спробуємо ще раз
+        clearTimeout(_allTagsRetry);
+        _allTagsRetry = setTimeout(() => { if (_galSource === 'local' && !_allTagsLoaded) galLoadAllTags(); }, 4000);
+      }
     }
     galRenderTagPicker();
     galRenderAllTagsList();
